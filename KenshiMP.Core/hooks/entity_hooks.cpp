@@ -498,67 +498,79 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
     // the original function. Safe here because loading creates are sequential
     // (not reentrant), so the wrapper's global slots don't conflict.
     if (!coreRef.IsConnected()) {
-        // Capture pre-call data + factory + faction from the FIRST call only.
-        // Then DISABLE the hook so all subsequent loading creates go through
-        // the ORIGINAL function with zero hook overhead — no MovRaxRsp wrapper,
-        // no stack manipulation, nothing that could corrupt game state.
-        if (!s_loadingCapturesDone) {
-            if (templateData && !s_havePreCallData) {
-                if (SEH_MemcpySafe(s_preCallStruct, templateData, REQUEST_STRUCT_SIZE)) {
-                    s_havePreCallData = true;
-                    coreRef.GetSpawnManager().SetPreCallData(
-                        s_preCallStruct, REQUEST_STRUCT_SIZE,
-                        reinterpret_cast<uintptr_t>(templateData));
-                    coreRef.GetSpawnManager().SetSavedRequestStruct(
-                        s_preCallStruct, REQUEST_STRUCT_SIZE);
+        // ── SAFE-MODE: pure passthrough on the loading branch too ──
+        // Empirical finding (KNOWN_ISSUES.md): the loading-branch first capture
+        // *also* triggers the silent termination. In session 39364 a Singleplayer
+        // start fired the capture for "Dust Boss", logged "detour returning r=...",
+        // and Kenshi terminated immediately afterward. Same signature as the
+        // connected-branch crash. Until a debugger pins it down, do nothing here:
+        // no SEH_MemcpySafe of templateData, no SetFactory, no SEH_FeedSpawnManager,
+        // no faction read. Just CallOriginalCreate and return.
+        //
+        // Trade-off: the spawn system's m_managerPointer / pre-call data / factory
+        // pointer are never captured, so SpawnManager will not be able to spawn
+        // remote players. shared_save_sync still works because it locates the
+        // existing in-world Player 1 / Player 2 characters by NAME, not by spawn.
+        // That is enough for "two people share the same world and see each other"
+        // even with the spawn pipeline disabled.
+        spdlog::info("entity_hooks: SAFE-MODE loading branch — pure passthrough "
+                     "(createNum={}, td=0x{:X})",
+                     createNum, reinterpret_cast<uintptr_t>(templateData));
+        spdlog::default_logger()->flush();
+        void* r = CallOriginalCreate(factory, templateData);
+        spdlog::info("entity_hooks: SAFE-MODE loading branch returning r=0x{:X}",
+                     reinterpret_cast<uintptr_t>(r));
+        spdlog::default_logger()->flush();
+        s_hookDepth--;
+        return r;
+
+        // ── ORIGINAL CAPTURE PATH — disabled by the early return above ──
+        // Kept under `if constexpr (false)` so it stays compilable as a
+        // reference for whoever re-enables it once the heap-corruption root
+        // cause is found. The early return above is the live behaviour.
+        if constexpr (false) {
+            if (!s_loadingCapturesDone) {
+                if (templateData && !s_havePreCallData) {
+                    if (SEH_MemcpySafe(s_preCallStruct, templateData, REQUEST_STRUCT_SIZE)) {
+                        s_havePreCallData = true;
+                        coreRef.GetSpawnManager().SetPreCallData(
+                            s_preCallStruct, REQUEST_STRUCT_SIZE,
+                            reinterpret_cast<uintptr_t>(templateData));
+                        coreRef.GetSpawnManager().SetSavedRequestStruct(
+                            s_preCallStruct, REQUEST_STRUCT_SIZE);
+                    }
                 }
-            }
-            if (factory && !coreRef.GetSpawnManager().IsReady()) {
-                coreRef.GetSpawnManager().SetFactory(factory);
-            }
-
-            void* r = CallOriginalCreate(factory, templateData);
-
-            // Capture faction from this first character (player's squad leader)
-            if (r) {
-                uintptr_t fac = SEH_ReadFaction(r);
-                if (fac != 0) {
-                    s_earlyPlayerFaction.store(fac, std::memory_order_relaxed);
-                    s_earlyFactionLocked.store(true, std::memory_order_relaxed);
-                    UpdateFallbackFaction(fac);
+                if (factory && !coreRef.GetSpawnManager().IsReady()) {
+                    coreRef.GetSpawnManager().SetFactory(factory);
                 }
 
-                // CRITICAL: Feed SpawnManager the first character so it captures
-                // the GameData backpointer and discovers GameDataManager. Without
-                // this, the heap scan has no m_managerPointer and fails on Steam.
-                SEH_FeedSpawnManager(factory, templateData, r);
-            }
+                void* origR = CallOriginalCreate(factory, templateData);
 
-            // Got everything we need — request a DEFERRED disable so the actual
-            // bypass-flag flip happens from OnGameTick, not from inside this
-            // detour's call stack. See s_pendingCreateDisable comment.
-            if (s_havePreCallData && s_savedFactory) {
-                s_loadingCapturesDone = true;
-                spdlog::info("entity_hooks: capture done — requesting deferred disable "
-                             "(r=0x{:X}, fac=0x{:X}, hookDepth={})",
-                             reinterpret_cast<uintptr_t>(r),
-                             s_earlyPlayerFaction.load(std::memory_order_relaxed),
-                             s_hookDepth);
-                s_pendingCreateDisable.store(true, std::memory_order_release);
-                OutputDebugStringA("KMP: Capture done — disable deferred to next tick\n");
-            }
+                if (origR) {
+                    uintptr_t fac = SEH_ReadFaction(origR);
+                    if (fac != 0) {
+                        s_earlyPlayerFaction.store(fac, std::memory_order_relaxed);
+                        s_earlyFactionLocked.store(true, std::memory_order_relaxed);
+                        UpdateFallbackFaction(fac);
+                    }
+                    SEH_FeedSpawnManager(factory, templateData, origR);
+                }
 
-            spdlog::info("entity_hooks: detour returning r=0x{:X} (createNum={}, hookDepth={})",
-                         reinterpret_cast<uintptr_t>(r), createNum, s_hookDepth);
-            s_hookDepth--;
-            return r;
+                if (s_havePreCallData && s_savedFactory) {
+                    s_loadingCapturesDone = true;
+                    s_pendingCreateDisable.store(true, std::memory_order_release);
+                }
+
+                s_hookDepth--;
+                return origR;
+            }
         }
 
         // If we reach here, captures are done but hook is somehow still active.
         // Use CallOriginalCreate which prefers the MovRaxRsp wrapper (correct RSP).
-        void* r = CallOriginalCreate(factory, templateData);
+        void* tailR = CallOriginalCreate(factory, templateData);
         s_hookDepth--;
-        return r;
+        return tailR;
     }
 
     // Connected create counter (minimal logging to avoid heap pressure in MovRaxRsp context)
