@@ -197,15 +197,23 @@ static void EmitJmpAbs(uint8_t* buf, int& off, uintptr_t target) {
 static void EmitRet(uint8_t* buf, int& off) { EmitByte(buf, off, 0xC3); }
 
 // inc dword ptr [rip+disp32] = FF 05 disp32 (6 bytes)
+// LOCK inc dword ptr [rip+disp32] = F0 FF 05 disp32 (7 bytes)
+// LOCK is required for cross-core atomicity. Without it, two threads racing
+// on the reentrancy counter can both observe depth==1 simultaneously and both
+// take the wrapper's normal-path, corrupting the global RSP/return-address
+// save slots and silently terminating the host process when the second thread
+// to RET writes the wrong address back to its caller's stack.
 static void EmitIncMemDword(uint8_t* buf, int& off, uintptr_t base, int dataOff) {
-    int end = off + 6;
+    int end = off + 7;
+    EmitByte(buf, off, 0xF0); // LOCK prefix
     EmitByte(buf, off, 0xFF); EmitByte(buf, off, 0x05);
     EmitU32(buf, off, (uint32_t)RipDisp(base, end, dataOff));
 }
 
-// dec dword ptr [rip+disp32] = FF 0D disp32 (6 bytes)
+// LOCK dec dword ptr [rip+disp32] = F0 FF 0D disp32 (7 bytes) — see EmitIncMemDword
 static void EmitDecMemDword(uint8_t* buf, int& off, uintptr_t base, int dataOff) {
-    int end = off + 6;
+    int end = off + 7;
+    EmitByte(buf, off, 0xF0); // LOCK prefix
     EmitByte(buf, off, 0xFF); EmitByte(buf, off, 0x0D);
     EmitU32(buf, off, (uint32_t)RipDisp(base, end, dataOff));
 }
