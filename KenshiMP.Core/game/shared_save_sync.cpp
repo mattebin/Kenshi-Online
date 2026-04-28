@@ -366,23 +366,31 @@ void Update(float deltaTime) {
         core.GetNativeHud().AddSystemMessage("Both players found! Position sync active.");
         spdlog::info("shared_save_sync: BOTH CHARACTERS FOUND — sync active");
     } else {
-        // Re-validate AnimClass pointers periodically (handles zone-load recreation)
+        // Re-validate AnimClass pointers periodically — char_tracker may have
+        // re-keyed the entry across a zone load, but the *character* pointer
+        // and the identity (faction) are stable. Look up by the cached
+        // character pointer (NOT by name — name-based lookup matches NPC
+        // placeholders and silently swaps s_ownAnimClass to a stationary
+        // 'Player N' NPC, which is exactly the regression that produced the
+        // 4150-packet stuck-coordinates trail in test session 22004).
         static int s_revalidateCounter = 0;
-        if (++s_revalidateCounter % 300 == 0) { // Every ~5 seconds at 60fps
-            auto* tc = char_tracker_hooks::FindByName(s_ownCharName);
-            if (tc && tc->animClassPtr != s_ownAnimClass) {
-                s_ownAnimClass = tc->animClassPtr;
-                s_ownCharPtr = tc->characterPtr;
-                spdlog::debug("shared_save_sync: Own animClass updated to 0x{:X}",
-                              reinterpret_cast<uintptr_t>(s_ownAnimClass));
+        if (++s_revalidateCounter % 300 == 0) { // ~5 seconds at 60 fps
+            if (s_ownCharPtr) {
+                auto* tc = char_tracker_hooks::FindByPtr(s_ownCharPtr);
+                if (tc && tc->animClassPtr != s_ownAnimClass) {
+                    s_ownAnimClass = tc->animClassPtr;
+                    spdlog::debug("shared_save_sync: Own animClass refreshed to 0x{:X}",
+                                  reinterpret_cast<uintptr_t>(s_ownAnimClass));
+                }
             }
-            auto* tc2 = char_tracker_hooks::FindByName(s_otherCharName);
-            if (tc2 && tc2->animClassPtr != s_otherAnimClass) {
-                s_otherAnimClass = tc2->animClassPtr;
-                s_otherCharPtr = tc2->characterPtr;
-                if (s_otherCharPtr) ai_hooks::MarkRemoteControlled(s_otherCharPtr);
-                spdlog::debug("shared_save_sync: Other animClass updated to 0x{:X}",
-                              reinterpret_cast<uintptr_t>(s_otherAnimClass));
+            if (s_otherCharPtr) {
+                auto* tc2 = char_tracker_hooks::FindByPtr(s_otherCharPtr);
+                if (tc2 && tc2->animClassPtr != s_otherAnimClass) {
+                    s_otherAnimClass = tc2->animClassPtr;
+                    if (s_otherCharPtr) ai_hooks::MarkRemoteControlled(s_otherCharPtr);
+                    spdlog::debug("shared_save_sync: Other animClass refreshed to 0x{:X}",
+                                  reinterpret_cast<uintptr_t>(s_otherAnimClass));
+                }
             }
         }
     }
