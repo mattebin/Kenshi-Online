@@ -54,15 +54,28 @@ static bool s_hasRemotePosition = false;
 static std::atomic<float> s_remoteGameSpeed{-1.f};
 
 // ── Faction string → character name mapping ──
+// Server sends faction strings with the originating mod's load-order prefix
+// (e.g. "10-kenshi-online.mod") because that is how Kenshi addresses faction
+// records internally. Strip the mod suffix and load-order prefix before
+// matching so any reasonable variant maps to the same player slot.
+static std::string NormalizeFactionKey(const std::string& faction) {
+    std::string s = faction;
+    auto dot = s.find('.');
+    if (dot != std::string::npos) s.resize(dot);
+    return s;
+}
+
 static std::string FactionToOwnName(const std::string& faction) {
-    if (faction == "10-kenshi-online") return "Player 1";
-    if (faction == "12-kenshi-online") return "Player 2";
+    const std::string s = NormalizeFactionKey(faction);
+    if (s == "10-kenshi-online") return "Player 1";
+    if (s == "12-kenshi-online") return "Player 2";
     return "";
 }
 
 static std::string FactionToOtherName(const std::string& faction) {
-    if (faction == "10-kenshi-online") return "Player 2";
-    if (faction == "12-kenshi-online") return "Player 1";
+    const std::string s = NormalizeFactionKey(faction);
+    if (s == "10-kenshi-online") return "Player 2";
+    if (s == "12-kenshi-online") return "Player 1";
     return "";
 }
 
@@ -78,7 +91,17 @@ void Init() {
     s_otherCharName = FactionToOtherName(faction);
 
     if (s_ownCharName.empty() || s_otherCharName.empty()) {
-        spdlog::error("shared_save_sync: Unknown faction '{}' — cannot determine character names", faction);
+        // This Init runs from Update() every tick until s_initialized flips, so
+        // a hard error here used to flood the log with tens of thousands of
+        // identical lines per minute. Log only on the first failure and on
+        // every transition (i.e. when the faction string changes).
+        static std::string s_lastWarnedFaction;
+        if (faction != s_lastWarnedFaction) {
+            s_lastWarnedFaction = faction;
+            spdlog::error("shared_save_sync: Unknown faction '{}' — cannot determine "
+                          "character names (suppressing further occurrences of this "
+                          "exact value)", faction);
+        }
         return;
     }
 

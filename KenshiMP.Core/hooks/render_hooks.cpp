@@ -87,17 +87,15 @@ static LRESULT WndProcInner(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             nativeMenu.Hide();
         } else if (!core.IsGameLoaded() && !IsMainMenuReady()) {
             OutputDebugStringA("KMP: F1 pressed too early (logo/splash) — ignoring\n");
-        } else if (core.IsGameLoaded() && !core.GetSpawnManager().HasSpawnPathReady()) {
-            // In-game but spawn path not yet captured — opening the menu now invites
-            // the user to click JOIN before the engine has finished its first
-            // CharacterCreate, which is the unsafe window. Surface a HUD message
-            // and don't open the panel until ready.
-            core.GetNativeHud().AddSystemMessage(
-                "Multiplayer initializing — wait a few seconds and press F1 again.");
-            spdlog::info("render_hooks: F1 blocked — spawn path not ready yet");
-            OutputDebugStringA("KMP: F1 blocked — spawn path not ready yet\n");
         } else {
-            // Works on main menu AND in-game (and in-game with spawn path ready)
+            // Always allow opening the menu — the Host/Join/Connect button handlers
+            // (NativeMenu::CanUseJoinFlow) are responsible for blocking unsafe spawn
+            // dispatches with a status message. A pre-emptive F1 block instead made
+            // the mod look unresponsive when the CharacterCreate hook never fired.
+            if (core.IsGameLoaded() && !core.GetSpawnManager().HasSpawnPathReady()) {
+                core.GetNativeHud().AddSystemMessage(
+                    "Multiplayer menu open — JOIN/HOST will be blocked until spawn path is ready.");
+            }
             nativeMenu.Show();
         }
         return 0; // consume the key
