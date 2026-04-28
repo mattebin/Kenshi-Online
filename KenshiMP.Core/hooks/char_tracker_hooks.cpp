@@ -141,11 +141,16 @@ static void OnCharUpdate(void* animClassHuman) {
             pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
                              "  CHOSEN offset: +0x%03X\n", chosen);
         } else {
-            // Fall back to GOG offset so we still try *something* — but mark
-            // chosen so we don't keep probing every call.
-            s_charPtrOffset.store(0x2D8, std::memory_order_release);
+            // Steam-only build: no fallback. If the probe didn't find a
+            // valid candidate, the layout has shifted again and we need to
+            // re-investigate — silently using a stale GOG offset would just
+            // spam Unknown characters like the +0x2D8 path used to. Mark the
+            // offset as 0 so OnCharUpdate's read-fail counter increments and
+            // the issue is visible in the next session log.
+            s_charPtrOffset.store(0, std::memory_order_release);
             pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
-                             "  NO valid candidate found, falling back to +0x2D8\n");
+                             "  NO valid candidate found — char_tracker will "
+                             "produce zero tracked characters this session\n");
         }
         OutputDebugStringA(dbg);
         spdlog::info("{}", dbg);
@@ -153,6 +158,7 @@ static void OnCharUpdate(void* animClassHuman) {
         discoveredOffset = s_charPtrOffset.load(std::memory_order_acquire);
     }
 
+    if (discoveredOffset <= 0) { s_rejectReadFail.fetch_add(1); return; }
     uintptr_t charPtr = 0;
     if (!Memory::Read(animPtr + discoveredOffset, charPtr) || charPtr == 0) {
         s_rejectReadFail.fetch_add(1); return;
