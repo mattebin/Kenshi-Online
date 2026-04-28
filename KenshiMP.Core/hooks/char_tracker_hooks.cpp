@@ -6,8 +6,11 @@
 #include "kmp/memory.h"
 #include <spdlog/spdlog.h>
 #include <Windows.h>
+#include <Psapi.h>
 #include <unordered_map>
 #include <mutex>
+
+#pragma comment(lib, "Psapi.lib")
 
 namespace kmp::char_tracker_hooks {
 
@@ -56,42 +59,73 @@ static void OnCharUpdate(void* animClassHuman) {
         s_rejectBadAnimPtr.fetch_add(1); return;
     }
 
-    // ── Layout discovery: dump the first qword that looks like a valid
-    // user-mode heap pointer between offsets 0x000 and 0x600. The
-    // CharacterHuman backpointer must be one of these slots; the GOG
-    // comment claimed +0x2D8 but Steam doesn't have it there. We log
-    // the candidates *once* so the next session can show us the right
-    // offset to plumb in. Inline hook is hot path, so do this lazily and
-    // exactly once per process to keep overhead trivial.
-    static std::atomic<int> s_layoutDumped{0};
-    if (s_layoutDumped.load(std::memory_order_relaxed) == 0 && callNum == 0) {
-        s_layoutDumped.store(1, std::memory_order_release);
-        char dbg[1024];
-        int pos = 0;
-        pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
-            "char_tracker: LAYOUT DUMP rbx=0x%llX (first call)\n",
-            (unsigned long long)animPtr);
-        for (int off = 0; off <= 0x5F8; off += 8) {
-            uintptr_t v = 0;
-            if (!Memory::Read(animPtr + off, v)) continue;
-            // Only print qwords that look like user-mode heap pointers
-            // (typical Kenshi heap is 0x10000–0x7FFFFFFFFFFF).
-            if (v >= 0x10000 && v <= 0x00007FFFFFFFFFFF && (v & 0x3) == 0) {
-                pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
-                                 "  [+0x%03X] = 0x%016llX\n",
-                                 off, (unsigned long long)v);
-                if (pos > (int)sizeof(dbg) - 64) break;
+    // ── Auto-discovered CharacterHuman backpointer offset ──
+    // GOG had it at +0x2D8 but Steam has it elsewhere. We discover the
+    // right offset on the first call by walking candidate slots and
+    // picking the one whose value (when treated as a pointer) has a
+    // first qword that lies inside the host-process module range — i.e.
+    // it points at an object whose vtable belongs to Kenshi's .text.
+    // Once locked in, every subsequent call uses the cached offset.
+    static std::atomic<int> s_charPtrOffset{-1};
+    int discoveredOffset = s_charPtrOffset.load(std::memory_order_acquire);
+    if (discoveredOffset < 0) {
+        // Kenshi's module range. Cache once.
+        static uintptr_t s_modBase = 0, s_modEnd = 0;
+        if (s_modBase == 0) {
+            HMODULE h = GetModuleHandleA(nullptr); // host exe
+            if (h) {
+                MODULEINFO mi{};
+                if (GetModuleInformation(GetCurrentProcess(), h, &mi, sizeof(mi))) {
+                    s_modBase = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
+                    s_modEnd  = s_modBase + mi.SizeOfImage;
+                }
             }
         }
+        // Walk candidate offsets and probe each for a CharacterHuman shape.
+        // Heuristic: candidate must be a heap pointer (8-aligned, in user-mode
+        // range) whose own first qword (the vtable) is inside the host module.
+        char dbg[2048];
+        int pos = sprintf_s(dbg, sizeof(dbg),
+            "char_tracker: PROBING rbx=0x%llX modBase=0x%llX modEnd=0x%llX\n",
+            (unsigned long long)animPtr,
+            (unsigned long long)s_modBase, (unsigned long long)s_modEnd);
+        int chosen = -1;
+        for (int off = 8; off <= 0x600; off += 8) {
+            uintptr_t v = 0;
+            if (!Memory::Read(animPtr + off, v)) continue;
+            if (v == animPtr) continue; // skip self-reference
+            if (v < 0x10000 || v > 0x00007FFFFFFFFFFF) continue;
+            if ((v & 0x7) != 0) continue;
+            uintptr_t vt = 0;
+            if (!Memory::Read(v, vt)) continue;
+            bool inModule = (s_modBase != 0 && vt >= s_modBase && vt < s_modEnd);
+            if (inModule) {
+                pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                                 "  candidate +0x%03X = 0x%llX (vtable=0x%llX in-module)\n",
+                                 off, (unsigned long long)v, (unsigned long long)vt);
+                if (chosen < 0) chosen = off;
+                if (pos > (int)sizeof(dbg) - 96) break;
+            }
+        }
+        if (chosen >= 0) {
+            s_charPtrOffset.store(chosen, std::memory_order_release);
+            pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                             "  CHOSEN offset: +0x%03X\n", chosen);
+        } else {
+            // Fall back to GOG offset so we still try *something* — but mark
+            // chosen so we don't keep probing every call.
+            s_charPtrOffset.store(0x2D8, std::memory_order_release);
+            pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                             "  NO valid candidate found, falling back to +0x2D8\n");
+        }
         OutputDebugStringA(dbg);
-        // spdlog from this hot path is risky (mutex, allocations) but the
-        // first-call gate makes it safe — single call ever.
         spdlog::info("{}", dbg);
         spdlog::default_logger()->flush();
+        discoveredOffset = s_charPtrOffset.load(std::memory_order_acquire);
     }
 
     uintptr_t charPtr = 0;
-    if (!Memory::Read(animPtr + 0x2D8, charPtr) || charPtr == 0) {
+    if (!Memory::Read(animPtr + discoveredOffset, charPtr) || charPtr == 0) {
         s_rejectReadFail.fetch_add(1); return;
     }
     if (charPtr < 0x10000 || charPtr > 0x00007FFFFFFFFFFF) {
