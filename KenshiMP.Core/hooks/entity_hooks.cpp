@@ -1086,19 +1086,15 @@ void ResumeForNetwork() {
     s_earlyFactionLocked.store(false);
     s_earlyPlayerFaction.store(0);
 
-    // Enable CharacterCreate hook for multiplayer.
-    // At this point loading is complete — only single/few runtime spawns will
-    // trigger the hook (new zone NPCs, remote player injection). MovRaxRsp
-    // handles single calls fine; it's only the 130+ loading burst that crashes.
-    if (HookManager::Get().Enable("CharacterCreate")) {
-        spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate hook ENABLED");
-    } else {
-        spdlog::warn("entity_hooks: ResumeForNetwork — CharacterCreate Enable() returned false");
-    }
-
-    spdlog::info("entity_hooks: ResumeForNetwork — hook active for runtime spawns "
-                 "(earlyFaction=0x{:X}, fallback=0x{:X})", earlyFac,
-                 s_fallbackFaction.load(std::memory_order_relaxed));
+    // CharacterCreate hook stays bypassed across the connect transition.
+    // See the comment on the matching block in Core::OnGameLoaded for why —
+    // re-enabling the hook so the wrapper actually intercepts a runtime
+    // NPC create silently terminates Kenshi within milliseconds of our
+    // detour returning. shared_save_sync handles the "see each other"
+    // case via name-based discovery and does not need the spawn pipeline.
+    spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate left bypassed "
+                 "(earlyFaction=0x{:X}, fallback=0x{:X}, see KNOWN_ISSUES.md)",
+                 earlyFac, s_fallbackFaction.load(std::memory_order_relaxed));
 }
 
 void SuspendForDisconnect() {

@@ -1526,16 +1526,27 @@ void Core::OnGameLoaded() {
         }
     }
 
-    // CharacterCreate hook was installed DISABLED to survive the 130+ loading burst.
-    // Now that loading is complete, enable it so runtime NPC spawns capture
-    // factory data + pre-call struct for the spawn system.
-    if (HookManager::Get().Enable("CharacterCreate")) {
-        spdlog::info("Core::OnGameLoaded — CharacterCreate hook ENABLED (safe for runtime spawns)");
-        m_nativeHud.LogStep("HOOK", "CharacterCreate enabled (post-load)");
-    } else {
-        spdlog::warn("Core::OnGameLoaded — CharacterCreate Enable() returned false");
-        m_nativeHud.LogStep("WARN", "CharacterCreate enable failed");
-    }
+    // CharacterCreate hook stays DISABLED after loading.
+    // Empirical: every test session that re-enabled it (so the wrapper got to
+    // intercept a Kenshi-spawned NPC after connect) silently terminated within
+    // milliseconds of our detour returning, regardless of what the detour did
+    // (including pure passthrough). The fault path is outside VEH/UEF/CRT
+    // coverage. Until a debugger pins down what specifically about the
+    // intercept corrupts engine state, leave the hook BYPASSED — the wrapper's
+    // bypass-flag path is a single immediate JMP to the raw trampoline (no
+    // global slot writes, no C++ detour entry, no stack-gap allocation). That
+    // matches "no hook at all" for runtime safety while keeping the hook
+    // *installed* so a future fix can flip the flag and re-enable cleanly.
+    //
+    // Trade-off: SpawnManager never gets factory data, so server-driven
+    // remote-player spawning won't work. shared_save_sync still locates
+    // existing in-world Player 1 / Player 2 by name via char_tracker_hooks
+    // — that is enough for two players sharing the same save world to see
+    // each other.
+    spdlog::info("Core::OnGameLoaded — CharacterCreate hook STAYS DISABLED "
+                 "(wrapper intercept of runtime NPCs trips a Kenshi-side fault, "
+                 "see KNOWN_ISSUES.md)");
+    m_nativeHud.LogStep("HOOK", "CharacterCreate stays disabled (safety)");
 
     // ═══ DUMP ALL FUNCTIONS AND OFFSETS ═══
     {
