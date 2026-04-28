@@ -2,6 +2,8 @@
 
 This file is the handoff for whoever attacks the remaining bugs next. Everything here was reproduced on this fork's build of [`The404Studios/Kenshi-Online`](https://github.com/The404Studios/Kenshi-Online) at upstream commit `6afb163` against Kenshi v1.0.65 (Steam, English).
 
+> **Status update (2026-04-29):** end-to-end identity + position broadcast pipeline is now working in solo testing. `Found OWN 'Kole' [unique-name]` resolves the user's actual PC; `WATCH/POS` markers in the session log show 750+ outbound position packets per minute with coordinates that **change as the user walks** (-50958→-50912 over a few hundred meters). Inbound position application uses the same `character+0x48` offset (verified working for *reads*; live two-machine test still pending). The `game+0x644365` engine crash below is the only thing keeping this from being a smoothly playable alpha.
+
 ## 1. Silent termination on first connected `CharacterCreate`
 
 **Severity:** blocker for actual play.
@@ -54,7 +56,46 @@ OnGameTick step: -1 (init), tick #0
 | `shared_save_sync` faction-suffix `.mod` strip + log-once | Fixes a 33 k-line/session log spam. Unrelated to the crash. |
 | Stop promoting runtime NPC fallback faction onto `PlayerController::localFactionPtr` | Closes a wrong-faction trap (was binding the local player to e.g. a Slavemonger). Unrelated to the crash itself; crash continues without it. |
 
-### What hasn't been tried and probably should be
+### Concrete WinDbg recipe (whoever picks this up next)
+
+The fault site is identical across every catch — `game+0x644365`, `AV READ 0x90`, `RAX=0`. So the actual engine instruction is at `kenshi_x64+0x644365` and reads `[rax+0x90]`. Identifying which engine code path leads there is the entire job.
+
+```
+1. Launch Kenshi via Steam normally with the mod installed (KenshiMP.Core.dll
+   in the Kenshi folder, mod active in __mods.list).
+2. Attach WinDbg to kenshi_x64.exe BEFORE connecting (wait at the main menu).
+3. Load the kenshi_x64.exe symbol path (Kenshi ships with PDBs? — if not,
+   reverse the function from the offset using the Steam binary as ground
+   truth).
+4. Set a code breakpoint:
+       bp kenshi_x64+0x644365
+   The exact image offset works because kenshi_x64.exe is rebased identically
+   each launch on most Win10/11 setups (verify via the gameBase= line in our
+   session log header — every session reports the same RVA layout, just
+   with different ASLR base).
+5. Continue execution, click MULTIPLAYER → New Game → Singleplayer start.
+6. The breakpoint will fire periodically once you're connected. Each hit:
+       r              ; dump registers
+       k              ; walk the stack — the caller is what we actually need
+       u rip-30 L20   ; disassemble around the fault site to see what is
+                        being computed before the deref
+   The first time the deref encounters RAX=0, that's the bug. Compare the
+   stack to the same site when RAX is non-null — the difference is whatever
+   the engine expects to be initialised but isn't.
+7. Likely outcome: the function is a periodic AI/squad/faction validator
+   that walks a list and dereferences each entry's "current target" pointer.
+   Some entry was initialised by save-load but a mod-side mutation (likely
+   from one of our remaining hooks) cleared the slot. Identifying which
+   pointer is being expected at +0x90 of which type would tell us which
+   hook to gate further.
+8. As a workaround once identified: SEH-wrap that periodic call site at
+   `game+0x644365 - <prologue size>` so the AV is caught and ignored,
+   instead of fixing the underlying mutation.
+```
+
+The session log helper (`KMP UNHANDLED EXCEPTION` lines from `core.cpp`) already records every register at the fault, so a debugger session that reproduces once gives you both ground-truth registers and live stack walk in the same hit.
+
+### Other things that haven't been tried
 
 1. **Attach a debugger to a fresh Kenshi process before hitting Connect.** WinDbg or x64dbg with the project PDBs from `build-codex/bin/Release/`. Set a write breakpoint on `*entity_hooks::s_pendingCreateDisable`, a code breakpoint on `game+0x644365`, and a code breakpoint at the end of the MovRaxRsp wrapper's normal-path `RET` (offset `OFF_NAKED_STUB + ~0x40` in the per-hook page reported in the log as `MovRaxRspFix: 'CharacterCreate' naked detour at 0x<page>`). The single-step output around the moment of termination should disambiguate engine deref vs. wrapper exit corruption in seconds.
 2. **AddVectoredExceptionHandler with `FIRST_HANDLER` + an `UnhandledExceptionFilter` Win32 callback.** VEH only catches what the OS exception dispatcher delivers; fail-fast (`__fastfail` / `RaiseFailFastException`) explicitly skips that pipeline. Pair the two so we catch *something* the next time it dies.
