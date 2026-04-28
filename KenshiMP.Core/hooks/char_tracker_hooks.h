@@ -33,6 +33,17 @@ const TrackedChar* FindByFactionPtr(uintptr_t factionPtr);
 // The vector is a snapshot — the underlying tracker may keep mutating.
 std::vector<TrackedChar> FindAllByFactionPtr(uintptr_t factionPtr);
 
+// Find the first tracked character whose faction matches AND whose name is
+// NOT equal to the supplied placeholder. Used to pull the player's PC out
+// of a faction that contains many NPCs with a placeholder name — the
+// kenshi-online.mod emits 18+ characters all literally named "Player 1"
+// in the local faction, but the *player's* PC has a unique name they
+// chose at character creation. Pointer-by-faction match plus
+// name-disambiguation gives us "the unique one" without depending on the
+// PC's actual name (which we don't know in advance).
+const TrackedChar* FindUniqueByFactionPtr(uintptr_t factionPtr,
+                                           const std::string& placeholder);
+
 // Resolve the faction pointer for the FIRST tracked character whose name
 // matches exactly. This is the bootstrap step to convert a server-provided
 // faction string ("12-kenshi-online.mod") into an in-process faction pointer:

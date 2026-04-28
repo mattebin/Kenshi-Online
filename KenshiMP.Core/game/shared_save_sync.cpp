@@ -265,28 +265,50 @@ void Update(float deltaTime) {
             }
         }
 
-        // Pointer-based match — preferred. Each call returns the first
-        // tracked character whose faction matches, which is stable across
-        // sessions and ignores name collisions.
+        // Pointer-based match — preferred. Two-stage lookup:
+        //  1. Within the right faction, prefer a tracked character whose
+        //     name is NOT the placeholder ("Player 1" / "Player 2"). The
+        //     kenshi-online.mod emits ~18 NPCs with the placeholder name
+        //     in the same faction; the user's actual PC has a unique
+        //     name (e.g. "Kole") chosen at character creation. So the
+        //     unique-named character is the player.
+        //  2. Fall back to any faction match (for solo testing where a
+        //     remote player hasn't joined yet, the placeholder NPC is
+        //     the best stand-in).
         if (!s_ownFound && s_ownFactionPtr != 0) {
-            auto* tc = char_tracker_hooks::FindByFactionPtr(s_ownFactionPtr);
+            const char_tracker_hooks::TrackedChar* tc =
+                char_tracker_hooks::FindUniqueByFactionPtr(s_ownFactionPtr, s_ownCharName);
+            const char* matchKind = "unique-name";
+            if (!tc) {
+                tc = char_tracker_hooks::FindByFactionPtr(s_ownFactionPtr);
+                matchKind = "faction-only";
+            }
             if (tc && tc->animClassPtr) {
                 s_ownAnimClass = tc->animClassPtr;
                 s_ownCharPtr = tc->characterPtr;
                 s_ownFound = true;
-                spdlog::info("shared_save_sync: Found OWN '{}' "
+                spdlog::info("shared_save_sync: Found OWN '{}' [{}] "
                              "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
-                             tc->name,
+                             tc->name, matchKind,
                              reinterpret_cast<uintptr_t>(s_ownAnimClass),
                              reinterpret_cast<uintptr_t>(s_ownCharPtr),
                              tc->factionPtr);
                 core.GetNativeHud().AddSystemMessage(
-                    "Found your character: " + tc->name + " (faction-matched)");
+                    "Found your character: " + tc->name + " (" + matchKind + ")");
             }
         }
 
         if (!s_otherFound && s_otherFactionPtr != 0) {
-            auto* tc = char_tracker_hooks::FindByFactionPtr(s_otherFactionPtr);
+            // Same logic on the other side. If a real remote player has
+            // joined, *their* PC has a unique name; we'd rather pick that
+            // than one of the placeholder NPCs.
+            const char_tracker_hooks::TrackedChar* tc =
+                char_tracker_hooks::FindUniqueByFactionPtr(s_otherFactionPtr, s_otherCharName);
+            const char* matchKind = "unique-name";
+            if (!tc) {
+                tc = char_tracker_hooks::FindByFactionPtr(s_otherFactionPtr);
+                matchKind = "faction-only";
+            }
             if (tc && tc->animClassPtr) {
                 s_otherAnimClass = tc->animClassPtr;
                 s_otherCharPtr = tc->characterPtr;
@@ -296,14 +318,14 @@ void Update(float deltaTime) {
                     ai_hooks::MarkRemoteControlled(s_otherCharPtr);
                 }
 
-                spdlog::info("shared_save_sync: Found OTHER '{}' "
+                spdlog::info("shared_save_sync: Found OTHER '{}' [{}] "
                              "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
-                             tc->name,
+                             tc->name, matchKind,
                              reinterpret_cast<uintptr_t>(s_otherAnimClass),
                              reinterpret_cast<uintptr_t>(s_otherCharPtr),
                              tc->factionPtr);
                 core.GetNativeHud().AddSystemMessage(
-                    "Found remote player: " + tc->name + " (faction-matched)");
+                    "Found remote player: " + tc->name + " (" + matchKind + ")");
             }
         }
 

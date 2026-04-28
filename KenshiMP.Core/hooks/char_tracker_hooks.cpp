@@ -319,6 +319,19 @@ std::vector<TrackedChar> FindAllByFactionPtr(uintptr_t factionPtr) {
     return result;
 }
 
+const TrackedChar* FindUniqueByFactionPtr(uintptr_t factionPtr,
+                                           const std::string& placeholder) {
+    if (factionPtr == 0) return nullptr;
+    std::lock_guard lock(s_trackerMutex);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.factionPtr != factionPtr) continue;
+        if (tc.name == placeholder) continue; // skip the NPC duplicates
+        if (tc.name.empty()) continue;
+        return &tc;
+    }
+    return nullptr;
+}
+
 uintptr_t ResolveFactionPtrByName(const std::string& name) {
     std::lock_guard lock(s_trackerMutex);
     for (auto& [key, tc] : s_trackedChars) {
