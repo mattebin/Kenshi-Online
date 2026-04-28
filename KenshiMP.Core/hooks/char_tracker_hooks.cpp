@@ -49,11 +49,45 @@ void DumpHookCounters() {
 }
 
 static void OnCharUpdate(void* animClassHuman) {
-    s_hookCallCount.fetch_add(1, std::memory_order_relaxed);
+    uint64_t callNum = s_hookCallCount.fetch_add(1, std::memory_order_relaxed);
     if (!animClassHuman) { s_rejectNullAnim.fetch_add(1); return; }
     uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClassHuman);
     if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) {
         s_rejectBadAnimPtr.fetch_add(1); return;
+    }
+
+    // ── Layout discovery: dump the first qword that looks like a valid
+    // user-mode heap pointer between offsets 0x000 and 0x600. The
+    // CharacterHuman backpointer must be one of these slots; the GOG
+    // comment claimed +0x2D8 but Steam doesn't have it there. We log
+    // the candidates *once* so the next session can show us the right
+    // offset to plumb in. Inline hook is hot path, so do this lazily and
+    // exactly once per process to keep overhead trivial.
+    static std::atomic<int> s_layoutDumped{0};
+    if (s_layoutDumped.load(std::memory_order_relaxed) == 0 && callNum == 0) {
+        s_layoutDumped.store(1, std::memory_order_release);
+        char dbg[1024];
+        int pos = 0;
+        pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+            "char_tracker: LAYOUT DUMP rbx=0x%llX (first call)\n",
+            (unsigned long long)animPtr);
+        for (int off = 0; off <= 0x5F8; off += 8) {
+            uintptr_t v = 0;
+            if (!Memory::Read(animPtr + off, v)) continue;
+            // Only print qwords that look like user-mode heap pointers
+            // (typical Kenshi heap is 0x10000–0x7FFFFFFFFFFF).
+            if (v >= 0x10000 && v <= 0x00007FFFFFFFFFFF && (v & 0x3) == 0) {
+                pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                                 "  [+0x%03X] = 0x%016llX\n",
+                                 off, (unsigned long long)v);
+                if (pos > (int)sizeof(dbg) - 64) break;
+            }
+        }
+        OutputDebugStringA(dbg);
+        // spdlog from this hot path is risky (mutex, allocations) but the
+        // first-call gate makes it safe — single call ever.
+        spdlog::info("{}", dbg);
+        spdlog::default_logger()->flush();
     }
 
     uintptr_t charPtr = 0;
