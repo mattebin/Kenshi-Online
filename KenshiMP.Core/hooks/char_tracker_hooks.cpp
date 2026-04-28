@@ -90,28 +90,51 @@ static void OnCharUpdate(void* animClassHuman) {
             (unsigned long long)animPtr,
             (unsigned long long)s_modBase, (unsigned long long)s_modEnd);
         int chosen = -1;
+        // Most CharacterHuman objects live in their own heap allocation, far
+        // away from the AnimationClassHuman block. Sub-objects of the same
+        // animation tree have addresses within ~0x1000 bytes of animPtr.
+        // Use that as a fast pre-filter: a candidate within 4 KiB of animPtr
+        // is overwhelmingly likely to be a sub-object, not a separate Character.
+        const uintptr_t ANIM_BLOCK_HALF = 0x1000;
         for (int off = 8; off <= 0x600; off += 8) {
             uintptr_t v = 0;
             if (!Memory::Read(animPtr + off, v)) continue;
             if (v == animPtr) continue; // skip self-reference
             if (v < 0x10000 || v > 0x00007FFFFFFFFFFF) continue;
             if ((v & 0x7) != 0) continue;
-            // The candidate must be a HEAP pointer, not a static address
-            // inside Kenshi's binary. Earlier probe wrongly picked +0x120
-            // which held 0x7FF78D8BBC08 — a vtable pointer baked into
-            // .rdata — and then "vtable of vtable" coincidentally also
-            // landed in module, so the heuristic accepted a non-character.
+            // Candidate must be a HEAP pointer, not a static address inside
+            // Kenshi's binary.
             if (s_modBase != 0 && v >= s_modBase && v < s_modEnd) continue;
+            // Skip sub-objects of the same animation block.
+            uintptr_t delta = (v > animPtr) ? (v - animPtr) : (animPtr - v);
+            if (delta < ANIM_BLOCK_HALF) continue;
             uintptr_t vt = 0;
             if (!Memory::Read(v, vt)) continue;
             bool inModule = (s_modBase != 0 && vt >= s_modBase && vt < s_modEnd);
-            if (inModule) {
+            if (!inModule) continue;
+            // Final check: a real CharacterHuman has a std::string at +0x18
+            // (its name). The MSVC layout has size at strAddr+0x10. If size
+            // is non-zero and reasonable, this is a named game object —
+            // overwhelmingly likely to be the right backpointer. If we get
+            // a hit but size is zero (e.g. unnamed buildings), keep looking
+            // — the *next* candidate is more likely the player.
+            uint64_t nameSize = 0;
+            if (!Memory::Read(v + 0x18 + 0x10, nameSize)) continue;
+            if (nameSize == 0 || nameSize > 256) {
                 pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
-                                 "  candidate +0x%03X = 0x%llX (vtable=0x%llX in-module)\n",
-                                 off, (unsigned long long)v, (unsigned long long)vt);
-                if (chosen < 0) chosen = off;
-                if (pos > (int)sizeof(dbg) - 96) break;
+                                 "  candidate +0x%03X = 0x%llX (vtable in-module, "
+                                 "name size %llu — skip)\n",
+                                 off, (unsigned long long)v,
+                                 (unsigned long long)nameSize);
+                continue;
             }
+            pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                             "  candidate +0x%03X = 0x%llX (vtable=0x%llX, "
+                             "nameSize=%llu) ACCEPTED\n",
+                             off, (unsigned long long)v, (unsigned long long)vt,
+                             (unsigned long long)nameSize);
+            if (chosen < 0) chosen = off;
+            if (pos > (int)sizeof(dbg) - 128) break;
         }
         if (chosen >= 0) {
             s_charPtrOffset.store(chosen, std::memory_order_release);
