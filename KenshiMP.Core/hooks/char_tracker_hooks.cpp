@@ -139,18 +139,18 @@ static void OnCharUpdate(void* animClassHuman) {
         if (chosen >= 0) {
             s_charPtrOffset.store(chosen, std::memory_order_release);
             pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
-                             "  CHOSEN offset: +0x%03X\n", chosen);
+                             "  CHOSEN offset: +0x%03X (auto-discovered)\n", chosen);
         } else {
-            // Steam-only build: no fallback. If the probe didn't find a
-            // valid candidate, the layout has shifted again and we need to
-            // re-investigate — silently using a stale GOG offset would just
-            // spam Unknown characters like the +0x2D8 path used to. Mark the
-            // offset as 0 so OnCharUpdate's read-fail counter increments and
-            // the issue is visible in the next session log.
-            s_charPtrOffset.store(0, std::memory_order_release);
+            // No candidate validated. Fall back to the upstream GOG-baseline
+            // offset (+0x2D8). On Steam v1.0.65 this offset is wrong and
+            // every character will be tracked as 'Unknown' — but on GOG it's
+            // correct, and this fallback is what the upstream code relied
+            // on. Logged so the next session shows whether discovery
+            // succeeded or fell through.
+            s_charPtrOffset.store(0x2D8, std::memory_order_release);
             pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
-                             "  NO valid candidate found — char_tracker will "
-                             "produce zero tracked characters this session\n");
+                             "  NO valid candidate found — falling back to "
+                             "GOG-baseline +0x2D8\n");
         }
         OutputDebugStringA(dbg);
         spdlog::info("{}", dbg);

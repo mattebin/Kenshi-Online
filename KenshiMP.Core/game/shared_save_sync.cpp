@@ -153,16 +153,11 @@ void Reset() {
 }
 
 // ── SEH-protected position read from CharacterHuman directly ──
-// Uses the runtime-resolved character.position offset (Steam: +0x48, per
-// the OFFSET DUMP in the install log). char_tracker_hooks already uses this
-// path via CharacterAccessor::GetPosition for every tracked character, so
-// we know it works on the live build. SEH-wrapped because we can't trust
-// arbitrary heap reads not to fault during zone transitions.
-//
-// Steam-only. The previous AnimClass-chain implementation was a GOG-baseline
-// remnant that silently returned false on Steam (12000+ Update() ticks with
-// ownFound=true produced zero outbound packets in test session 31640).
-// Removed per "drop GOG, focus Steam" directive.
+// Uses the runtime-resolved character.position offset (Steam: +0x48 per
+// the install-time OFFSET DUMP). char_tracker_hooks already uses this path
+// via CharacterAccessor::GetPosition for every tracked character, so we
+// know it works on the live Steam build. SEH-wrapped because we can't
+// trust arbitrary heap reads not to fault during zone transitions.
 static bool SEH_ReadCharacterPosition(void* charPtr, Vec3& out) {
     __try {
         uintptr_t cp = reinterpret_cast<uintptr_t>(charPtr);
@@ -176,10 +171,64 @@ static bool SEH_ReadCharacterPosition(void* charPtr, Vec3& out) {
     }
 }
 
-// SEH_WriteAnimClassPosition (GOG-baseline anim chain) removed — Steam-only
-// build now applies remote positions through SEH_WriteCachedPosition below,
-// which writes to character+0x48 (the runtime-resolved character.position
-// offset).
+// ── SEH-protected position read from AnimClass chain (legacy/GOG) ──
+// Original upstream implementation. Walks animClass+0xC0 → charMovement+0x320
+// → posStruct+0x20 to reach the live position floats. Verified working on
+// GOG Kenshi by upstream; on Steam v1.0.65 the +0xC0 dereference returns
+// garbage and this silently fails.
+//
+// Kept as a fallback so a build that runs against GOG or any future Steam
+// version with the same anim layout can still broadcast positions even if
+// the CharacterHuman+offset path doesn't yield a sensible value.
+static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
+    __try {
+        uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClass);
+        if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) return false;
+
+        uintptr_t charMovement = 0;
+        if (!Memory::Read(animPtr + 0xC0, charMovement) || charMovement == 0) return false;
+        if (charMovement < 0x10000 || charMovement > 0x00007FFFFFFFFFFF) return false;
+
+        uintptr_t posStruct = 0;
+        if (!Memory::Read(charMovement + 0x320, posStruct) || posStruct == 0) return false;
+        if (posStruct < 0x10000 || posStruct > 0x00007FFFFFFFFFFF) return false;
+
+        Memory::Read(posStruct + 0x20, out.x);
+        Memory::Read(posStruct + 0x24, out.y);
+        Memory::Read(posStruct + 0x28, out.z);
+
+        return (out.x != 0.f || out.y != 0.f || out.z != 0.f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// ── SEH-protected position write to AnimClass chain (legacy/GOG) ──
+// Symmetric to the read above; same offsets, same caveat. Kept as a
+// fallback for builds where the cached-position write to char+0x48 is
+// insufficient (e.g., the engine reads from the anim chain and ignores
+// the cached field).
+static bool SEH_WriteAnimClassPosition(void* animClass, const Vec3& pos) {
+    __try {
+        uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClass);
+        if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) return false;
+
+        uintptr_t charMovement = 0;
+        if (!Memory::Read(animPtr + 0xC0, charMovement) || charMovement == 0) return false;
+        if (charMovement < 0x10000 || charMovement > 0x00007FFFFFFFFFFF) return false;
+
+        uintptr_t posStruct = 0;
+        if (!Memory::Read(charMovement + 0x320, posStruct) || posStruct == 0) return false;
+        if (posStruct < 0x10000 || posStruct > 0x00007FFFFFFFFFFF) return false;
+
+        Memory::Write(posStruct + 0x20, pos.x);
+        Memory::Write(posStruct + 0x24, pos.y);
+        Memory::Write(posStruct + 0x28, pos.z);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 static void SEH_WriteCachedPosition(void* charPtr, const Vec3& pos) {
     if (!charPtr) return;
@@ -406,8 +455,16 @@ void Update(float deltaTime) {
     if (sinceSend.count() >= POS_SEND_INTERVAL_MS && s_ownCharPtr) {
         s_lastPosSend = now;
 
+        // Steam: prefer the CharacterHuman+offset read (verified working).
+        // GOG / other builds: fall back to the AnimClass-chain read if the
+        // primary path doesn't return a sensible value. Either succeeding
+        // is enough to broadcast — nothing here is platform-conditional.
         Vec3 myPos;
-        if (SEH_ReadCharacterPosition(s_ownCharPtr, myPos)) {
+        bool gotPos = SEH_ReadCharacterPosition(s_ownCharPtr, myPos);
+        if (!gotPos && s_ownAnimClass) {
+            gotPos = SEH_ReadAnimClassPosition(s_ownAnimClass, myPos);
+        }
+        if (gotPos) {
             // Use the existing position update format — the server reads:
             // U32(sourcePlayer) [handled by server from peer], U8(count), then
             // CharacterPosition structs. We need to match this EXACTLY.
@@ -458,7 +515,15 @@ void Update(float deltaTime) {
             hasRemote = s_hasRemotePosition;
         }
         if (hasRemote && s_otherCharPtr) {
+            // Apply via the cached-position write (works on Steam) AND the
+            // AnimClass-chain write (works on GOG/upstream-baseline). Both
+            // are SEH-wrapped no-ops if the offsets don't apply to the live
+            // build, so calling both is safe and gives us platform coverage
+            // without conditional logic.
             SEH_WriteCachedPosition(s_otherCharPtr, remotePos);
+            if (s_otherAnimClass) {
+                SEH_WriteAnimClassPosition(s_otherAnimClass, remotePos);
+            }
         }
     }
 
