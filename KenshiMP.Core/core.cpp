@@ -94,8 +94,62 @@ static int SEH_DumpStack(char* outBuf, int outBufSize, uint64_t rsp) {
     return pos;
 }
 
+// ── Static zero buffer for the game+0x644365 recovery ──
+// The recurring engine crash at this RVA reads two floats from rax+0x90 and
+// rax+0x34 when rax is null. We can't fix the underlying bug (some periodic
+// AI/animation calc finds a null target pointer in slot +0x1A8 of the
+// caller's `this`), but we can supply a safe zero-filled buffer at the
+// moment of fault, redirect rax to it, and continue. The instructions
+// then read 0.0f, the function multiplies through to 0.0f, returns "false",
+// and the game continues as if the calc didn't fire this frame.
+//
+// 0x200 bytes is overkill — the disassembled instructions only deref +0x90
+// and +0x34 — but the margin protects against any compiler-emitted prefetch
+// or look-ahead reads we can't see at this offset.
+alignas(16) static const uint8_t s_safeZeroBuf[0x200] = {0};
+
+// Recurring engine fault site. Captured here so the static-init dependency
+// is explicit and a future Kenshi patch breaking the offset is loud.
+static constexpr uintptr_t KENSHI_NULL_DEREF_RVA = 0x644365;
+
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // ── Recovery: Kenshi engine periodic-AI null deref ──
+    // If the AV is at the well-known game+0x644365 instruction with rax=0
+    // reading [rax+0x90], redirect rax to a static zero buffer and resume.
+    // This converts what was a hard process termination into a single
+    // "this calc returned 0 this frame" no-op. See KNOWN_ISSUES.md for the
+    // disassembly of the function and why this is safe.
+    if (code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */ &&
+        ep->ExceptionRecord->ExceptionInformation[1] == 0x90 &&
+        g_gameModuleBase != 0)
+    {
+        uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+            ep->ExceptionRecord->ExceptionAddress);
+        if (fault_rip == g_gameModuleBase + KENSHI_NULL_DEREF_RVA &&
+            ep->ContextRecord->Rax == 0)
+        {
+            ep->ContextRecord->Rax = reinterpret_cast<DWORD64>(s_safeZeroBuf);
+            // One log line per session so the workaround is visible without
+            // flooding (this fault can fire many times per minute under
+            // some game states). Use OutputDebugStringA — spdlog is unsafe
+            // from inside an exception handler that can re-enter.
+            static volatile LONG s_recoverCount = 0;
+            LONG n = InterlockedIncrement(&s_recoverCount);
+            if (n == 1 || (n & (n - 1)) == 0 /* power of two */) {
+                char buf[160];
+                sprintf_s(buf,
+                    "KMP RECOVER #%ld: game+0x%llX null-deref at +0x90, "
+                    "redirected rax to safe zero buffer\n",
+                    n, (unsigned long long)KENSHI_NULL_DEREF_RVA);
+                OutputDebugStringA(buf);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
 
     // Handle fatal exception types + heap/C++ exceptions for crash diagnosis.
     // 0xC0000374 = STATUS_HEAP_CORRUPTION, 0xC0000602 = STATUS_FAIL_FAST_EXCEPTION,
