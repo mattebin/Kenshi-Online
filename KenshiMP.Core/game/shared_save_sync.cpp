@@ -152,6 +152,11 @@ void Reset() {
 }
 
 // ── SEH-protected position read from AnimClass chain ──
+// NOTE: this offset chain (animClass+0xC0 → charMovement+0x320 → posStruct+0x20)
+// is GOG-version-specific and silently returns false on Steam Kenshi —
+// 12000+ Update() calls with ownFound=true produced zero outbound position
+// packets in test session 31640. Kept around in case GOG support is
+// re-enabled, but the live path now prefers SEH_ReadCharacterPosition below.
 static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
     __try {
         uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClass);
@@ -169,6 +174,25 @@ static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
         Memory::Read(posStruct + 0x24, out.y);
         Memory::Read(posStruct + 0x28, out.z);
 
+        return (out.x != 0.f || out.y != 0.f || out.z != 0.f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// ── SEH-protected position read from CharacterHuman directly ──
+// Uses the runtime-resolved character.position offset (e.g. +0x48 on Steam,
+// per the OFFSET DUMP in the install log). This is the same path char_tracker
+// already uses for its tc.position field via CharacterAccessor::GetPosition,
+// so we know it works on the live build. SEH-wrapped because we can't trust
+// arbitrary heap reads not to fault during zone transitions.
+static bool SEH_ReadCharacterPosition(void* charPtr, Vec3& out) {
+    __try {
+        uintptr_t cp = reinterpret_cast<uintptr_t>(charPtr);
+        if (cp < 0x10000 || cp > 0x00007FFFFFFFFFFF) return false;
+        int posOff = game::GetOffsets().character.position;
+        if (posOff < 0) return false;
+        Memory::ReadVec3(cp + posOff, out.x, out.y, out.z);
         return (out.x != 0.f || out.y != 0.f || out.z != 0.f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -376,8 +400,19 @@ void Update(float deltaTime) {
     if (sinceSend.count() >= POS_SEND_INTERVAL_MS && s_ownAnimClass) {
         s_lastPosSend = now;
 
+        // Prefer the CharacterHuman+offset read — confirmed working in test
+        // session 31640 (char_tracker successfully read all character
+        // positions via the same accessor). Fall back to the legacy anim
+        // chain only if the char-pointer path fails.
         Vec3 myPos;
-        if (SEH_ReadAnimClassPosition(s_ownAnimClass, myPos)) {
+        bool gotPos = false;
+        if (s_ownCharPtr) {
+            gotPos = SEH_ReadCharacterPosition(s_ownCharPtr, myPos);
+        }
+        if (!gotPos) {
+            gotPos = SEH_ReadAnimClassPosition(s_ownAnimClass, myPos);
+        }
+        if (gotPos) {
             // Use the existing position update format — the server reads:
             // U32(sourcePlayer) [handled by server from peer], U8(count), then
             // CharacterPosition structs. We need to match this EXACTLY.
