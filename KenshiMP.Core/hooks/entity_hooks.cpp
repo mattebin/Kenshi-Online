@@ -569,6 +569,31 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
         OutputDebugStringA(dbgBuf);
     }
 
+    // ── SAFETY: pure passthrough on the first connected create ──
+    // Empirical finding (KNOWN_ISSUES.md): the first connected CharacterCreate
+    // returns cleanly from our detour but Kenshi terminates with no exception
+    // record within milliseconds. Diagnostic markers proved every line of our
+    // post-spawn work executes; the fault is therefore in either the wrapper's
+    // exit assembly or Kenshi's caller of CharacterCreate immediately after we
+    // return — most likely heap corruption tripping HeapEnableTerminationOnCorruption,
+    // which bypasses VEH/UEF/CRT trip handlers.
+    //
+    // Until that's diagnosed with a debugger, do absolutely nothing on the first
+    // connected create — no struct copy, no offset detection, no spawn manager
+    // feed, no entity registration. Just CallOriginalCreate and return. We lose
+    // capture data for that one NPC but the session stays alive, which is the
+    // prerequisite for any other co-op feature working.
+    if (connNum == 1) {
+        spdlog::info("entity_hooks: SAFE-MODE first connected create — pure passthrough (workaround)");
+        spdlog::default_logger()->flush();
+        void* r = CallOriginalCreate(factory, templateData);
+        spdlog::info("entity_hooks: SAFE-MODE first connected create returning r=0x{:X}",
+                     reinterpret_cast<uintptr_t>(r));
+        spdlog::default_logger()->flush();
+        s_hookDepth--;
+        return r;
+    }
+
     // Rapid-fire detection: if >5 creates in 100ms, go lightweight (zone load burst)
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_connectedBurstStart);
