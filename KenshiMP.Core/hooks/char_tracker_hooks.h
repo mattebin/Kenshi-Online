@@ -28,4 +28,9 @@ void DumpTrackedChars();
 // Called from Core::OnGameTick — NOT from inside the inline hook.
 void ProcessDeferredDiscovery();
 
+// Diagnostic: dump per-stage hook call counters to the log so we can tell
+// whether the inline hook is firing at all and (if so) where calls are
+// being filtered out. Cheap atomics — safe to call every few seconds.
+void DumpHookCounters();
+
 } // namespace kmp::char_tracker_hooks

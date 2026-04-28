@@ -213,6 +213,9 @@ void Update(float deltaTime) {
     if (watch) {
         spdlog::info("WATCH/SYNC: Update enter #{} (ownFound={}, otherFound={})",
                      s_updateNum, s_ownFound, s_otherFound);
+        // Also dump char_tracker hook counters so we can see if the inline
+        // hook is firing at all and where calls are being filtered out.
+        char_tracker_hooks::DumpHookCounters();
         spdlog::default_logger()->flush();
     }
 

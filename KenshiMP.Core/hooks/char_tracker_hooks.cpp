@@ -30,14 +30,40 @@ static PendingCharUpdate s_pendingRing[PENDING_RING_SIZE];
 static std::atomic<int> s_pendingWrite{0};
 static std::atomic<int> s_pendingRead{0};
 
+// Diagnostic counters so we can tell whether the inline hook is even firing
+// in this Kenshi build (and if it is, where the calls are being filtered out).
+static std::atomic<uint64_t> s_hookCallCount{0};
+static std::atomic<uint64_t> s_rejectNullAnim{0};
+static std::atomic<uint64_t> s_rejectBadAnimPtr{0};
+static std::atomic<uint64_t> s_rejectReadFail{0};
+static std::atomic<uint64_t> s_rejectBadCharPtr{0};
+static std::atomic<uint64_t> s_passedFilter{0};
+
+void DumpHookCounters() {
+    spdlog::info("char_tracker: hook counters — calls={} (nullAnim={}, badAnimPtr={}, "
+                 "readFail={}, badCharPtr={}) passed={} tracked={}",
+                 s_hookCallCount.load(), s_rejectNullAnim.load(),
+                 s_rejectBadAnimPtr.load(), s_rejectReadFail.load(),
+                 s_rejectBadCharPtr.load(), s_passedFilter.load(),
+                 s_trackedChars.size());
+}
+
 static void OnCharUpdate(void* animClassHuman) {
-    if (!animClassHuman) return;
+    s_hookCallCount.fetch_add(1, std::memory_order_relaxed);
+    if (!animClassHuman) { s_rejectNullAnim.fetch_add(1); return; }
     uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClassHuman);
-    if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) return;
+    if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) {
+        s_rejectBadAnimPtr.fetch_add(1); return;
+    }
 
     uintptr_t charPtr = 0;
-    if (!Memory::Read(animPtr + 0x2D8, charPtr) || charPtr == 0) return;
-    if (charPtr < 0x10000 || charPtr > 0x00007FFFFFFFFFFF) return;
+    if (!Memory::Read(animPtr + 0x2D8, charPtr) || charPtr == 0) {
+        s_rejectReadFail.fetch_add(1); return;
+    }
+    if (charPtr < 0x10000 || charPtr > 0x00007FFFFFFFFFFF) {
+        s_rejectBadCharPtr.fetch_add(1); return;
+    }
+    s_passedFilter.fetch_add(1);
 
     void* charKey = reinterpret_cast<void*>(charPtr);
 
