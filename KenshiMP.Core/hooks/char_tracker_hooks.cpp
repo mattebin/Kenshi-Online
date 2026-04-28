@@ -96,6 +96,12 @@ static void OnCharUpdate(void* animClassHuman) {
             if (v == animPtr) continue; // skip self-reference
             if (v < 0x10000 || v > 0x00007FFFFFFFFFFF) continue;
             if ((v & 0x7) != 0) continue;
+            // The candidate must be a HEAP pointer, not a static address
+            // inside Kenshi's binary. Earlier probe wrongly picked +0x120
+            // which held 0x7FF78D8BBC08 — a vtable pointer baked into
+            // .rdata — and then "vtable of vtable" coincidentally also
+            // landed in module, so the heuristic accepted a non-character.
+            if (s_modBase != 0 && v >= s_modBase && v < s_modEnd) continue;
             uintptr_t vt = 0;
             if (!Memory::Read(v, vt)) continue;
             bool inModule = (s_modBase != 0 && vt >= s_modBase && vt < s_modEnd);
