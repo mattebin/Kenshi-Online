@@ -127,9 +127,26 @@ static std::atomic<uintptr_t> g_kenshiNullDerefRVA{0};
 static std::atomic<bool> g_kenshiCrashRecoveryEnabled{false};
 
 // Scan helper — runs on the kenshi_x64.exe module loaded into the host
-// process. Pattern is the exact byte sequence we disassembled in test
-// session 22004; it should match a single point in any Kenshi build that
-// ships the same engine bug.
+// process. We're looking for the specific function context where Kenshi
+// dereferences a null pointer at +0x90:
+//
+//     mov  rax, [rcx+0x1A8]          ; 7 bytes  (load potentially-null ptr)
+//     movss xmm2, [rip+disp32]       ; 8 bytes  (RIP-rel, varies per build)
+//     movss xmm1, [rip+disp32]       ; 8 bytes  (RIP-rel, varies per build)
+//     movss xmm0, [rax+0x90]         ; 8 bytes  ← FAULT SITE
+//     mulss xmm0, [rax+0x34]         ; 5 bytes
+//
+// Earlier scanner matched only the last 13 bytes (`F3 0F 10 80 90 00 00 00
+// F3 0F 59 40 34`) which collided with another function in test session
+// 27036 — armed at game+0x643AFB while the actual fault was at +0x644365.
+//
+// The two flanking RIP-relative loads have build-varying disp32, but the
+// `mov rax, [rcx+0x1A8]` (`48 8B 81 A8 01 00 00`) and the fault+mulss bytes
+// are stable. We anchor on `mov rax, [rcx+0x1A8]` and require the fault
+// bytes to live exactly 23 bytes after it (7 + 8 + 8 = 23). That two-piece
+// match is the function we want — if more than one match exists, log all
+// and pick the first; the recovery handler only redirects rax when the
+// faulting RIP equals the chosen RVA so a wrong pick stays inert.
 static uintptr_t ScanForKenshiNullDerefSite() {
     HMODULE host = GetModuleHandleA(nullptr);
     if (!host) return 0;
@@ -148,20 +165,38 @@ static uintptr_t ScanForKenshiNullDerefSite() {
     }
     if (!textBase) return 0;
 
-    static constexpr uint8_t kPattern[] = {
-        0xF3, 0x0F, 0x10, 0x80, 0x90, 0x00, 0x00, 0x00,  // movss xmm0,[rax+0x90]
-        0xF3, 0x0F, 0x59, 0x40, 0x34                     // mulss xmm0,[rax+0x34]
+    static constexpr uint8_t kAnchor[] = {
+        0x48, 0x8B, 0x81, 0xA8, 0x01, 0x00, 0x00     // mov rax, [rcx+0x1A8]
     };
-    constexpr size_t patLen = sizeof(kPattern);
-    if (textSize < patLen) return 0;
-    for (size_t i = 0; i + patLen <= textSize; ++i) {
-        if (memcmp(textBase + i, kPattern, patLen) == 0) {
-            uintptr_t rva = static_cast<uintptr_t>(
-                (textBase + i) - reinterpret_cast<const uint8_t*>(host));
-            return rva;
-        }
+    static constexpr uint8_t kFault[] = {
+        0xF3, 0x0F, 0x10, 0x80, 0x90, 0x00, 0x00, 0x00, // movss xmm0,[rax+0x90]
+        0xF3, 0x0F, 0x59, 0x40, 0x34                    // mulss xmm0,[rax+0x34]
+    };
+    constexpr size_t kAnchorLen = sizeof(kAnchor);
+    constexpr size_t kFaultLen  = sizeof(kFault);
+    constexpr size_t kAnchorToFault = 23; // bytes from anchor start to fault
+    constexpr size_t kFullLen = kAnchorToFault + kFaultLen;
+    if (textSize < kFullLen) return 0;
+
+    uintptr_t firstMatch = 0;
+    int matches = 0;
+    for (size_t i = 0; i + kFullLen <= textSize; ++i) {
+        if (memcmp(textBase + i, kAnchor, kAnchorLen) != 0) continue;
+        if (memcmp(textBase + i + kAnchorToFault, kFault, kFaultLen) != 0) continue;
+        // Match — RVA of the FAULT instruction (where the AV will fire).
+        uintptr_t rva = static_cast<uintptr_t>(
+            (textBase + i + kAnchorToFault) - reinterpret_cast<const uint8_t*>(host));
+        if (matches == 0) firstMatch = rva;
+        ++matches;
+        spdlog::info("Core: ScanForKenshiNullDerefSite — match #{} at game+0x{:X}",
+                     matches, rva);
+        if (matches >= 8) break; // safety cap on logging
     }
-    return 0;
+    if (matches == 0) {
+        spdlog::warn("Core: ScanForKenshiNullDerefSite — no match in .text "
+                     "(0x{:X} bytes scanned)", textSize);
+    }
+    return firstMatch;
 }
 
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
