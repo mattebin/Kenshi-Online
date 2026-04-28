@@ -299,6 +299,34 @@ const TrackedChar* FindByPtr(void* characterPtr) {
     return (it != s_trackedChars.end()) ? &it->second : nullptr;
 }
 
+const TrackedChar* FindByFactionPtr(uintptr_t factionPtr) {
+    if (factionPtr == 0) return nullptr;
+    std::lock_guard lock(s_trackerMutex);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.factionPtr == factionPtr) return &tc;
+    }
+    return nullptr;
+}
+
+std::vector<TrackedChar> FindAllByFactionPtr(uintptr_t factionPtr) {
+    std::vector<TrackedChar> result;
+    if (factionPtr == 0) return result;
+    std::lock_guard lock(s_trackerMutex);
+    result.reserve(8);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.factionPtr == factionPtr) result.push_back(tc);
+    }
+    return result;
+}
+
+uintptr_t ResolveFactionPtrByName(const std::string& name) {
+    std::lock_guard lock(s_trackerMutex);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.name == name && tc.factionPtr != 0) return tc.factionPtr;
+    }
+    return 0;
+}
+
 void* GetLocalPlayerAnimClass() { return s_localPlayerAnimClass; }
 
 void* GetRemotePlayerAnimClass(const std::string& name) {
@@ -355,10 +383,22 @@ void ProcessDeferredDiscovery() {
         std::string name = accessor.GetName();
         if (name.empty()) continue;
 
+        // Read the faction pointer at CharacterHuman+0x10. This is the
+        // identity marker we ultimately want to match on — names collide
+        // (kenshi-online.mod emits many "Player 1" / "Player 2" characters)
+        // but the faction pointer is unique per faction and stable for the
+        // lifetime of the character.
+        uintptr_t factionPtr = 0;
+        Memory::Read(pending.charPtr + 0x10, factionPtr);
+        if (factionPtr < 0x10000 || factionPtr > 0x00007FFFFFFFFFFF) {
+            factionPtr = 0; // sanitize bogus reads
+        }
+
         TrackedChar tc;
         tc.animClassPtr = pending.animClassPtr;
         tc.characterPtr = charKey;
         tc.name = name;
+        tc.factionPtr = factionPtr;
         tc.position = accessor.GetPosition();
         tc.lastSeenTick = GetTickCount64();
 
@@ -367,8 +407,10 @@ void ProcessDeferredDiscovery() {
             s_trackedChars[charKey] = tc;
         }
 
-        spdlog::info("char_tracker: NEW character '{}' at 0x{:X} (animClass=0x{:X})",
-                     name, pending.charPtr, reinterpret_cast<uintptr_t>(pending.animClassPtr));
+        spdlog::info("char_tracker: NEW character '{}' at 0x{:X} (animClass=0x{:X}, faction=0x{:X})",
+                     name, pending.charPtr,
+                     reinterpret_cast<uintptr_t>(pending.animClassPtr),
+                     factionPtr);
 
         if (s_onNewChar) {
             s_onNewChar(tc);
