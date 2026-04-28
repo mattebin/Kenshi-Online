@@ -68,6 +68,15 @@ static int s_gameDataDetectAttempts = 0;
 // ── Direct spawn bypass ──
 static std::atomic<bool> s_directSpawnBypass{false};
 
+// ── Deferred CharacterCreate-disable request ──
+// Set by Hook_CharacterCreate after the first capture. Polled from
+// PollDeferredHookState() which runs from OnGameTick (a safe context, not
+// nested inside the MovRaxRsp wrapper). Disabling the hook from inside its
+// own call stack works *most* of the time but races with concurrent hook
+// firings on other threads — by the time the bypass byte flips, our exit
+// path is still using the wrapper's per-hook globals.
+static std::atomic<bool> s_pendingCreateDisable{false};
+
 // ── Higher-level factory functions (resolved from known RVAs) ──
 // RootObjectFactory::create (0x583400) — dispatches to process() but builds request struct internally.
 // Takes (factory, GameData*), not a raw request struct. This bypasses the stale-pointer problem.
@@ -515,14 +524,22 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
                 SEH_FeedSpawnManager(factory, templateData, r);
             }
 
-            // Got everything we need — DISABLE the hook for the rest of loading.
-            // This prevents 100+ calls through MovRaxRsp wrapper during savegame load.
+            // Got everything we need — request a DEFERRED disable so the actual
+            // bypass-flag flip happens from OnGameTick, not from inside this
+            // detour's call stack. See s_pendingCreateDisable comment.
             if (s_havePreCallData && s_savedFactory) {
                 s_loadingCapturesDone = true;
-                HookManager::Get().Disable("CharacterCreate");
-                OutputDebugStringA("KMP: Hook DISABLED after loading capture — safe passthrough for remaining loads\n");
+                spdlog::info("entity_hooks: capture done — requesting deferred disable "
+                             "(r=0x{:X}, fac=0x{:X}, hookDepth={})",
+                             reinterpret_cast<uintptr_t>(r),
+                             s_earlyPlayerFaction.load(std::memory_order_relaxed),
+                             s_hookDepth);
+                s_pendingCreateDisable.store(true, std::memory_order_release);
+                OutputDebugStringA("KMP: Capture done — disable deferred to next tick\n");
             }
 
+            spdlog::info("entity_hooks: detour returning r=0x{:X} (createNum={}, hookDepth={})",
+                         reinterpret_cast<uintptr_t>(r), createNum, s_hookDepth);
             s_hookDepth--;
             return r;
         }
@@ -938,6 +955,34 @@ void Uninstall() {
         VirtualFree(s_directCallStubAlloc, 0, MEM_RELEASE);
         s_directCallStubAlloc = nullptr;
         s_directCallStub = nullptr;
+    }
+}
+
+// Leaf SEH wrapper — must contain no C++ objects with destructors so the
+// compiler accepts __try (otherwise C2712). The std::string is built by the
+// caller and passed by reference so its destructor is anchored outside.
+static int SEH_DisableHook(const std::string& name, bool* outOk) {
+    __try {
+        *outOk = HookManager::Get().Disable(name);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *outOk = false;
+        return static_cast<int>(GetExceptionCode());
+    }
+}
+
+void PollDeferredHookState() {
+    if (s_pendingCreateDisable.exchange(false, std::memory_order_acq_rel)) {
+        spdlog::info("entity_hooks: PollDeferredHookState — disabling CharacterCreate "
+                     "from safe context");
+        const std::string hookName = "CharacterCreate";
+        bool ok = false;
+        int sehCode = SEH_DisableHook(hookName, &ok);
+        if (sehCode != 0) {
+            spdlog::error("entity_hooks: Disable('CharacterCreate') threw SEH 0x{:08X}",
+                          static_cast<unsigned int>(sehCode));
+        }
+        spdlog::info("entity_hooks: PollDeferredHookState — Disable returned {}", ok);
     }
 }
 

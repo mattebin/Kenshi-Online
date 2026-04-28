@@ -91,6 +91,7 @@ bool ServerConfig::Load(const std::string& path) {
         if (j.contains("tickRate"))   tickRate   = j["tickRate"].get<int>();
         if (j.contains("pvpEnabled")) pvpEnabled = j["pvpEnabled"].get<bool>();
         if (j.contains("gameSpeed"))  gameSpeed  = j["gameSpeed"].get<float>();
+        if (j.contains("enablePortForwarding")) enablePortForwarding = j["enablePortForwarding"].get<bool>();
         if (j.contains("masterServer")) masterServer = j["masterServer"].get<std::string>();
         if (j.contains("masterPort"))   masterPort   = j["masterPort"].get<uint16_t>();
         return true;
@@ -109,6 +110,7 @@ bool ServerConfig::Save(const std::string& path) const {
     j["tickRate"]   = tickRate;
     j["pvpEnabled"] = pvpEnabled;
     j["gameSpeed"]  = gameSpeed;
+    j["enablePortForwarding"] = enablePortForwarding;
     j["masterServer"] = masterServer;
     j["masterPort"]   = masterPort;
 

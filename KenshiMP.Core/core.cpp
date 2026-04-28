@@ -1777,6 +1777,12 @@ void Core::OnGameTick(float deltaTime) {
         OutputDebugStringA(buf);
     }
 
+    // ── Process any pending hook-state changes queued from inside a hook
+    //    callback (e.g. CharacterCreate self-disable after first capture).
+    //    This MUST run before any of the pipeline / connected-only short-circuits
+    //    so the hook is always disabled promptly even during loading-only sessions.
+    entity_hooks::PollDeferredHookState();
+
     if (!m_connected) return;
 
     // ── Per-frame dedup guard ──

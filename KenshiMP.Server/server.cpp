@@ -30,8 +30,9 @@ bool GameServer::Start(const ServerConfig& config) {
 
     // ── UPnP / Firewall: do this BEFORE listening ──
     // The server doesn't accept any connections until the port is mapped.
-    spdlog::info("GameServer: Setting up port forwarding for port {}...", config.port);
-    if (m_upnp.AddMapping(config.port, config.port, "UDP", "KenshiMP Server")) {
+    if (config.enablePortForwarding) {
+        spdlog::info("GameServer: Setting up port forwarding for port {}...", config.port);
+        if (m_upnp.AddMapping(config.port, config.port, "UDP", "KenshiMP Server")) {
         std::string extIP = m_upnp.GetExternalIP();
         if (!extIP.empty()) {
             spdlog::info("GameServer: UPnP mapped! Others can join at {}:{}", extIP, config.port);
@@ -56,6 +57,10 @@ bool GameServer::Start(const ServerConfig& config) {
     }
 
     // ── Now start listening — port is mapped (or we tried our best) ──
+    } else {
+        spdlog::info("GameServer: Port forwarding disabled; listening locally/LAN only on UDP {}", config.port);
+    }
+
     ENetAddress address;
     address.host = ENET_HOST_ANY;
     address.port = config.port;

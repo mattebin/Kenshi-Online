@@ -64,4 +64,11 @@ int GetGameDataOffsetInStruct();
 // Returns -1 if not yet detected.
 int GetPositionOffsetInStruct();
 
+// Process any pending hook-state changes that were queued from inside a hook
+// callback. Calling HookManager::Disable() while we are still on the hook's
+// own call stack puts the toggle on the same call frame as the active wrapper
+// invocation, which is fragile under racy thread scheduling. This poll runs
+// from a safe context (game tick / main loop) so the toggle happens cleanly.
+void PollDeferredHookState();
+
 } // namespace kmp::entity_hooks

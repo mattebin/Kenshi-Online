@@ -1,6 +1,8 @@
 #include "render_hooks.h"
 #include "../core.h"
 #include "entity_hooks.h"
+#include "../game/spawn_manager.h"
+#include "../ui/native_hud.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
 #include <d3d11.h>
@@ -78,14 +80,24 @@ static LRESULT WndProcInner(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     // F1 key: toggle native menu (ignore auto-repeat: bit 30 of lParam = previous key state)
     if (uMsg == WM_KEYDOWN && wParam == VK_F1 && !(lParam & 0x40000000)) {
-        auto& overlay = Core::Get().GetOverlay();
+        auto& core = Core::Get();
+        auto& overlay = core.GetOverlay();
         auto& nativeMenu = overlay.GetNativeMenu();
         if (nativeMenu.IsVisible()) {
             nativeMenu.Hide();
-        } else if (!Core::Get().IsGameLoaded() && !IsMainMenuReady()) {
+        } else if (!core.IsGameLoaded() && !IsMainMenuReady()) {
             OutputDebugStringA("KMP: F1 pressed too early (logo/splash) — ignoring\n");
+        } else if (core.IsGameLoaded() && !core.GetSpawnManager().HasSpawnPathReady()) {
+            // In-game but spawn path not yet captured — opening the menu now invites
+            // the user to click JOIN before the engine has finished its first
+            // CharacterCreate, which is the unsafe window. Surface a HUD message
+            // and don't open the panel until ready.
+            core.GetNativeHud().AddSystemMessage(
+                "Multiplayer initializing — wait a few seconds and press F1 again.");
+            spdlog::info("render_hooks: F1 blocked — spawn path not ready yet");
+            OutputDebugStringA("KMP: F1 blocked — spawn path not ready yet\n");
         } else {
-            // Works on main menu AND in-game
+            // Works on main menu AND in-game (and in-game with spawn path ready)
             nativeMenu.Show();
         }
         return 0; // consume the key
