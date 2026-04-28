@@ -253,6 +253,9 @@ void SpawnManager::OnGameCharacterCreated(void* factory, void* gameData, void* c
                     m_managerPointer = candidateMgr;
                     spdlog::info("SpawnManager: VALIDATED template '{}' from char+0x{:X} = 0x{:X} (mgr=0x{:X})",
                                  name, offset, candidateGD, candidateMgr);
+                    spdlog::default_logger()->flush();
+                    spdlog::info("SpawnManager: VALIDATED first-capture path complete (post-flush marker)");
+                    spdlog::default_logger()->flush();
                 } else {
                     spdlog::debug("SpawnManager: Additional template '{}' at 0x{:X} (factoryTotal={}, charTotal={})",
                                   name, candidateGD, m_factoryInputTemplates.size(),

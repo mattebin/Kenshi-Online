@@ -409,9 +409,10 @@ bool Core::Initialize() {
             g_lastStepName ? g_lastStepName : "?");
         OutputDebugStringA(buf);
 
-        // Write to crash log
+        // Write to crash log next to the host process (Kenshi folder), not a
+        // hardcoded Steam path — the user may have Kenshi in any Steam library.
         FILE* f = nullptr;
-        fopen_s(&f, "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Kenshi\\KenshiOnline_CRASH.log", "a");
+        fopen_s(&f, "KenshiOnline_CRASH.log", "a");
         if (f) {
             fprintf(f, "\n%s", buf);
             auto* ctx = ep->ContextRecord;
@@ -420,9 +421,53 @@ bool Core::Initialize() {
             fprintf(f, "  RAX=0x%016llX RBX=0x%016llX RCX=0x%016llX RDX=0x%016llX\n",
                     (unsigned long long)ctx->Rax, (unsigned long long)ctx->Rbx,
                     (unsigned long long)ctx->Rcx, (unsigned long long)ctx->Rdx);
+            fprintf(f, "  R8 =0x%016llX R9 =0x%016llX R10=0x%016llX R11=0x%016llX\n",
+                    (unsigned long long)ctx->R8, (unsigned long long)ctx->R9,
+                    (unsigned long long)ctx->R10, (unsigned long long)ctx->R11);
+            fprintf(f, "  Source: SetUnhandledExceptionFilter (caught what VEH missed)\n");
             fclose(f);
         }
         return EXCEPTION_CONTINUE_SEARCH;
+    });
+
+    // RaiseFailFastException / __fastfail bypass both VEH and the unhandled
+    // exception filter on Win10+. Hook the C runtime's invalid-parameter,
+    // pure-call, and abort handlers so we get *some* trace before the process
+    // hard-exits via fast-fail.
+    _set_invalid_parameter_handler(
+        [](const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+            FILE* f = nullptr;
+            fopen_s(&f, "KenshiOnline_CRASH.log", "a");
+            if (f) {
+                fprintf(f, "\nKMP CRT TRIP: invalid_parameter_handler fired "
+                           "(LastCreate=#%d, tick=#%d, step=%d %s)\n",
+                        g_lastCharacterCreateNum, g_tickNumber, g_lastTickStep,
+                        g_lastStepName ? g_lastStepName : "?");
+                fclose(f);
+            }
+            OutputDebugStringA("KMP CRT TRIP: invalid_parameter_handler\n");
+        });
+    _set_purecall_handler([]() {
+        FILE* f = nullptr;
+        fopen_s(&f, "KenshiOnline_CRASH.log", "a");
+        if (f) {
+            fprintf(f, "\nKMP CRT TRIP: pure virtual call (LastCreate=#%d, tick=#%d, step=%d %s)\n",
+                    g_lastCharacterCreateNum, g_tickNumber, g_lastTickStep,
+                    g_lastStepName ? g_lastStepName : "?");
+            fclose(f);
+        }
+        OutputDebugStringA("KMP CRT TRIP: purecall\n");
+    });
+    signal(SIGABRT, [](int) {
+        FILE* f = nullptr;
+        fopen_s(&f, "KenshiOnline_CRASH.log", "a");
+        if (f) {
+            fprintf(f, "\nKMP CRT TRIP: SIGABRT (LastCreate=#%d, tick=#%d, step=%d %s)\n",
+                    g_lastCharacterCreateNum, g_tickNumber, g_lastTickStep,
+                    g_lastStepName ? g_lastStepName : "?");
+            fclose(f);
+        }
+        OutputDebugStringA("KMP CRT TRIP: SIGABRT\n");
     });
 
     OutputDebugStringA("KMP: === Kenshi-Online v0.1.0 Initializing ===\n");

@@ -350,6 +350,7 @@ static SEH_EntityInfo SEH_ReadAndRegisterEntity(void* character, void* templateD
     __try {
         auto& coreRef = Core::Get();
         info.charData = SEH_ReadCharacterData(character);
+        OutputDebugStringA("KMP: SEH_ReadAndRegisterEntity post-ReadCharacterData\n");
         if (!info.charData.valid) return info;
         if (info.charData.position.x == 0.f && info.charData.position.y == 0.f && info.charData.position.z == 0.f) return info;
 
@@ -730,15 +731,35 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
     // and SEH_ConnectedPostProcess would re-register as LOCAL and send a
     // spurious C2S_EntitySpawnReq to the server.
     if (!wasHijacked) {
+        // Diagnostic markers for the silent-termination on first connected
+        // CharacterCreate. Each line is followed by an explicit flush so we
+        // know exactly which boundary was reached when Kenshi terminates.
+        spdlog::info("entity_hooks: pre-FeedSpawnManager (createNum={}, char=0x{:X}, td=0x{:X})",
+                     s_connectedCreateNum.load(),
+                     reinterpret_cast<uintptr_t>(character),
+                     reinterpret_cast<uintptr_t>(templateData));
+        spdlog::default_logger()->flush();
+
         // Feed SpawnManager
         SEH_FeedSpawnManager(factory, templateData, character);
 
+        spdlog::info("entity_hooks: post-FeedSpawnManager returned (char=0x{:X})",
+                     reinterpret_cast<uintptr_t>(character));
+        spdlog::default_logger()->flush();
+
         // Register player faction characters in EntityRegistry (SEH-protected, no C++ objects)
         if (coreRef.IsGameLoaded()) {
+            spdlog::info("entity_hooks: pre-ConnectedPostProcess");
+            spdlog::default_logger()->flush();
             SEH_ConnectedPostProcess(character, templateData, s_connectedCreateNum);
+            spdlog::info("entity_hooks: post-ConnectedPostProcess (clean exit)");
+            spdlog::default_logger()->flush();
         }
     }
 
+    spdlog::info("entity_hooks: detour exit (createNum={}, hookDepth={}, wasHijacked={})",
+                 s_connectedCreateNum.load(), s_hookDepth, wasHijacked);
+    spdlog::default_logger()->flush();
     s_hookDepth--;
     return character;
 }
