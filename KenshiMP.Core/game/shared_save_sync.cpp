@@ -401,6 +401,20 @@ void Update(float deltaTime) {
             writer.WriteRaw(&cp, sizeof(cp));
 
             core.GetClient().SendUnreliable(writer.Data(), writer.Size());
+
+            // Watcher: throttled log of outbound position so we can confirm
+            // the broadcast is actually firing (the wire-level send isn't
+            // logged anywhere else). Every 50th send ≈ 2.5 seconds at the
+            // 50 ms cadence.
+            static int s_posSendCount = 0;
+            int n = ++s_posSendCount;
+            if (n <= 5 || n % 50 == 0) {
+                spdlog::info("WATCH/POS: sent #{} pos=({:.1f},{:.1f},{:.1f}) "
+                             "from animClass=0x{:X}",
+                             n, myPos.x, myPos.y, myPos.z,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass));
+                spdlog::default_logger()->flush();
+            }
         }
     }
 
