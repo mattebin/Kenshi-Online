@@ -498,37 +498,34 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
     // the original function. Safe here because loading creates are sequential
     // (not reentrant), so the wrapper's global slots don't conflict.
     if (!coreRef.IsConnected()) {
-        // ── SAFE-MODE: pure passthrough on the loading branch too ──
+        // ── SAFE-MODE: pure passthrough on the loading branch ──
         // Empirical finding (KNOWN_ISSUES.md): the loading-branch first capture
-        // *also* triggers the silent termination. In session 39364 a Singleplayer
-        // start fired the capture for "Dust Boss", logged "detour returning r=...",
-        // and Kenshi terminated immediately afterward. Same signature as the
-        // connected-branch crash. Until a debugger pins it down, do nothing here:
-        // no SEH_MemcpySafe of templateData, no SetFactory, no SEH_FeedSpawnManager,
-        // no faction read. Just CallOriginalCreate and return.
-        //
-        // Trade-off: the spawn system's m_managerPointer / pre-call data / factory
-        // pointer are never captured, so SpawnManager will not be able to spawn
-        // remote players. shared_save_sync still works because it locates the
-        // existing in-world Player 1 / Player 2 characters by NAME, not by spawn.
-        // That is enough for "two people share the same world and see each other"
-        // even with the spawn pipeline disabled.
-        spdlog::info("entity_hooks: SAFE-MODE loading branch — pure passthrough "
-                     "(createNum={}, td=0x{:X})",
-                     createNum, reinterpret_cast<uintptr_t>(templateData));
-        spdlog::default_logger()->flush();
-        void* r = CallOriginalCreate(factory, templateData);
-        spdlog::info("entity_hooks: SAFE-MODE loading branch returning r=0x{:X}",
-                     reinterpret_cast<uintptr_t>(r));
-        spdlog::default_logger()->flush();
-        s_hookDepth--;
-        return r;
+        // *also* triggers the silent termination. Default ON to keep sessions
+        // alive; flip safeModeFirstConnectedCreate=false to bypass and
+        // reproduce the underlying fault when investigating root cause.
+        if (Core::Get().GetConfig().safeModeFirstConnectedCreate) {
+            spdlog::info("entity_hooks: SAFE-MODE loading branch — pure passthrough "
+                         "(createNum={}, td=0x{:X})",
+                         createNum, reinterpret_cast<uintptr_t>(templateData));
+            spdlog::default_logger()->flush();
+            void* r = CallOriginalCreate(factory, templateData);
+            spdlog::info("entity_hooks: SAFE-MODE loading branch returning r=0x{:X}",
+                         reinterpret_cast<uintptr_t>(r));
+            spdlog::default_logger()->flush();
+            s_hookDepth--;
+            return r;
+        }
+        // SAFE-MODE disabled — fall through to the (legacy GOG-baseline)
+        // capture path below. Triggers the silent termination on Steam, kept
+        // for upstream maintainer investigation.
 
-        // ── ORIGINAL CAPTURE PATH — disabled by the early return above ──
-        // Kept under `if constexpr (false)` so it stays compilable as a
-        // reference for whoever re-enables it once the heap-corruption root
-        // cause is found. The early return above is the live behaviour.
-        if constexpr (false) {
+        // ── ORIGINAL CAPTURE PATH — runs only when SAFE-MODE is disabled ──
+        // This is the upstream-baseline capture flow (set factory pointer,
+        // copy the request struct for in-place replay, read the player's
+        // faction off the first character). Triggers a Kenshi-side fault on
+        // Steam soon after the first capture; useful for upstream
+        // maintainers reproducing the issue with a debugger attached.
+        {
             if (!s_loadingCapturesDone) {
                 if (templateData && !s_havePreCallData) {
                     if (SEH_MemcpySafe(s_preCallStruct, templateData, REQUEST_STRUCT_SIZE)) {
@@ -590,12 +587,15 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
     // return — most likely heap corruption tripping HeapEnableTerminationOnCorruption,
     // which bypasses VEH/UEF/CRT trip handlers.
     //
-    // Until that's diagnosed with a debugger, do absolutely nothing on the first
-    // connected create — no struct copy, no offset detection, no spawn manager
-    // feed, no entity registration. Just CallOriginalCreate and return. We lose
-    // capture data for that one NPC but the session stays alive, which is the
-    // prerequisite for any other co-op feature working.
-    if (connNum == 1) {
+    // Default ON (safeModeFirstConnectedCreate=true): skip all post-spawn
+    // capture work for the first connected create — no struct copy, no offset
+    // detection, no spawn manager feed, no entity registration. Just
+    // CallOriginalCreate and return. We lose capture data for that one NPC
+    // but the session stays alive.
+    //
+    // Flip to false to bypass the workaround and reproduce the underlying
+    // fault — useful when investigating the root cause with a debugger.
+    if (connNum == 1 && Core::Get().GetConfig().safeModeFirstConnectedCreate) {
         spdlog::info("entity_hooks: SAFE-MODE first connected create — pure passthrough (workaround)");
         spdlog::default_logger()->flush();
         void* r = CallOriginalCreate(factory, templateData);
@@ -1086,15 +1086,21 @@ void ResumeForNetwork() {
     s_earlyFactionLocked.store(false);
     s_earlyPlayerFaction.store(0);
 
-    // CharacterCreate hook stays bypassed across the connect transition.
-    // See the comment on the matching block in Core::OnGameLoaded for why —
-    // re-enabling the hook so the wrapper actually intercepts a runtime
-    // NPC create silently terminates Kenshi within milliseconds of our
-    // detour returning. shared_save_sync handles the "see each other"
-    // case via name-based discovery and does not need the spawn pipeline.
-    spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate left bypassed "
-                 "(earlyFaction=0x{:X}, fallback=0x{:X}, see KNOWN_ISSUES.md)",
-                 earlyFac, s_fallbackFaction.load(std::memory_order_relaxed));
+    // CharacterCreate hook re-enable on connect — gated by the same config
+    // flag as Core::OnGameLoaded above. Default OFF; flip to test the spawn
+    // pipeline. See KNOWN_ISSUES.md for the connected-intercept fault.
+    if (Core::Get().GetConfig().enableCharacterCreateHook) {
+        if (HookManager::Get().Enable("CharacterCreate")) {
+            spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate ENABLED "
+                         "(experimental, earlyFaction=0x{:X})", earlyFac);
+        } else {
+            spdlog::warn("entity_hooks: ResumeForNetwork — Enable() returned false");
+        }
+    } else {
+        spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate left bypassed "
+                     "(default; earlyFaction=0x{:X}, fallback=0x{:X})",
+                     earlyFac, s_fallbackFaction.load(std::memory_order_relaxed));
+    }
 }
 
 void SuspendForDisconnect() {

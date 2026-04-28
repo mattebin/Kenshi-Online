@@ -2,6 +2,7 @@
 #include "ai_hooks.h"
 #include "../core.h"
 #include "../game/game_types.h"
+#include "../sys/watcher.h"
 #include "kmp/hook_manager.h"
 #include "kmp/protocol.h"
 #include "kmp/safe_hook.h"
@@ -87,10 +88,12 @@ static bool PopEvent(DeferredCombatEvent& out) {
 
 static void __fastcall Hook_CharacterDeath(void* character, void* killer) {
     int dn = s_deathCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    spdlog::info("WATCH/HOOK: CharacterDeath enter #{} (char=0x{:X}, killer=0x{:X})",
-                 dn, reinterpret_cast<uintptr_t>(character),
-                 reinterpret_cast<uintptr_t>(killer));
-    spdlog::default_logger()->flush();
+    if (kmp::watcher::IsEnabled()) {
+        spdlog::info("WATCH/HOOK: CharacterDeath enter #{} (char=0x{:X}, killer=0x{:X})",
+                     dn, reinterpret_cast<uintptr_t>(character),
+                     reinterpret_cast<uintptr_t>(killer));
+        spdlog::default_logger()->flush();
+    }
 
     // Call original FIRST (SEH-protected) — game death logic must always run
     SafeCall_Void_PtrPtr(reinterpret_cast<void*>(s_origCharDeath),
@@ -115,10 +118,12 @@ static void __fastcall Hook_CharacterDeath(void* character, void* killer) {
 
 static void __fastcall Hook_CharacterKO(void* character, void* attacker, int reason) {
     int kn = s_koCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    spdlog::info("WATCH/HOOK: CharacterKO enter #{} (char=0x{:X}, attacker=0x{:X}, reason={})",
-                 kn, reinterpret_cast<uintptr_t>(character),
-                 reinterpret_cast<uintptr_t>(attacker), reason);
-    spdlog::default_logger()->flush();
+    if (kmp::watcher::IsEnabled()) {
+        spdlog::info("WATCH/HOOK: CharacterKO enter #{} (char=0x{:X}, attacker=0x{:X}, reason={})",
+                     kn, reinterpret_cast<uintptr_t>(character),
+                     reinterpret_cast<uintptr_t>(attacker), reason);
+        spdlog::default_logger()->flush();
+    }
 
     // Call original FIRST (SEH-protected) — game KO logic must always run
     SafeCall_Void_PtrPtrI(reinterpret_cast<void*>(s_origCharKO),

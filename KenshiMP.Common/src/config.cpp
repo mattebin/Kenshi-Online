@@ -50,6 +50,12 @@ bool ClientConfig::Load(const std::string& path) {
         if (j.contains("masterServer")) masterServer = j["masterServer"].get<std::string>();
         if (j.contains("masterPort"))   masterPort   = j["masterPort"].get<uint16_t>();
         if (j.contains("useSyncOrchestrator")) useSyncOrchestrator = j["useSyncOrchestrator"].get<bool>();
+        if (j.contains("verboseWatchLog"))     verboseWatchLog     = j["verboseWatchLog"].get<bool>();
+        if (j.contains("kenshiCrashRecovery")) kenshiCrashRecovery = j["kenshiCrashRecovery"].get<bool>();
+        if (j.contains("enableCharacterCreateHook"))
+            enableCharacterCreateHook = j["enableCharacterCreateHook"].get<bool>();
+        if (j.contains("safeModeFirstConnectedCreate"))
+            safeModeFirstConnectedCreate = j["safeModeFirstConnectedCreate"].get<bool>();
         return true;
     } catch (...) {
         return false;
@@ -67,6 +73,10 @@ bool ClientConfig::Save(const std::string& path) const {
     j["masterServer"] = masterServer;
     j["masterPort"]   = masterPort;
     j["useSyncOrchestrator"] = useSyncOrchestrator;
+    j["verboseWatchLog"]              = verboseWatchLog;
+    j["kenshiCrashRecovery"]          = kenshiCrashRecovery;
+    j["enableCharacterCreateHook"]    = enableCharacterCreateHook;
+    j["safeModeFirstConnectedCreate"] = safeModeFirstConnectedCreate;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;

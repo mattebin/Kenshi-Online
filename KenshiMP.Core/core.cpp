@@ -3,6 +3,7 @@
 #include "hooks/render_hooks.h"
 #include "hooks/input_hooks.h"
 #include "hooks/entity_hooks.h"
+#include "sys/watcher.h"
 #include "hooks/movement_hooks.h"
 #include "hooks/combat_hooks.h"
 #include "hooks/world_hooks.h"
@@ -94,49 +95,100 @@ static int SEH_DumpStack(char* outBuf, int outBufSize, uint64_t rsp) {
     return pos;
 }
 
-// ── Static zero buffer for the game+0x644365 recovery ──
-// The recurring engine crash at this RVA reads two floats from rax+0x90 and
-// rax+0x34 when rax is null. We can't fix the underlying bug (some periodic
-// AI/animation calc finds a null target pointer in slot +0x1A8 of the
-// caller's `this`), but we can supply a safe zero-filled buffer at the
-// moment of fault, redirect rax to it, and continue. The instructions
-// then read 0.0f, the function multiplies through to 0.0f, returns "false",
-// and the game continues as if the calc didn't fire this frame.
+// ── Static zero buffer for the engine null-deref recovery ──
+// The recurring engine crash at the discovered RVA reads two floats from
+// rax+0x90 and rax+0x34 when rax is null. We can't fix the underlying bug
+// (some periodic AI/animation calc finds a null target pointer in slot
+// +0x1A8 of the caller's `this`), but we can supply a safe zero-filled
+// buffer at the moment of fault, redirect rax to it, and continue. The
+// instructions then read 0.0f, the function multiplies through to 0.0f,
+// returns "false", and the game continues as if the calc didn't fire this
+// frame.
 //
 // 0x200 bytes is overkill — the disassembled instructions only deref +0x90
 // and +0x34 — but the margin protects against any compiler-emitted prefetch
 // or look-ahead reads we can't see at this offset.
 alignas(16) static const uint8_t s_safeZeroBuf[0x200] = {0};
 
-// Recurring engine fault site. Captured here so the static-init dependency
-// is explicit and a future Kenshi patch breaking the offset is loud.
-static constexpr uintptr_t KENSHI_NULL_DEREF_RVA = 0x644365;
+// Pattern-discovered RVA of the engine null-deref site. Set once at
+// Core::Initialize via a scan of kenshi_x64.exe's .text section for the
+// instruction signature `movss xmm0,[rax+0x90]; mulss xmm0,[rax+0x34]`
+// (bytes F3 0F 10 80 90 00 00 00 F3 0F 59 40 34). Zero means "didn't find
+// the pattern" — recovery handler stays dormant in that case so we never
+// redirect rax in a context where the bug isn't the one we know.
+//
+// Atomic because the VEH callback can fire from any thread; the scan
+// runs serially during init.
+static std::atomic<uintptr_t> g_kenshiNullDerefRVA{0};
+
+// Master gate from ClientConfig::kenshiCrashRecovery. Default off until
+// Core::Initialize sees the config; once on, every fault that matches the
+// scanned RVA gets redirected. Same atomic-bool reasoning as above.
+static std::atomic<bool> g_kenshiCrashRecoveryEnabled{false};
+
+// Scan helper — runs on the kenshi_x64.exe module loaded into the host
+// process. Pattern is the exact byte sequence we disassembled in test
+// session 22004; it should match a single point in any Kenshi build that
+// ships the same engine bug.
+static uintptr_t ScanForKenshiNullDerefSite() {
+    HMODULE host = GetModuleHandleA(nullptr);
+    if (!host) return 0;
+    auto* dosH = reinterpret_cast<const IMAGE_DOS_HEADER*>(host);
+    auto* ntH  = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                    reinterpret_cast<const uint8_t*>(host) + dosH->e_lfanew);
+    auto* sec  = IMAGE_FIRST_SECTION(ntH);
+    const uint8_t* textBase = nullptr;
+    size_t textSize = 0;
+    for (unsigned i = 0; i < ntH->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (memcmp(sec->Name, ".text", 5) == 0) {
+            textBase = reinterpret_cast<const uint8_t*>(host) + sec->VirtualAddress;
+            textSize = sec->Misc.VirtualSize;
+            break;
+        }
+    }
+    if (!textBase) return 0;
+
+    static constexpr uint8_t kPattern[] = {
+        0xF3, 0x0F, 0x10, 0x80, 0x90, 0x00, 0x00, 0x00,  // movss xmm0,[rax+0x90]
+        0xF3, 0x0F, 0x59, 0x40, 0x34                     // mulss xmm0,[rax+0x34]
+    };
+    constexpr size_t patLen = sizeof(kPattern);
+    if (textSize < patLen) return 0;
+    for (size_t i = 0; i + patLen <= textSize; ++i) {
+        if (memcmp(textBase + i, kPattern, patLen) == 0) {
+            uintptr_t rva = static_cast<uintptr_t>(
+                (textBase + i) - reinterpret_cast<const uint8_t*>(host));
+            return rva;
+        }
+    }
+    return 0;
+}
 
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
 
     // ── Recovery: Kenshi engine periodic-AI null deref ──
-    // If the AV is at the well-known game+0x644365 instruction with rax=0
-    // reading [rax+0x90], redirect rax to a static zero buffer and resume.
-    // This converts what was a hard process termination into a single
-    // "this calc returned 0 this frame" no-op. See KNOWN_ISSUES.md for the
-    // disassembly of the function and why this is safe.
-    if (code == EXCEPTION_ACCESS_VIOLATION &&
+    // Pattern-scanned at init. Gated by ClientConfig::kenshiCrashRecovery so
+    // upstream maintainers / debuggers can disable it to reproduce the
+    // underlying engine bug if they want to investigate root cause.
+    if (g_kenshiCrashRecoveryEnabled.load(std::memory_order_relaxed) &&
+        code == EXCEPTION_ACCESS_VIOLATION &&
         ep->ExceptionRecord->NumberParameters >= 2 &&
         ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */ &&
         ep->ExceptionRecord->ExceptionInformation[1] == 0x90 &&
         g_gameModuleBase != 0)
     {
+        uintptr_t recoverRva = g_kenshiNullDerefRVA.load(std::memory_order_relaxed);
         uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
             ep->ExceptionRecord->ExceptionAddress);
-        if (fault_rip == g_gameModuleBase + KENSHI_NULL_DEREF_RVA &&
+        if (recoverRva != 0 &&
+            fault_rip == g_gameModuleBase + recoverRva &&
             ep->ContextRecord->Rax == 0)
         {
             ep->ContextRecord->Rax = reinterpret_cast<DWORD64>(s_safeZeroBuf);
-            // One log line per session so the workaround is visible without
-            // flooding (this fault can fire many times per minute under
-            // some game states). Use OutputDebugStringA — spdlog is unsafe
-            // from inside an exception handler that can re-enter.
+            // Power-of-two log throttle so the workaround is visible without
+            // flooding under heavy fault rates. OutputDebugStringA — spdlog
+            // is unsafe from inside an exception handler that can re-enter.
             static volatile LONG s_recoverCount = 0;
             LONG n = InterlockedIncrement(&s_recoverCount);
             if (n == 1 || (n & (n - 1)) == 0 /* power of two */) {
@@ -144,7 +196,7 @@ static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
                 sprintf_s(buf,
                     "KMP RECOVER #%ld: game+0x%llX null-deref at +0x90, "
                     "redirected rax to safe zero buffer\n",
-                    n, (unsigned long long)KENSHI_NULL_DEREF_RVA);
+                    n, (unsigned long long)recoverRva);
                 OutputDebugStringA(buf);
             }
             return EXCEPTION_CONTINUE_EXECUTION;
@@ -557,6 +609,30 @@ bool Core::Initialize() {
     std::string configPath = ClientConfig::GetDefaultPath();
     m_config.Load(configPath);
     m_nativeHud.LogStep("INIT", "Config loaded");
+
+    // Apply experimental flags from config to their runtime sinks. Doing it
+    // once here keeps the call sites cheap (single atomic load instead of
+    // routing through Core::GetConfig() on every emit).
+    kmp::watcher::SetEnabled(m_config.verboseWatchLog);
+    g_kenshiCrashRecoveryEnabled.store(m_config.kenshiCrashRecovery,
+                                       std::memory_order_relaxed);
+
+    // Pattern-scan kenshi_x64.exe for the engine null-deref site so the
+    // VEH recovery handler arms with a build-correct RVA instead of a
+    // hardcoded one. Skip the scan entirely when the recovery is disabled
+    // by config — wasted work otherwise.
+    if (m_config.kenshiCrashRecovery) {
+        uintptr_t rva = ScanForKenshiNullDerefSite();
+        g_kenshiNullDerefRVA.store(rva, std::memory_order_relaxed);
+        if (rva != 0) {
+            spdlog::info("Core: kenshi-crash-recovery armed at game+0x{:X}", rva);
+        } else {
+            spdlog::warn("Core: kenshi-crash-recovery enabled but pattern not "
+                         "found in this build — recovery handler dormant");
+        }
+    } else {
+        spdlog::info("Core: kenshi-crash-recovery disabled by config");
+    }
 
     // Initialize game offsets (CE fallbacks)
     game::InitOffsetsFromScanner();
@@ -1582,27 +1658,38 @@ void Core::OnGameLoaded() {
         }
     }
 
-    // CharacterCreate hook stays DISABLED after loading.
-    // Empirical: every test session that re-enabled it (so the wrapper got to
-    // intercept a Kenshi-spawned NPC after connect) silently terminated within
-    // milliseconds of our detour returning, regardless of what the detour did
-    // (including pure passthrough). The fault path is outside VEH/UEF/CRT
-    // coverage. Until a debugger pins down what specifically about the
-    // intercept corrupts engine state, leave the hook BYPASSED — the wrapper's
-    // bypass-flag path is a single immediate JMP to the raw trampoline (no
-    // global slot writes, no C++ detour entry, no stack-gap allocation). That
-    // matches "no hook at all" for runtime safety while keeping the hook
-    // *installed* so a future fix can flip the flag and re-enable cleanly.
+    // CharacterCreate hook re-enable, gated by config.
     //
-    // Trade-off: SpawnManager never gets factory data, so server-driven
-    // remote-player spawning won't work. shared_save_sync still locates
-    // existing in-world Player 1 / Player 2 by name via char_tracker_hooks
+    // Empirical (test session 31640): every session that re-enabled this hook
+    // post-load silently terminated within milliseconds of the first runtime
+    // NPC create, regardless of what the detour did (including pure
+    // passthrough). The fault path is outside VEH/UEF/CRT coverage. Until a
+    // debugger pins down what specifically about the intercept corrupts
+    // engine state, the default is OFF — the wrapper's bypass-flag path
+    // becomes a single JMP to the raw trampoline (no global slot writes, no
+    // C++ detour entry, no stack-gap allocation). That matches "no hook at
+    // all" for runtime safety while keeping the hook *installed* so this
+    // flag can flip and the spawn pipeline re-arm cleanly.
+    //
+    // Trade-off when disabled: SpawnManager never gets factory data, so
+    // server-driven remote-player spawning won't work. shared_save_sync
+    // still locates existing in-world Player 1 / Player 2 via char_tracker
     // — that is enough for two players sharing the same save world to see
     // each other.
-    spdlog::info("Core::OnGameLoaded — CharacterCreate hook STAYS DISABLED "
-                 "(wrapper intercept of runtime NPCs trips a Kenshi-side fault, "
-                 "see KNOWN_ISSUES.md)");
-    m_nativeHud.LogStep("HOOK", "CharacterCreate stays disabled (safety)");
+    if (m_config.enableCharacterCreateHook) {
+        if (HookManager::Get().Enable("CharacterCreate")) {
+            spdlog::info("Core::OnGameLoaded — CharacterCreate hook ENABLED "
+                         "(experimental, may trip the Kenshi-side intercept fault)");
+            m_nativeHud.LogStep("HOOK", "CharacterCreate enabled (post-load, experimental)");
+        } else {
+            spdlog::warn("Core::OnGameLoaded — CharacterCreate Enable() returned false");
+            m_nativeHud.LogStep("WARN", "CharacterCreate enable failed");
+        }
+    } else {
+        spdlog::info("Core::OnGameLoaded — CharacterCreate hook STAYS DISABLED "
+                     "(default; flip enableCharacterCreateHook to test)");
+        m_nativeHud.LogStep("HOOK", "CharacterCreate stays disabled (safety)");
+    }
 
     // ═══ DUMP ALL FUNCTIONS AND OFFSETS ═══
     {
@@ -2261,8 +2348,9 @@ void Core::OnGameTick(float deltaTime) {
 
     // Watcher: every Nth tick, write a "tick_complete EXIT" so we can tell
     // whether OnGameTick returned cleanly or terminated mid-step. Throttled
-    // because OnGameTick fires hundreds of times per second.
-    if (s_tickCallCount <= 30 || s_tickCallCount % 100 == 0) {
+    // because OnGameTick fires hundreds of times per second. Disabled by
+    // default — flip verboseWatchLog in client.json to enable.
+    if (kmp::watcher::IsEnabled() && (s_tickCallCount <= 30 || s_tickCallCount % 100 == 0)) {
         spdlog::info("WATCH/TICK: tick_complete EXIT (call #{}, dt={:.4f})",
                      s_tickCallCount, deltaTime);
         auto logger = spdlog::default_logger();

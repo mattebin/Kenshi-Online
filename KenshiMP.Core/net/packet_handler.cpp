@@ -8,6 +8,7 @@
 #include "../hooks/entity_hooks.h"
 #include "../hooks/time_hooks.h"
 #include "../hooks/squad_hooks.h"
+#include "../sys/watcher.h"
 #include "../hooks/faction_hooks.h"
 #include "../hooks/ai_hooks.h"
 #include "kmp/protocol.h"
@@ -52,11 +53,14 @@ public:
             spdlog::debug("PacketHandler: pkt #{} type={} size={} ch={}",
                           s_packetNum, static_cast<int>(header.type), size, channel);
         }
-        // Watcher: ALWAYS log packet dispatch at info level + flush, so the
+        // Watcher: log packet dispatch at info level + flush, so the
         // last packet processed before a silent termination is recoverable.
-        spdlog::info("WATCH/PKT: dispatch #{} type={} size={} ch={}",
-                     s_packetNum, static_cast<int>(header.type), size, channel);
-        spdlog::default_logger()->flush();
+        // Off by default — flip verboseWatchLog in client.json to enable.
+        if (kmp::watcher::IsEnabled()) {
+            spdlog::info("WATCH/PKT: dispatch #{} type={} size={} ch={}",
+                         s_packetNum, static_cast<int>(header.type), size, channel);
+            spdlog::default_logger()->flush();
+        }
 
         // ── SAFE messages (work without game world) ──
         // These are pure connection/UI messages that don't access game objects.
@@ -226,9 +230,11 @@ public:
         // Watcher: dispatch returned cleanly. If a session log truncates with
         // a "WATCH/PKT: dispatch ..." line but no matching "completed" line,
         // the handler for that specific packet type is the crash trigger.
-        spdlog::info("WATCH/PKT: dispatch #{} type={} completed",
-                     s_packetNum, static_cast<int>(header.type));
-        spdlog::default_logger()->flush();
+        if (kmp::watcher::IsEnabled()) {
+            spdlog::info("WATCH/PKT: dispatch #{} type={} completed",
+                         s_packetNum, static_cast<int>(header.type));
+            spdlog::default_logger()->flush();
+        }
     }
 
 private:

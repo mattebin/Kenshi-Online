@@ -3,6 +3,7 @@
 #include "../core.h"
 #include "../hooks/char_tracker_hooks.h"
 #include "../hooks/ai_hooks.h"
+#include "../sys/watcher.h"
 #include "kmp/protocol.h"
 #include "kmp/memory.h"
 #include <spdlog/spdlog.h>
@@ -198,7 +199,8 @@ void Update(float deltaTime) {
     // is mid-call vs. post-call when the process is silently terminated.
     static int s_updateNum = 0;
     s_updateNum++;
-    bool watch = (s_updateNum <= 20 || s_updateNum % 200 == 0);
+    bool watch = kmp::watcher::IsEnabled() &&
+                 (s_updateNum <= 20 || s_updateNum % 200 == 0);
     if (watch) {
         spdlog::info("WATCH/SYNC: Update enter #{} (ownFound={}, otherFound={})",
                      s_updateNum, s_ownFound, s_otherFound);
@@ -436,7 +438,7 @@ void Update(float deltaTime) {
             // 50 ms cadence.
             static int s_posSendCount = 0;
             int n = ++s_posSendCount;
-            if (n <= 5 || n % 50 == 0) {
+            if (kmp::watcher::IsEnabled() && (n <= 5 || n % 50 == 0)) {
                 spdlog::info("WATCH/POS: sent #{} pos=({:.1f},{:.1f},{:.1f}) "
                              "from animClass=0x{:X}",
                              n, myPos.x, myPos.y, myPos.z,
