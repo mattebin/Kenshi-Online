@@ -47,6 +47,8 @@ bool IsRemoteControlled(void* character) {
 
 static void* __fastcall Hook_AICreate(void* character, void* faction) {
     s_createCount++;
+    // Watcher entry log skipped — this function uses __try below and
+    // mixing fmt::format-constructed strings with SEH triggers C2712.
 
     // ALWAYS call the original AICreate — every character needs a valid AI controller.
     // Returning nullptr here was the root cause of crashes when interacting with
@@ -88,6 +90,7 @@ static void* __fastcall Hook_AICreate(void* character, void* faction) {
 
 static void __fastcall Hook_AIPackages(void* character, void* aiPackage) {
     s_packageCount++;
+    // Watcher entry log skipped — uses __try below.
 
     // ALWAYS let AI packages load — the character needs valid behavior trees
     // to prevent crashes when the engine queries them. Even for remote characters,

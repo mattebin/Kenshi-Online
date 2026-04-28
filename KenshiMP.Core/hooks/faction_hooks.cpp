@@ -35,6 +35,10 @@ static bool SEH_FactionRelation(void* factionA, void* factionB, float relation) 
 
 static void __fastcall Hook_FactionRelation(void* factionA, void* factionB, float relation) {
     s_relationChangeCount++;
+    spdlog::info("WATCH/HOOK: FactionRelation enter (A=0x{:X}, B=0x{:X}, rel={:.2f})",
+                 reinterpret_cast<uintptr_t>(factionA),
+                 reinterpret_cast<uintptr_t>(factionB), relation);
+    spdlog::default_logger()->flush();
 
     if (!SEH_FactionRelation(factionA, factionB, relation)) {
         spdlog::error("faction_hooks: FactionRelation crashed");

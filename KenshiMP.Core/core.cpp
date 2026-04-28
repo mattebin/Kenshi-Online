@@ -61,13 +61,15 @@ volatile int g_lastCharacterCreateNum = 0;
 // __fastfail, TerminateProcess, or any uncatchable exception, the file shows
 // the last known step. Uses direct C I/O with fflush for immediate write.
 static void WriteBreadcrumb(const char* step, int tickNum = 0, int extra = 0) {
-    // Write every Nth tick to avoid excessive I/O, PLUS always write the first 50
+    // Cwd-relative — works for any Kenshi install path. Single-line file
+    // continuously rewritten so the *last surviving step* is always readable
+    // even if the spdlog buffer is mid-flight when the process is terminated.
     static int s_writeCount = 0;
-    if (tickNum > 50 && tickNum % 10 != 0) return; // Skip most ticks after warmup
+    if (tickNum > 50 && tickNum % 10 != 0) return;
     s_writeCount++;
 
     FILE* f = nullptr;
-    fopen_s(&f, "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Kenshi\\KenshiOnline_BREADCRUMB.txt", "w");
+    fopen_s(&f, "KenshiOnline_BREADCRUMB.txt", "w");
     if (f) {
         fprintf(f, "tick=%d step=%s extra=%d charCreate=#%d writes=%d\n",
                 tickNum, step, extra, g_lastCharacterCreateNum, s_writeCount);
@@ -2202,6 +2204,16 @@ void Core::OnGameTick(float deltaTime) {
 
     g_lastTickStep = 15; g_lastStepName = "tick_complete";
     WriteBreadcrumb("tick_complete", s_tickCallCount, 15);
+
+    // Watcher: every Nth tick, write a "tick_complete EXIT" so we can tell
+    // whether OnGameTick returned cleanly or terminated mid-step. Throttled
+    // because OnGameTick fires hundreds of times per second.
+    if (s_tickCallCount <= 30 || s_tickCallCount % 100 == 0) {
+        spdlog::info("WATCH/TICK: tick_complete EXIT (call #{}, dt={:.4f})",
+                     s_tickCallCount, deltaTime);
+        auto logger = spdlog::default_logger();
+        if (logger) logger->flush();
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

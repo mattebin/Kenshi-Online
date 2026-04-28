@@ -205,6 +205,17 @@ void Update(float deltaTime) {
     auto& core = Core::Get();
     if (!core.IsConnected() || !core.IsGameLoaded()) return;
 
+    // Watcher: throttled entry/exit so we know when shared_save_sync
+    // is mid-call vs. post-call when the process is silently terminated.
+    static int s_updateNum = 0;
+    s_updateNum++;
+    bool watch = (s_updateNum <= 20 || s_updateNum % 200 == 0);
+    if (watch) {
+        spdlog::info("WATCH/SYNC: Update enter #{} (ownFound={}, otherFound={})",
+                     s_updateNum, s_ownFound, s_otherFound);
+        spdlog::default_logger()->flush();
+    }
+
     // ── LAZY INIT: faction assignment arrives AFTER SetConnected(true) ──
     // Init() is called from SetConnected but faction isn't assigned yet.
     // Retry here every tick until the faction arrives.
@@ -354,6 +365,15 @@ void Update(float deltaTime) {
             }
         }
         s_remoteGameSpeed.store(-1.f);
+    }
+
+    if (watch) {
+        spdlog::info("WATCH/SYNC: Update exit #{} (ownFound={}, otherFound={}, "
+                     "ownPtr=0x{:X}, otherPtr=0x{:X})",
+                     s_updateNum, s_ownFound, s_otherFound,
+                     reinterpret_cast<uintptr_t>(s_ownCharPtr),
+                     reinterpret_cast<uintptr_t>(s_otherCharPtr));
+        spdlog::default_logger()->flush();
     }
 }
 

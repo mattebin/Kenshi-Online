@@ -75,6 +75,10 @@ static uint32_t TryGetItemTemplateId(void* item) {
 
 static void __fastcall Hook_ItemPickup(void* inventory, void* item, int quantity) {
     s_pickupCount++;
+    spdlog::info("WATCH/HOOK: ItemPickup enter (inv=0x{:X}, item=0x{:X}, qty={})",
+                 reinterpret_cast<uintptr_t>(inventory),
+                 reinterpret_cast<uintptr_t>(item), quantity);
+    spdlog::default_logger()->flush();
 
     if (!SEH_ItemPickup(inventory, item, quantity)) {
         if (s_pickupHealth.trampolineFailed.load()) {

@@ -52,6 +52,11 @@ public:
             spdlog::debug("PacketHandler: pkt #{} type={} size={} ch={}",
                           s_packetNum, static_cast<int>(header.type), size, channel);
         }
+        // Watcher: ALWAYS log packet dispatch at info level + flush, so the
+        // last packet processed before a silent termination is recoverable.
+        spdlog::info("WATCH/PKT: dispatch #{} type={} size={} ch={}",
+                     s_packetNum, static_cast<int>(header.type), size, channel);
+        spdlog::default_logger()->flush();
 
         // ── SAFE messages (work without game world) ──
         // These are pure connection/UI messages that don't access game objects.
@@ -218,6 +223,12 @@ public:
             spdlog::debug("PacketHandler: Unknown message type 0x{:02X}", static_cast<uint8_t>(header.type));
             break;
         }
+        // Watcher: dispatch returned cleanly. If a session log truncates with
+        // a "WATCH/PKT: dispatch ..." line but no matching "completed" line,
+        // the handler for that specific packet type is the crash trigger.
+        spdlog::info("WATCH/PKT: dispatch #{} type={} completed",
+                     s_packetNum, static_cast<int>(header.type));
+        spdlog::default_logger()->flush();
     }
 
 private:
