@@ -247,24 +247,42 @@ void Update(float deltaTime) {
             }
         }
 
-        // Pointer-based match — preferred. Two-stage lookup:
-        //  1. Within the right faction, prefer a tracked character whose
-        //     name is NOT the placeholder ("Player 1" / "Player 2"). The
-        //     kenshi-online.mod emits ~18 NPCs with the placeholder name
-        //     in the same faction; the user's actual PC has a unique
-        //     name (e.g. "Kole") chosen at character creation. So the
-        //     unique-named character is the player.
-        //  2. Fall back to any faction match (for solo testing where a
-        //     remote player hasn't joined yet, the placeholder NPC is
-        //     the best stand-in).
-        if (!s_ownFound && s_ownFactionPtr != 0) {
-            const char_tracker_hooks::TrackedChar* tc =
-                char_tracker_hooks::FindUniqueByFactionPtr(s_ownFactionPtr, s_ownCharName);
-            const char* matchKind = "unique-name";
-            if (!tc) {
-                tc = char_tracker_hooks::FindByFactionPtr(s_ownFactionPtr);
-                matchKind = "faction-only";
+        // ── OWN selection: the LOCAL PLAYER controls whichever character
+        //    they custom-named at character creation, regardless of which
+        //    multiplayer "slot" the server assigned. The kenshi-online.mod
+        //    seeds the world with placeholder NPCs literally named
+        //    "Player 1" / "Player 2" — the only character with a unique
+        //    name in either kenshi-online faction is the user's PC.
+        //
+        //    Search both factions, prefer a unique-named hit. This makes
+        //    solo testing track the user's actual PC (e.g. "Kole") instead
+        //    of a stationary placeholder, and in 2-player co-op still picks
+        //    the local player's PC because it's the one named in *this*
+        //    machine's character-creation step. ──
+        if (!s_ownFound && (s_ownFactionPtr != 0 || s_otherFactionPtr != 0)) {
+            const char_tracker_hooks::TrackedChar* tc = nullptr;
+            const char* matchKind = nullptr;
+
+            // Stage 1: unique-named in own faction (real co-op host case).
+            if (s_ownFactionPtr != 0) {
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(s_ownFactionPtr, s_ownCharName);
+                if (tc) matchKind = "unique-name (own faction)";
             }
+            // Stage 2: unique-named in OTHER faction (server-slot mismatch
+            // case — the local PC was created in the opposite faction, e.g.
+            // joining as Player 2 with a Player-1-faction PC like Kole).
+            if (!tc && s_otherFactionPtr != 0) {
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(s_otherFactionPtr, s_otherCharName);
+                if (tc) matchKind = "unique-name (other faction — slot mismatch)";
+            }
+            // Stage 3: faction-only fallback in own faction (no unique-named
+            // PC in either faction, e.g. fresh joiner with no character
+            // creation yet).
+            if (!tc && s_ownFactionPtr != 0) {
+                tc = char_tracker_hooks::FindByFactionPtr(s_ownFactionPtr);
+                if (tc) matchKind = "faction-only";
+            }
+
             if (tc && tc->animClassPtr) {
                 s_ownAnimClass = tc->animClassPtr;
                 s_ownCharPtr = tc->characterPtr;
@@ -280,17 +298,37 @@ void Update(float deltaTime) {
             }
         }
 
-        if (!s_otherFound && s_otherFactionPtr != 0) {
-            // Same logic on the other side. If a real remote player has
-            // joined, *their* PC has a unique name; we'd rather pick that
-            // than one of the placeholder NPCs.
-            const char_tracker_hooks::TrackedChar* tc =
-                char_tracker_hooks::FindUniqueByFactionPtr(s_otherFactionPtr, s_otherCharName);
-            const char* matchKind = "unique-name";
-            if (!tc) {
-                tc = char_tracker_hooks::FindByFactionPtr(s_otherFactionPtr);
-                matchKind = "faction-only";
+        if (!s_otherFound && s_ownFactionPtr != 0 && s_otherFactionPtr != 0) {
+            // OTHER must be in a *different* faction than OWN. Compute the
+            // expected other-faction from OWN's faction (which we now know
+            // for sure once OWN has been resolved).
+            uintptr_t expectedOtherFaction = 0;
+            if (s_ownFound && s_ownCharPtr) {
+                // OWN was found — pick whichever known faction is NOT OWN's.
+                uintptr_t ownFp = 0;
+                if (auto* ownTc = char_tracker_hooks::FindByPtr(s_ownCharPtr)) {
+                    ownFp = ownTc->factionPtr;
+                }
+                if (ownFp == s_ownFactionPtr)        expectedOtherFaction = s_otherFactionPtr;
+                else if (ownFp == s_otherFactionPtr) expectedOtherFaction = s_ownFactionPtr;
+            } else {
+                expectedOtherFaction = s_otherFactionPtr;
             }
+
+            const char_tracker_hooks::TrackedChar* tc = nullptr;
+            const char* matchKind = nullptr;
+            if (expectedOtherFaction != 0) {
+                // Prefer unique-named (a real remote player has connected
+                // and their custom-named PC is now in the world).
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(expectedOtherFaction, s_otherCharName);
+                if (tc) {
+                    matchKind = "unique-name";
+                } else {
+                    tc = char_tracker_hooks::FindByFactionPtr(expectedOtherFaction);
+                    if (tc) matchKind = "faction-only";
+                }
+            }
+
             if (tc && tc->animClassPtr) {
                 s_otherAnimClass = tc->animClassPtr;
                 s_otherCharPtr = tc->characterPtr;
