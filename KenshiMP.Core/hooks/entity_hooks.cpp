@@ -354,23 +354,32 @@ static SEH_EntityInfo SEH_ReadAndRegisterEntity(void* character, void* templateD
         if (info.charData.position.x == 0.f && info.charData.position.y == 0.f && info.charData.position.z == 0.f) return info;
 
         // ── Faction matching: only register entities that belong to the LOCAL player ──
-        // Priority chain: PlayerController → early loading capture → fallback
+        // Priority chain: PlayerController → early loading capture (squad leader at load
+        // time) → runtime NPC fallback. The fallback can be ANY NPC the engine has spawned
+        // recently, so we deliberately do NOT promote it to PlayerController as the local
+        // faction — doing so previously locked the local player to e.g. a Slavemonger
+        // faction encountered post-zone-load, breaking every "mine vs theirs" check
+        // afterwards. The fallback is still consulted for the per-entity equality filter
+        // below so we can keep registering anything that happens to share that faction
+        // until the loading capture fires, but the authoritative slot only gets written
+        // from the loading capture (which is locked to the player's squad leader).
         uintptr_t playerFaction = coreRef.GetPlayerController().GetLocalFactionPtr();
+        bool earlyCaptureLocked = s_earlyFactionLocked.load(std::memory_order_relaxed);
 
-        if (playerFaction == 0) {
-            // Use faction captured during savegame loading (first character = player's squad leader)
+        if (playerFaction == 0 && earlyCaptureLocked) {
             playerFaction = s_earlyPlayerFaction.load(std::memory_order_relaxed);
-        }
-        if (playerFaction == 0) {
-            // Last resort: any valid faction seen from recent creates
-            playerFaction = s_fallbackFaction.load(std::memory_order_relaxed);
+            if (playerFaction != 0) {
+                const_cast<PlayerController&>(coreRef.GetPlayerController())
+                    .SetLocalFactionPtr(playerFaction);
+                spdlog::info("SEH_ReadAndRegisterEntity: Set local faction 0x{:X} "
+                             "from early loading capture (squad leader)", playerFaction);
+            }
         }
 
-        // If we found a faction from loading/fallback but PlayerController doesn't have it, set it
-        if (playerFaction != 0 && coreRef.GetPlayerController().GetLocalFactionPtr() == 0) {
-            const_cast<PlayerController&>(coreRef.GetPlayerController())
-                .SetLocalFactionPtr(playerFaction);
-            spdlog::info("SEH_ReadAndRegisterEntity: Set local faction 0x{:X} from early/fallback capture", playerFaction);
+        if (playerFaction == 0) {
+            // Best-effort filter for runtime registrations until the loading capture
+            // arrives. NOT promoted to PlayerController.
+            playerFaction = s_fallbackFaction.load(std::memory_order_relaxed);
         }
 
         // Must have a player faction AND entity must match it — prevents registering random NPCs/buildings
