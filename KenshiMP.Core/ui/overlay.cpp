@@ -27,9 +27,15 @@ void Overlay::Update() {
         strncpy(m_settingsName, config.playerName.c_str(), sizeof(m_settingsName) - 1);
         strncpy(m_serverAddress, config.lastServer.c_str(), sizeof(m_serverAddress) - 1);
         snprintf(m_serverPort, sizeof(m_serverPort), "%d", config.lastPort);
-        m_settingsAutoConnect = false; // Auto-connect disabled — use /connect manually
-        m_autoConnectPending = false;
-        OutputDebugStringA("KMP: Overlay::Update() — first frame config loaded\n");
+        // Honor the persisted client config. When autoConnect is true the
+        // overlay primes a deferred connect attempt that fires 2s after the
+        // save finishes loading (see further down in Update()).
+        m_settingsAutoConnect = config.autoConnect;
+        m_autoConnectPending = config.autoConnect;
+        m_autoConnectDone = false;
+        OutputDebugStringA(config.autoConnect
+            ? "KMP: Overlay::Update() — first frame config loaded (auto-connect ENABLED)\n"
+            : "KMP: Overlay::Update() — first frame config loaded (auto-connect off)\n");
     }
 
     // ── Phase-driven game-load detection ──
