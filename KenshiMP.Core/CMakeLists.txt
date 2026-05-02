@@ -59,6 +59,7 @@ add_library(KenshiMP.Core SHARED
     sys/task_orchestrator.cpp
     sys/command_registry.cpp
     sys/builtin_commands.cpp
+    sys/hook_gate.cpp
     # UI (native MyGUI only)
     ui/overlay.cpp
     ui/mygui_bridge.cpp
