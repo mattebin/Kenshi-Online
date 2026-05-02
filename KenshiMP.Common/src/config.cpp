@@ -59,6 +59,7 @@ bool ClientConfig::Load(const std::string& path) {
         if (j.contains("masterServer")) masterServer = j["masterServer"].get<std::string>();
         if (j.contains("masterPort"))   masterPort   = j["masterPort"].get<uint16_t>();
         if (j.contains("useSyncOrchestrator")) useSyncOrchestrator = j["useSyncOrchestrator"].get<bool>();
+        if (j.contains("kenshiCrashRecovery")) kenshiCrashRecovery = j["kenshiCrashRecovery"].get<bool>();
 
         // ── Validate loaded values ──
         if (playerName.size() > KMP_MAX_NAME_LENGTH)
@@ -84,6 +85,7 @@ bool ClientConfig::Save(const std::string& path) const {
     j["masterServer"] = masterServer;
     j["masterPort"]   = masterPort;
     j["useSyncOrchestrator"] = useSyncOrchestrator;
+    j["kenshiCrashRecovery"] = kenshiCrashRecovery;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;

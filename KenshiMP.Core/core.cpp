@@ -34,7 +34,10 @@
 #include <cmath>
 #include <unordered_map>
 #include <csignal>
+#include <atomic>
 #include <Windows.h>
+#include <Psapi.h>
+#pragma comment(lib, "Psapi.lib")
 
 namespace kmp {
 
@@ -77,6 +80,72 @@ static void WriteBreadcrumb(const char* step, int tickNum = 0, int extra = 0) {
     }
 }
 
+// ── Static zero buffer for the engine null-deref recovery ──
+// The recurring engine crash at the discovered RVA reads two floats from
+// rax+0x90 and rax+0x34 when rax is null. We can't fix the underlying bug
+// (some periodic AI/animation calc finds a null target pointer in slot
+// +0x1A8 of the caller's `this`), but we can supply a safe zero-filled
+// buffer at the moment of fault, redirect rax to it, and continue. The
+// instructions then read 0.0f, the function multiplies through to 0.0f,
+// returns "false", and the game continues as if the calc didn't fire this
+// frame.
+//
+// 0x200 bytes is overkill — the disassembled instructions only deref +0x90
+// and +0x34 — but the margin protects against any compiler-emitted prefetch
+// or look-ahead reads we can't see at this offset.
+alignas(16) static const uint8_t s_safeZeroBuf[0x200] = {0};
+
+// Pattern-discovered RVA of the engine null-deref site. Set once at
+// Core::Initialize via a scan of kenshi_x64.exe's .text section for the
+// instruction signature `movss xmm0,[rax+0x90]; mulss xmm0,[rax+0x34]`
+// (bytes F3 0F 10 80 90 00 00 00 F3 0F 59 40 34). Zero means "didn't find
+// the pattern" — recovery handler stays dormant in that case so we never
+// redirect rax in a context where the bug isn't the one we know.
+static std::atomic<uintptr_t> g_kenshiNullDerefRVA{0};
+
+// Master gate from ClientConfig::kenshiCrashRecovery. Default off until
+// Core::Initialize sees the config; once on, every fault that matches the
+// scanned RVA gets redirected.
+static std::atomic<bool> g_kenshiCrashRecoveryEnabled{false};
+
+// Scan helper — runs on the kenshi_x64.exe module loaded into the host
+// process. Pattern is the exact byte sequence we disassembled out of the
+// crashing function; matches a single point in any Kenshi build that
+// ships the same engine bug.
+static uintptr_t ScanForKenshiNullDerefSite() {
+    HMODULE host = GetModuleHandleA(nullptr);
+    if (!host) return 0;
+    auto* dosH = reinterpret_cast<const IMAGE_DOS_HEADER*>(host);
+    auto* ntH  = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                    reinterpret_cast<const uint8_t*>(host) + dosH->e_lfanew);
+    auto* sec  = IMAGE_FIRST_SECTION(ntH);
+    const uint8_t* textBase = nullptr;
+    size_t textSize = 0;
+    for (unsigned i = 0; i < ntH->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (memcmp(sec->Name, ".text", 5) == 0) {
+            textBase = reinterpret_cast<const uint8_t*>(host) + sec->VirtualAddress;
+            textSize = sec->Misc.VirtualSize;
+            break;
+        }
+    }
+    if (!textBase) return 0;
+
+    static constexpr uint8_t kPattern[] = {
+        0xF3, 0x0F, 0x10, 0x80, 0x90, 0x00, 0x00, 0x00,  // movss xmm0,[rax+0x90]
+        0xF3, 0x0F, 0x59, 0x40, 0x34                     // mulss xmm0,[rax+0x34]
+    };
+    constexpr size_t patLen = sizeof(kPattern);
+    if (textSize < patLen) return 0;
+    for (size_t i = 0; i + patLen <= textSize; ++i) {
+        if (memcmp(textBase + i, kPattern, patLen) == 0) {
+            uintptr_t rva = static_cast<uintptr_t>(
+                (textBase + i) - reinterpret_cast<const uint8_t*>(host));
+            return rva;
+        }
+    }
+    return 0;
+}
+
 // SEH-safe stack dump helper (no C++ objects with destructors allowed)
 static int SEH_DumpStack(char* outBuf, int outBufSize, uint64_t rsp) {
     int pos = sprintf_s(outBuf, outBufSize, "  Stack at RSP:\n");
@@ -95,6 +164,44 @@ static int SEH_DumpStack(char* outBuf, int outBufSize, uint64_t rsp) {
 
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // ── Recovery: Kenshi engine periodic-AI null deref ──
+    // Pattern-scanned at init. Gated by ClientConfig::kenshiCrashRecovery.
+    // When the AV signature matches (read at 0x90, RAX=0, RIP at the
+    // discovered pattern site), redirect RAX to a static zero buffer and
+    // resume execution. Converts a hard process termination into a single-
+    // frame "calc returned 0" no-op.
+    if (g_kenshiCrashRecoveryEnabled.load(std::memory_order_relaxed) &&
+        code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */ &&
+        ep->ExceptionRecord->ExceptionInformation[1] == 0x90 &&
+        g_gameModuleBase != 0)
+    {
+        uintptr_t recoverRva = g_kenshiNullDerefRVA.load(std::memory_order_relaxed);
+        uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+            ep->ExceptionRecord->ExceptionAddress);
+        if (recoverRva != 0 &&
+            fault_rip == g_gameModuleBase + recoverRva &&
+            ep->ContextRecord->Rax == 0)
+        {
+            ep->ContextRecord->Rax = reinterpret_cast<DWORD64>(s_safeZeroBuf);
+            // Power-of-two log throttle so the workaround is visible without
+            // flooding under heavy fault rates. OutputDebugStringA only —
+            // spdlog is unsafe from inside an exception handler that can re-enter.
+            static volatile LONG s_recoverCount = 0;
+            LONG n = InterlockedIncrement(&s_recoverCount);
+            if (n == 1 || (n & (n - 1)) == 0 /* power of two */) {
+                char buf[160];
+                sprintf_s(buf,
+                    "KMP RECOVER #%ld: game+0x%llX null-deref at +0x90, "
+                    "redirected rax to safe zero buffer\n",
+                    n, (unsigned long long)recoverRva);
+                OutputDebugStringA(buf);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
 
     // Handle fatal exception types + heap/C++ exceptions for crash diagnosis.
     // 0xC0000374 = STATUS_HEAP_CORRUPTION, 0xC0000602 = STATUS_FAIL_FAST_EXCEPTION,
@@ -457,6 +564,26 @@ bool Core::Initialize() {
     std::string configPath = ClientConfig::GetDefaultPath();
     m_config.Load(configPath);
     m_nativeHud.LogStep("INIT", "Config loaded");
+
+    // Arm the engine null-deref recovery handler. Pattern-scan the host
+    // module for the known instruction signature; if found, the VEH
+    // recovery path uses it to redirect RAX on the matching fault. If
+    // the pattern isn't found (different Kenshi build, the bug fixed,
+    // etc.) the recovery stays dormant and the fault propagates normally.
+    g_kenshiCrashRecoveryEnabled.store(m_config.kenshiCrashRecovery,
+                                       std::memory_order_relaxed);
+    if (m_config.kenshiCrashRecovery) {
+        uintptr_t rva = ScanForKenshiNullDerefSite();
+        g_kenshiNullDerefRVA.store(rva, std::memory_order_relaxed);
+        if (rva != 0) {
+            spdlog::info("Core: kenshi-crash-recovery armed at game+0x{:X}", rva);
+        } else {
+            spdlog::warn("Core: kenshi-crash-recovery enabled but pattern not "
+                         "found in this build — recovery handler dormant");
+        }
+    } else {
+        spdlog::info("Core: kenshi-crash-recovery disabled by config");
+    }
 
     // Initialize game offsets (CE fallbacks)
     game::InitOffsetsFromScanner();
