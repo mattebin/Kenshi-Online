@@ -1,4 +1,5 @@
 #include "../core.h"
+#include "../sys/watcher.h"
 #include "../game/game_types.h"
 #include "../game/game_inventory.h"
 #include "../game/spawn_manager.h"
@@ -53,6 +54,16 @@ public:
         if (s_packetNum <= 100 || s_packetNum % 50 == 0) {
             spdlog::debug("PacketHandler: pkt #{} type={} size={} ch={}",
                           s_packetNum, static_cast<int>(header.type), size, channel);
+        }
+        // Watcher: per-packet dispatch enter, flush-forced. If a session
+        // log truncates with a "WATCH/PKT: dispatch ..." line but no
+        // matching "completed" line, the handler for that specific packet
+        // type is the crash trigger. Off by default — flip
+        // verboseWatchLog in client.json to enable.
+        if (kmp::watcher::IsEnabled()) {
+            spdlog::info("WATCH/PKT: dispatch #{} type={} size={} ch={}",
+                         s_packetNum, static_cast<int>(header.type), size, channel);
+            spdlog::default_logger()->flush();
         }
 
         // ── SAFE messages (work without game world) ──
@@ -231,6 +242,14 @@ public:
         default:
             spdlog::debug("PacketHandler: Unknown message type 0x{:02X}", static_cast<uint8_t>(header.type));
             break;
+        }
+        // Watcher: dispatch returned cleanly. Pair with the enter marker:
+        // if a session log has WATCH/PKT enter without WATCH/PKT completed,
+        // the handler for that packet type is the crash trigger.
+        if (kmp::watcher::IsEnabled()) {
+            spdlog::info("WATCH/PKT: dispatch #{} type={} completed",
+                         s_packetNum, static_cast<int>(header.type));
+            spdlog::default_logger()->flush();
         }
     }
 

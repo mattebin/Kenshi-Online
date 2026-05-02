@@ -1,4 +1,5 @@
 #include "shared_save_sync.h"
+#include "../sys/watcher.h"
 #include "game_types.h"
 #include "../core.h"
 #include "../hooks/char_tracker_hooks.h"
@@ -213,6 +214,18 @@ void Update(float deltaTime) {
     auto& core = Core::Get();
     if (!core.IsConnected() || !core.IsGameLoaded()) return;
 
+    // Watcher: throttled enter marker so a session log records when
+    // shared_save_sync is alive vs. when the truncation happened.
+    static int s_updateNum = 0;
+    s_updateNum++;
+    bool watch = kmp::watcher::IsEnabled() &&
+                 (s_updateNum <= 20 || s_updateNum % 200 == 0);
+    if (watch) {
+        spdlog::info("WATCH/SYNC: Update enter #{} (ownFound={}, otherFound={})",
+                     s_updateNum, s_ownFound, s_otherFound);
+        spdlog::default_logger()->flush();
+    }
+
     // ── LAZY INIT: faction assignment arrives AFTER SetConnected(true) ──
     // Init() is called from SetConnected but faction isn't assigned yet.
     // Retry here every tick until the faction arrives.
@@ -406,6 +419,20 @@ void Update(float deltaTime) {
             writer.WriteRaw(&cp, sizeof(cp));
 
             core.GetClient().SendUnreliable(writer.Data(), writer.Size());
+
+            // Watcher: throttled outbound position log. SendUnreliable
+            // doesn't log per-call (correctly — would flood at 20 Hz).
+            // Surfaces here in 1/50 form so a verbose session shows the
+            // movement trajectory.
+            static int s_posSendCount = 0;
+            int n = ++s_posSendCount;
+            if (kmp::watcher::IsEnabled() && (n <= 5 || n % 50 == 0)) {
+                spdlog::info("WATCH/POS: sent #{} pos=({:.1f},{:.1f},{:.1f}) "
+                             "from animClass=0x{:X}",
+                             n, myPos.x, myPos.y, myPos.z,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass));
+                spdlog::default_logger()->flush();
+            }
         }
     }
 

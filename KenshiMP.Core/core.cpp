@@ -27,6 +27,7 @@
 #include "kmp/constants.h"
 #include "kmp/memory.h"
 #include "kmp/function_analyzer.h"
+#include "sys/watcher.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
@@ -564,6 +565,11 @@ bool Core::Initialize() {
     std::string configPath = ClientConfig::GetDefaultPath();
     m_config.Load(configPath);
     m_nativeHud.LogStep("INIT", "Config loaded");
+
+    // Bind the watcher's enable flag once here so each emit just does a
+    // single atomic load instead of routing through Core::GetConfig() at
+    // 50 Hz+.
+    kmp::watcher::SetEnabled(m_config.verboseWatchLog);
 
     // Arm the engine null-deref recovery handler. Pattern-scan the host
     // module for the known instruction signature; if found, the VEH
@@ -2562,6 +2568,15 @@ void Core::OnGameTick(float deltaTime) {
 
     g_lastTickStep = 15; g_lastStepName = "tick_complete";
     WriteBreadcrumb("tick_complete", s_tickCallCount, 15);
+
+    // Watcher: throttled tick_complete EXIT marker. Disabled by default —
+    // flip verboseWatchLog in client.json to surface tick boundaries.
+    if (kmp::watcher::IsEnabled() && (s_tickCallCount <= 30 || s_tickCallCount % 100 == 0)) {
+        spdlog::info("WATCH/TICK: tick_complete EXIT (call #{}, dt={:.4f})",
+                     s_tickCallCount, deltaTime);
+        auto logger = spdlog::default_logger();
+        if (logger) logger->flush();
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

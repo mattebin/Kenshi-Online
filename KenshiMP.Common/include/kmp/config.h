@@ -26,6 +26,14 @@ struct ClientConfig {
     // debugger so the fault propagates normally.
     bool        kenshiCrashRecovery = true;
 
+    // When true, every WATCH/* trace marker emits a flush-forced spdlog
+    // entry. Useful for debugging the moment of a silent termination —
+    // each marker is flushed before the next instruction so the log can
+    // never be lost in a buffered write. Off by default because the
+    // markers fire at packet/tick rates (50 Hz+) and would bloat the log
+    // file under normal play.
+    bool        verboseWatchLog = false;
+
     bool Load(const std::string& path);
     bool Save(const std::string& path) const;
 
