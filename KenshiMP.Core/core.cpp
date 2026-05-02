@@ -30,6 +30,7 @@
 #include "sys/watcher.h"
 #include "sys/hook_gate.h"
 #include "sys/install_audit.h"
+#include "sys/leak_watch.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
@@ -2222,6 +2223,10 @@ void ResetKeepaliveTimer() {
 }
 
 void Core::OnGameTick(float deltaTime) {
+    // Leak-watcher periodic poke (rate-limited internally to one snapshot
+    // every 5 minutes by default — cheap unless the interval has elapsed).
+    kmp::leak_watch::Tick();
+
     // ── Pre-check diagnostics ──
     static int s_preCheckCount = 0;
     s_preCheckCount++;

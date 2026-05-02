@@ -145,20 +145,89 @@ block alongside the prologue and callsite analyzers. Document the
 pattern it catches in the header. Add a one-line invocation in each
 hook install site you want covered.
 
+## Runtime checks that catch things install-time analysis can't
+
+### Struct-field corruption (`field_diff`)
+
+Constructor-style hooks (AICreate is one) initialise a `this` struct.
+Even with the right arg count, a hook can land in a code path that
+fails to write key fields — see the original AI::create bug where
+`this+0x318` came back null and crashed AI scoring 5 seconds later.
+
+Inside the hook body:
+
+```cpp
+field_diff::Snapshot pre = field_diff::Capture(thisPtr, /*size=*/0x400);
+s_origFunction(args...);
+static const field_diff::FieldExpectation fields[] = {
+    {0x010, "remote-char back-ptr"},
+    {0x318, "AI task table"},
+};
+field_diff::VerifyFieldsWritten(pre, thisPtr, fields, 2, "MyHook");
+```
+
+If a listed field comes back zero post-call (and was zero pre-call —
+implying the function was supposed to fill it but didn't), the analyzer
+logs at warn level. Sample at low rate inside the hook to keep cost down.
+The example in `Hook_AICreate` checks every 1000th call after the first
+3 — enough coverage to spot a regression, not enough to bloat the log.
+
+### Concurrent reentry (`concurrency_watch`)
+
+Drop `KMP_CONCURRENCY_GUARD("HookName")` at the top of any hook body to
+get RAII tracking of:
+- How many threads are currently inside the hook (depth)
+- Which thread entered first
+- Reentry from the same thread (often means the hook called something
+  that called the hook — usually a bug, sometimes intentional)
+- Collision from a different thread (almost always a bug — that hook is
+  probably not thread-safe with itself)
+
+Logs at most once per state to avoid flooding under sustained collisions.
+Per-state counters survive the session and get dumped by `EmitSummary`,
+which `install_audit::Emit` calls — so the bug-report block always
+includes "did anything ever collide."
+
+### Long-session leak detection (`leak_watch`)
+
+Every 5 minutes of game time, `Tick()` (called from `OnGameTick`) takes a
+snapshot of process working-set + private bytes plus the size of every
+collection that's been registered via `RegisterSize`. After ≥3 snapshots,
+any collection whose size is monotonically increasing across all of them
+gets logged at warn level — the "you have a leak" signal, much earlier
+than someone noticing the process at 4 GiB after a 4-hour session.
+
+To register a new collection (do it in the owning module's `Install`):
+
+```cpp
+leak_watch::RegisterSize("hooks::s_myMap", []() {
+    std::lock_guard lock(s_myMutex);
+    return s_myMap.size();
+});
+```
+
+Already registered:
+- `ai_hooks::s_remoteControlled` — should reset on disconnect.
+- `entity_hooks::s_spawnsPerPlayer` — should reset on `ResumeForNetwork`.
+
+Add new ones whenever you write a long-lived collection that *should*
+stay bounded. The minute it stops being bounded, leak_watch tells us.
+
 ## What's still missing
 
 Honest list of bugs the current tooling would NOT have caught:
 
-- **Subtle struct-field corruption** in a hook body. The prologue/
-  callsite analyzers verify arg count, not what the hook DOES with the
-  args. A hook that takes 6 args correctly but sets `this+0xN` to the
-  wrong value would slip past the install-time checks.
-- **Race conditions** between hooks and async paths. The watcher
-  markers help with timing analysis but you still have to read them.
-- **Memory leaks in long sessions.** No tool here measures heap growth
-  or unbounded-map growth over time.
-- **Cross-fork desync.** Two clients with different code paths can
-  diverge gradually; nothing here detects that.
+- **Cross-fork client desync.** Two clients running different code paths
+  can drift over time; nothing here detects that. Would need a periodic
+  state-hash exchange and divergence detection — a bigger feature.
+- **Use-after-free of game-object pointers.** The codebase uses
+  pointer-shape heuristics ("looks like a heap pointer?") in a lot of
+  places, but if a freed pointer happens to look heap-shaped we won't
+  notice. A real fix requires the engine handing us a refcount or
+  generation counter.
+- **Network packet validation gaps.** `PacketReader` does bounds checks
+  but doesn't have a per-message-type schema. A buggy or malicious
+  server could feed structured-but-wrong data and we'd accept it.
 
-When one of these bites, write the analyzer that would have caught
-it and add it to this guide.
+When one of these bites, write the analyzer that would have caught it
+and add it to this guide.

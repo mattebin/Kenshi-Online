@@ -1,6 +1,8 @@
 #include "install_audit.h"
 #include "prologue_analyzer.h"
 #include "callsite_analyzer.h"
+#include "concurrency_watch.h"
+#include "leak_watch.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
 #include <Windows.h>
@@ -80,6 +82,11 @@ void Emit() {
     }
 
     spdlog::info("=== KMP HOOK AUDIT END ===");
+
+    // Concurrency + leak watchers belong in the same bug-report block —
+    // one grep gets the maintainer everything they need.
+    concurrency_watch::EmitSummary();
+    leak_watch::SnapshotNow();
 }
 
 } // namespace kmp::install_audit

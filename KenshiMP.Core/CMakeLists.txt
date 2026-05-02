@@ -63,6 +63,9 @@ add_library(KenshiMP.Core SHARED
     sys/prologue_analyzer.cpp
     sys/callsite_analyzer.cpp
     sys/install_audit.cpp
+    sys/field_diff.cpp
+    sys/concurrency_watch.cpp
+    sys/leak_watch.cpp
     # UI (native MyGUI only)
     ui/overlay.cpp
     ui/mygui_bridge.cpp

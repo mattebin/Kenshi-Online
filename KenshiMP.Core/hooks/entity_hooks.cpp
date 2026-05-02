@@ -10,6 +10,7 @@
 #include "../sync/pipeline_state.h"
 #include "kmp/hook_manager.h"
 #include "../sys/prologue_analyzer.h"
+#include "../sys/leak_watch.h"
 #include "kmp/protocol.h"
 #include "kmp/memory.h"
 #include "kmp/string_convert.h"
@@ -1096,6 +1097,21 @@ bool Install() {
     auto& funcs = core.GetGameFunctions();
 
     bool success = true;
+
+    // Register the per-player spawn map with leak_watch so monotonic growth
+    // across long sessions shows up in the periodic leak snapshot. The map
+    // is reset on each ResumeForNetwork — it shouldn't grow unboundedly,
+    // but if some path forgets to call ResumeForNetwork after a reconnect,
+    // we want to know. (PlayerIDs are 8-bit so unbounded growth here is
+    // already capped at ~256, but it'd indicate an architectural bug.)
+    static bool s_leakRegistered = false;
+    if (!s_leakRegistered) {
+        s_leakRegistered = true;
+        leak_watch::RegisterSize("entity_hooks::s_spawnsPerPlayer", []() {
+            std::lock_guard lock(s_spawnsPerPlayerMutex);
+            return s_spawnsPerPlayer.size();
+        });
+    }
 
     // ── Resolve higher-level factory functions from known RVAs ──
     // These are NOT hooked — called directly via function pointer. No MinHook

@@ -5,6 +5,9 @@
 #include "../game/game_types.h"
 #include "../sys/prologue_analyzer.h"
 #include "../sys/callsite_analyzer.h"
+#include "../sys/field_diff.h"
+#include "../sys/concurrency_watch.h"
+#include "../sys/leak_watch.h"
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <mutex>
@@ -83,7 +86,38 @@ bool IsRemoteControlled(void* character) {
 // packet_handler::HandleSpawnEntity instead.
 static void __fastcall Hook_AICreate(void* ai, void* character, void* arg3,
                                      void* arg4, void* arg5, void* arg6) {
+    KMP_CONCURRENCY_GUARD("AICreate");
+
+    // Fields the 6-arg call SHOULD populate. If any of these come back zero
+    // post-call we've hit the same class of bug as before — typedef looks
+    // right but something in the trampoline / call convention is dropping
+    // values. Catches the next AICreate-class bug at the moment of the bad
+    // call, not 5 seconds later when the deferred crash hits.
+    //
+    // Sampled — don't run on every call (expensive memcpy of 0x400 bytes).
+    // First 3 calls then once every 1000th to keep noise/cost low.
+    static std::atomic<uint64_t> s_callCount{0};
+    const uint64_t n = s_callCount.fetch_add(1, std::memory_order_relaxed);
+    const bool checkFields = (n < 3) || (n % 1000 == 0);
+
+    field_diff::Snapshot pre;
+    if (checkFields && ai) {
+        pre = field_diff::Capture(ai, 0x400);
+    }
+
     s_origAICreate(ai, character, arg3, arg4, arg5, arg6);
+
+    if (checkFields && pre.valid) {
+        // andperks6 fork (commit f5330f9) documented args 5/6 land at this+0x318
+        // and this+0x10 respectively. If either is null after the call, the
+        // 6-arg signature isn't actually getting through — investigate.
+        static const field_diff::FieldExpectation kFields[] = {
+            { 0x010, "this+0x10 (stack arg 6 sink)" },
+            { 0x318, "this+0x318 (stack arg 5 sink — AI scoring deref'd this)"},
+        };
+        field_diff::VerifyFieldsWritten(pre, ai, kFields,
+            sizeof(kFields)/sizeof(kFields[0]), "AICreate");
+    }
 }
 
 // Hook_AIPackages: minimal 2-arg pass-through.
@@ -98,6 +132,18 @@ bool Install() {
     auto& funcs = Core::Get().GetGameFunctions();
     auto& hooks = HookManager::Get();
     int installed = 0;
+
+    // One-shot registration of the remote-controlled set with leak_watch.
+    // SuspendForDisconnect clears the set so we don't expect monotonic
+    // growth across sessions, but if it ever does we want to know.
+    static bool s_leakRegistered = false;
+    if (!s_leakRegistered) {
+        s_leakRegistered = true;
+        leak_watch::RegisterSize("ai_hooks::s_remoteControlled", []() {
+            std::lock_guard lock(s_remoteMutex);
+            return s_remoteControlled.size();
+        });
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Both hooks are installed but IMMEDIATELY DISABLED. They corrupt character
