@@ -1260,12 +1260,15 @@ void ResumeForNetwork() {
     s_factionScanCount = 0;
     s_factionVotingDone = false;
 
-    // Keep CharacterCreate bypassed here. Core::OnGameLoaded() verifies the
-    // spawn path first; enabling full mode before that can crash on late
-    // startup creates from Kenshi presets.
+    // Keep CharacterCreate in passthrough mode permanently. Full-body
+    // interception via the MovRaxRsp naked detour has proven unsafe for
+    // sustained runtime use — andperks6 fork bisect (commit 3d5bdfc) traced
+    // intermittent zone-stream crashes to the post-load Enable. char_tracker
+    // covers active-char discovery from a stable game-tick context that
+    // doesn't go through MovRaxRsp.
     s_loadingPassthrough.store(true, std::memory_order_release);
-    spdlog::info("entity_hooks: ResumeForNetwork - CharacterCreate remains bypassed "
-                 "until spawn readiness is verified (earlyFaction=0x{:X}, fallback=0x{:X})",
+    spdlog::info("entity_hooks: ResumeForNetwork - CharacterCreate remains in passthrough "
+                 "(earlyFaction=0x{:X}, fallback=0x{:X})",
                  earlyFac, s_fallbackFaction.load(std::memory_order_relaxed));
 }
 

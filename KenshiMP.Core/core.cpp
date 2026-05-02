@@ -1757,21 +1757,24 @@ void Core::OnGameLoaded() {
         }
     }
 
+    // Keep CharacterCreate in PERMANENT passthrough mode after loading.
+    // Bisect on andperks6 fork (commit 3d5bdfc) traced intermittent runtime
+    // crashes during zone NPC streams to the post-load full-body re-enable
+    // of this hook — the MovRaxRsp naked detour is unsafe for sustained
+    // runtime interception. The lightweight passthrough body (timestamp +
+    // counter + factory capture) covers everything we need at runtime.
+    //
+    // Active character discovery is handled by char_tracker_hooks (animation
+    // update tick, fires from a stable game-tick context that doesn't go
+    // through MovRaxRsp). No regression for what CharacterCreate full-body
+    // mode previously gave us.
+    entity_hooks::SetLoadingPassthrough(true);
     if (spawnReady) {
-        entity_hooks::SetLoadingPassthrough(false);
-
-        // Ensure CharacterCreate hook is enabled only after the spawn path is valid.
-        if (HookManager::Get().Enable("CharacterCreate")) {
-            spdlog::info("Core::OnGameLoaded — CharacterCreate hook ENABLED (full mode for runtime spawns)");
-            m_nativeHud.LogStep("HOOK", "CharacterCreate enabled (post-load)");
-        } else {
-            spdlog::warn("Core::OnGameLoaded — CharacterCreate Enable() returned false");
-            m_nativeHud.LogStep("WARN", "CharacterCreate enable failed");
-        }
+        spdlog::info("Core::OnGameLoaded — CharacterCreate stays in passthrough (stability)");
+        m_nativeHud.LogStep("HOOK", "CharacterCreate passthrough (post-load)");
     } else {
-        entity_hooks::SetLoadingPassthrough(true);
         HookManager::Get().Disable("CharacterCreate");
-        spdlog::warn("Core::OnGameLoaded — CharacterCreate left bypassed; spawn system not ready");
+        spdlog::warn("Core::OnGameLoaded — CharacterCreate fully bypassed; spawn system not ready");
         m_nativeHud.LogStep("WARN", "CharacterCreate deferred (spawn not ready)");
     }
 
