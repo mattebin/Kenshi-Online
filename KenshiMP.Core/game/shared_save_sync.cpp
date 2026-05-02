@@ -26,13 +26,20 @@ namespace kmp::shared_save_sync {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── State ──
-static std::string s_ownCharName;
+static std::string s_ownCharName;     // bootstrap label only — see ResolveFactionPtrByName
 static std::string s_otherCharName;
 
 static void* s_ownAnimClass = nullptr;
 static void* s_otherAnimClass = nullptr;
 static void* s_ownCharPtr = nullptr;
 static void* s_otherCharPtr = nullptr;
+
+// Pointer-based identity (preferred over name-based — names collide; the
+// kenshi-online.mod emits many characters all called "Player 1"). These
+// resolve once we observe at least one character with the bootstrap name,
+// after which everything matches by faction pointer instead.
+static uintptr_t s_ownFactionPtr   = 0;
+static uintptr_t s_otherFactionPtr = 0;
 
 static bool s_initialized = false;
 static bool s_ownFound = false;
@@ -217,25 +224,88 @@ void Update(float deltaTime) {
         if (!s_initialized) return;
     }
 
-    // ── STEP 1: Discover characters by name ──
+    // ── STEP 1: Discover characters by FACTION POINTER ──
+    // Bootstrap: convert the well-known Player 1 / Player 2 *names* into
+    // faction *pointers* the first time the tracker has any character with
+    // that name. After that, every match is pointer-based — names can
+    // collide (kenshi-online.mod has many "Player 1" characters), faction
+    // pointers do not.
     if (!s_ownFound || !s_otherFound) {
         s_discoveryAttempts++;
 
-        // Re-validate cached pointers on every discovery tick (handles zone changes)
-        if (!s_ownFound) {
-            auto* tc = char_tracker_hooks::FindByName(s_ownCharName);
+        if (s_ownFactionPtr == 0) {
+            uintptr_t fp = char_tracker_hooks::ResolveFactionPtrByName(s_ownCharName);
+            if (fp != 0) {
+                s_ownFactionPtr = fp;
+                spdlog::info("shared_save_sync: Resolved OWN faction pointer 0x{:X} "
+                             "(via name '{}')", fp, s_ownCharName);
+            }
+        }
+        if (s_otherFactionPtr == 0) {
+            uintptr_t fp = char_tracker_hooks::ResolveFactionPtrByName(s_otherCharName);
+            if (fp != 0) {
+                s_otherFactionPtr = fp;
+                spdlog::info("shared_save_sync: Resolved OTHER faction pointer 0x{:X} "
+                             "(via name '{}')", fp, s_otherCharName);
+            }
+        }
+
+        // OWN selection: prefer the unique-named character in either
+        // kenshi-online faction (the user's actual PC, which they
+        // custom-named at character creation, sitting alongside ~18
+        // placeholder NPCs all literally named "Player 1"). Falls back
+        // to faction-only when no unique name is in the world yet.
+        if (!s_ownFound && (s_ownFactionPtr != 0 || s_otherFactionPtr != 0)) {
+            const char_tracker_hooks::TrackedChar* tc = nullptr;
+            const char* matchKind = nullptr;
+
+            if (s_ownFactionPtr != 0) {
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(s_ownFactionPtr, s_ownCharName);
+                if (tc) matchKind = "unique-name (own faction)";
+            }
+            if (!tc && s_otherFactionPtr != 0) {
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(s_otherFactionPtr, s_otherCharName);
+                if (tc) matchKind = "unique-name (other faction — slot mismatch)";
+            }
+            if (!tc && s_ownFactionPtr != 0) {
+                tc = char_tracker_hooks::FindByFactionPtr(s_ownFactionPtr);
+                if (tc) matchKind = "faction-only";
+            }
+
             if (tc && tc->animClassPtr) {
                 s_ownAnimClass = tc->animClassPtr;
                 s_ownCharPtr = tc->characterPtr;
                 s_ownFound = true;
-                spdlog::info("shared_save_sync: Found OWN character '{}' animClass=0x{:X}",
-                             s_ownCharName, reinterpret_cast<uintptr_t>(s_ownAnimClass));
-                core.GetNativeHud().AddSystemMessage("Found your character: " + s_ownCharName);
+                spdlog::info("shared_save_sync: Found OWN '{}' [{}] "
+                             "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
+                             tc->name, matchKind,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass),
+                             reinterpret_cast<uintptr_t>(s_ownCharPtr),
+                             tc->factionPtr);
+                core.GetNativeHud().AddSystemMessage(
+                    "Found your character: " + tc->name + " (" + matchKind + ")");
             }
         }
 
-        if (!s_otherFound) {
-            auto* tc = char_tracker_hooks::FindByName(s_otherCharName);
+        if (!s_otherFound && s_ownFactionPtr != 0 && s_otherFactionPtr != 0) {
+            // OTHER must be in a *different* faction than OWN. Compute the
+            // expected other-faction from OWN's actual faction (now that
+            // OWN's resolved we know which side it landed on).
+            uintptr_t expectedOtherFaction = s_otherFactionPtr;
+            if (s_ownFound && s_ownCharPtr) {
+                if (auto* ownTc = char_tracker_hooks::FindByPtr(s_ownCharPtr)) {
+                    if (ownTc->factionPtr == s_ownFactionPtr) expectedOtherFaction = s_otherFactionPtr;
+                    else if (ownTc->factionPtr == s_otherFactionPtr) expectedOtherFaction = s_ownFactionPtr;
+                }
+            }
+
+            const char_tracker_hooks::TrackedChar* tc =
+                char_tracker_hooks::FindUniqueByFactionPtr(expectedOtherFaction, s_otherCharName);
+            const char* matchKind = "unique-name";
+            if (!tc) {
+                tc = char_tracker_hooks::FindByFactionPtr(expectedOtherFaction);
+                matchKind = "faction-only";
+            }
             if (tc && tc->animClassPtr) {
                 s_otherAnimClass = tc->animClassPtr;
                 s_otherCharPtr = tc->characterPtr;
@@ -245,9 +315,14 @@ void Update(float deltaTime) {
                     ai_hooks::MarkRemoteControlled(s_otherCharPtr);
                 }
 
-                spdlog::info("shared_save_sync: Found OTHER character '{}' animClass=0x{:X}",
-                             s_otherCharName, reinterpret_cast<uintptr_t>(s_otherAnimClass));
-                core.GetNativeHud().AddSystemMessage("Found remote player: " + s_otherCharName);
+                spdlog::info("shared_save_sync: Found OTHER '{}' [{}] "
+                             "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
+                             tc->name, matchKind,
+                             reinterpret_cast<uintptr_t>(s_otherAnimClass),
+                             reinterpret_cast<uintptr_t>(s_otherCharPtr),
+                             tc->factionPtr);
+                core.GetNativeHud().AddSystemMessage(
+                    "Found remote player: " + tc->name + " (" + matchKind + ")");
             }
         }
 
@@ -268,23 +343,31 @@ void Update(float deltaTime) {
         core.GetNativeHud().AddSystemMessage("Both players found! Position sync active.");
         spdlog::info("shared_save_sync: BOTH CHARACTERS FOUND — sync active");
     } else {
-        // Re-validate AnimClass pointers periodically (handles zone-load recreation)
+        // Re-validate AnimClass pointers periodically — char_tracker may
+        // have re-keyed entries across a zone load, but the *character*
+        // pointer and the identity (faction) are stable. Look up by the
+        // cached character pointer (NOT by name — name-based lookup would
+        // match an NPC placeholder and silently swap s_ownAnimClass to a
+        // stationary 'Player N' NPC, which produced a 4150-packet stuck-
+        // coordinates trail in test session 22004 of the prior branch).
         static int s_revalidateCounter = 0;
-        if (++s_revalidateCounter % 300 == 0) { // Every ~5 seconds at 60fps
-            auto* tc = char_tracker_hooks::FindByName(s_ownCharName);
-            if (tc && tc->animClassPtr != s_ownAnimClass) {
-                s_ownAnimClass = tc->animClassPtr;
-                s_ownCharPtr = tc->characterPtr;
-                spdlog::debug("shared_save_sync: Own animClass updated to 0x{:X}",
-                              reinterpret_cast<uintptr_t>(s_ownAnimClass));
+        if (++s_revalidateCounter % 300 == 0) { // ~5 seconds at 60 fps
+            if (s_ownCharPtr) {
+                auto* tc = char_tracker_hooks::FindByPtr(s_ownCharPtr);
+                if (tc && tc->animClassPtr != s_ownAnimClass) {
+                    s_ownAnimClass = tc->animClassPtr;
+                    spdlog::debug("shared_save_sync: Own animClass refreshed to 0x{:X}",
+                                  reinterpret_cast<uintptr_t>(s_ownAnimClass));
+                }
             }
-            auto* tc2 = char_tracker_hooks::FindByName(s_otherCharName);
-            if (tc2 && tc2->animClassPtr != s_otherAnimClass) {
-                s_otherAnimClass = tc2->animClassPtr;
-                s_otherCharPtr = tc2->characterPtr;
-                if (s_otherCharPtr) ai_hooks::MarkRemoteControlled(s_otherCharPtr);
-                spdlog::debug("shared_save_sync: Other animClass updated to 0x{:X}",
-                              reinterpret_cast<uintptr_t>(s_otherAnimClass));
+            if (s_otherCharPtr) {
+                auto* tc2 = char_tracker_hooks::FindByPtr(s_otherCharPtr);
+                if (tc2 && tc2->animClassPtr != s_otherAnimClass) {
+                    s_otherAnimClass = tc2->animClassPtr;
+                    if (s_otherCharPtr) ai_hooks::MarkRemoteControlled(s_otherCharPtr);
+                    spdlog::debug("shared_save_sync: Other animClass refreshed to 0x{:X}",
+                                  reinterpret_cast<uintptr_t>(s_otherAnimClass));
+                }
             }
         }
     }
