@@ -29,6 +29,7 @@
 #include "kmp/function_analyzer.h"
 #include "sys/watcher.h"
 #include "sys/hook_gate.h"
+#include "sys/install_audit.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
@@ -1185,6 +1186,10 @@ bool Core::InitHooks() {
     }
 
     m_nativeHud.LogStep("OK", "All hooks installed");
+
+    // Single audit log entry summarising every hook's install state — easy to
+    // grep, easy to attach to a bug report. See sys/install_audit.h.
+    kmp::install_audit::Emit();
 
     return allOk;
 }

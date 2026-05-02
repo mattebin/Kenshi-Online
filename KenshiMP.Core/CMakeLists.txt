@@ -62,6 +62,7 @@ add_library(KenshiMP.Core SHARED
     sys/hook_gate.cpp
     sys/prologue_analyzer.cpp
     sys/callsite_analyzer.cpp
+    sys/install_audit.cpp
     # UI (native MyGUI only)
     ui/overlay.cpp
     ui/mygui_bridge.cpp
