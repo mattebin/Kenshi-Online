@@ -13,8 +13,8 @@ namespace kmp::callsite_analyzer {
 
 namespace {
 
-// Get the host module's .text section bounds (Kenshi.exe in our case).
-bool GetTextSection(uintptr_t& outBase, size_t& outSize) {
+// Get a named PE section's bounds.
+bool GetSection(const char* name, uintptr_t& outBase, size_t& outSize) {
     HMODULE h = GetModuleHandleA(nullptr);
     if (!h) return false;
 
@@ -24,16 +24,48 @@ bool GetTextSection(uintptr_t& outBase, size_t& outSize) {
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
 
+    const size_t nameLen = strlen(name);
     auto* sec = IMAGE_FIRST_SECTION(nt);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
-        // ".text" is the canonical name.
-        if (memcmp(sec->Name, ".text", 5) == 0) {
+        if (memcmp(sec->Name, name, nameLen) == 0) {
             outBase = base + sec->VirtualAddress;
             outSize = sec->Misc.VirtualSize;
             return true;
         }
     }
     return false;
+}
+
+bool GetTextSection(uintptr_t& outBase, size_t& outSize) {
+    return GetSection(".text", outBase, outSize);
+}
+
+bool GetRDataSection(uintptr_t& outBase, size_t& outSize) {
+    return GetSection(".rdata", outBase, outSize);
+}
+
+// Scan .rdata looking for QWORDS that equal `targetAddr`. Each match is a
+// likely vtable slot pointing at our function. Returns the first match's
+// address (the address of the slot itself, not the function), or 0 when
+// nothing is found.
+//
+// SEH-safe — bad reads return 0 (we just stop scanning).
+uintptr_t FindVtableSlotPointingAt(uintptr_t rdataBase, size_t rdataSize,
+                                   uintptr_t targetAddr) {
+    if (rdataBase == 0 || rdataSize < sizeof(uintptr_t)) return 0;
+    auto* p = reinterpret_cast<const uintptr_t*>(rdataBase);
+    const size_t count = rdataSize / sizeof(uintptr_t);
+    for (size_t i = 0; i < count; ++i) {
+        __try {
+            if (p[i] == targetAddr) {
+                return reinterpret_cast<uintptr_t>(&p[i]);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Hit an unmapped page — stop scanning, give up.
+            return 0;
+        }
+    }
+    return 0;
 }
 
 // SEH-safe scan for a relative CALL whose target equals `targetAddr`.
@@ -201,7 +233,25 @@ Result FindAndAnalyzeOneCaller(uintptr_t targetAddr, size_t searchBytes) {
 
     uintptr_t callAddr = FindOneCallTo(textBase, textSize, targetAddr, searchBytes);
     if (callAddr == 0) {
-        r.summary = "no `call rel32` to target found in .text";
+        // No direct call rel32. Could be vtable-dispatched. Check .rdata.
+        uintptr_t rdataBase = 0; size_t rdataSize = 0;
+        if (GetRDataSection(rdataBase, rdataSize)) {
+            uintptr_t slot = FindVtableSlotPointingAt(rdataBase, rdataSize, targetAddr);
+            if (slot != 0) {
+                r.inVtable    = true;
+                r.vtableSlot  = slot;
+                char tmp[160];
+                sprintf_s(tmp, sizeof(tmp),
+                          "no `call rel32` to target — dispatched via vtable "
+                          "(slot at .rdata 0x%llX). Caller-side arg count cannot "
+                          "be inferred from vtable alone; cross-check via "
+                          "prologue_analyzer instead.",
+                          (unsigned long long)slot);
+                r.summary = tmp;
+                return r;
+            }
+        }
+        r.summary = "no `call rel32` to target found in .text and not in any vtable";
         return r;
     }
 
@@ -233,7 +283,16 @@ Result FindAndAnalyzeOneCaller(uintptr_t targetAddr, size_t searchBytes) {
 bool VerifyArgCount(const char* tag, uintptr_t targetAddr, int expectedArgCount) {
     Result r = FindAndAnalyzeOneCaller(targetAddr);
     if (!r.callSiteFound) {
-        spdlog::debug("callsite_analyzer[{}] @0x{:X}: {}", tag, targetAddr, r.summary);
+        // Promote vtable-dispatched cases to info — they're not a failure, just
+        // a "this isn't analyzable from the caller side" signal that helps the
+        // reader interpret the prologue-analyzer result on its own.
+        if (r.inVtable) {
+            spdlog::info("callsite_analyzer[{}] @0x{:X}: {}",
+                         tag, targetAddr, r.summary);
+        } else {
+            spdlog::debug("callsite_analyzer[{}] @0x{:X}: {}",
+                          tag, targetAddr, r.summary);
+        }
         return false;
     }
 

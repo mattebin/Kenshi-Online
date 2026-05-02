@@ -98,6 +98,10 @@ static bool PopEvent(DeferredCombatEvent& out) {
 
 static void __fastcall Hook_CharacterDeath(void* character, void* killer) {
     int dn = s_deathCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    // CharacterDeath is genuinely rare (one per actual death) — log every call
+    // when verbose. CharacterKO is poll-spammy (per-frame per-unconscious-char,
+    // 439K lines in a 6-min session under verbose) — see Hook_CharacterKO for
+    // the rate-limit treatment that hook needs.
     if (kmp::watcher::IsEnabled()) {
         spdlog::info("WATCH/HOOK: CharacterDeath enter #{} (char=0x{:X}, killer=0x{:X})",
                      dn, reinterpret_cast<uintptr_t>(character),
@@ -133,11 +137,24 @@ static void __fastcall Hook_CharacterDeath(void* character, void* killer) {
 
 static void __fastcall Hook_CharacterKO(void* character, void* attacker, int reason) {
     int kn = s_koCount.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // CharacterKO is called by the engine on a per-frame poll for every
+    // unconscious character — we measured 439,591 calls in a 6-minute
+    // session in 2026-05-02 testing. Logging every entry under verbose
+    // mode produces ~70 MiB of log spam and pushes spdlog through enough
+    // write amplification to noticeably grow private bytes.
+    //
+    // Rate-limit: log the first 10 calls (so we know the hook is firing
+    // at all) and then 1 in 4096 thereafter. Counts still increment every
+    // call so the install_audit total is accurate.
     if (kmp::watcher::IsEnabled()) {
-        spdlog::info("WATCH/HOOK: CharacterKO enter #{} (char=0x{:X}, attacker=0x{:X}, reason={})",
-                     kn, reinterpret_cast<uintptr_t>(character),
-                     reinterpret_cast<uintptr_t>(attacker), reason);
-        spdlog::default_logger()->flush();
+        const bool isLogged = (kn <= 10) || ((kn & 0xFFF) == 0);
+        if (isLogged) {
+            spdlog::info("WATCH/HOOK: CharacterKO enter #{} (char=0x{:X}, attacker=0x{:X}, reason={})",
+                         kn, reinterpret_cast<uintptr_t>(character),
+                         reinterpret_cast<uintptr_t>(attacker), reason);
+            spdlog::default_logger()->flush();
+        }
     }
 
     // Call original FIRST (SEH-protected) — game KO logic must always run

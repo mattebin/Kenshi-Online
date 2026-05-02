@@ -32,6 +32,11 @@ std::string PrologueHex(const uint8_t* prologue, size_t n) {
 } // namespace
 
 void Emit() {
+    // Run analyzer self-tests first so a regression in the analyzer itself
+    // shows up at the top of the audit block, before any real hook checks
+    // would silently misreport.
+    prologue_analyzer::RunSelfTest();
+
     const uintptr_t hostBase = HostModuleBase();
     auto diags = HookManager::Get().GetDiagnostics();
 

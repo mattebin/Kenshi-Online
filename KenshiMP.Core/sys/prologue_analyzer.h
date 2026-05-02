@@ -68,6 +68,11 @@ struct Result {
 // later code). Wrapped in SEH so a bad address can't crash us.
 Result Analyze(uintptr_t targetAddr, int scanBytes = 256);
 
+// Run a synthetic-fixture self-test of the analyzer. Logs PASS/FAIL for each
+// fixture. Designed to catch analyzer regressions at startup before any real
+// hook decisions get made on the live binary. Cheap (microseconds).
+void RunSelfTest();
+
 // Convenience: log the analysis under tag "{tag}" if it disagrees with
 // `expectedArgCount`. Returns true when the analyzer's confident inference
 // disagrees with the typedef. Caller decides whether to warn or fail.

@@ -61,6 +61,7 @@ add_library(KenshiMP.Core SHARED
     sys/builtin_commands.cpp
     sys/hook_gate.cpp
     sys/prologue_analyzer.cpp
+    sys/prologue_analyzer_selftest.cpp
     sys/callsite_analyzer.cpp
     sys/install_audit.cpp
     sys/field_diff.cpp

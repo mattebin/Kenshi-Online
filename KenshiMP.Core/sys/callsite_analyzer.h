@@ -35,6 +35,13 @@ struct Result {
     // up Ghidra at this RVA for verification).
     uintptr_t callSiteAddr = 0;
 
+    // True iff the function pointer was found inside .rdata (i.e. dispatched
+    // via a vtable). We can't infer arg count from a vtable slot alone, but
+    // knowing it's vtable-dispatched explains why no `call rel32` exists and
+    // is the right hint for "open Ghidra at this address to find callers."
+    bool      inVtable     = false;
+    uintptr_t vtableSlot   = 0;
+
     // Bitmask: bit 0 = RCX written, bit 1 = RDX, bit 2 = R8, bit 3 = R9.
     int registerArgsSet = 0;
 

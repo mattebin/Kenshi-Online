@@ -118,11 +118,102 @@ Result Analyze(uintptr_t targetAddr, int scanBytes) {
     int rspAdjusted = 0;       // sub rsp, imm seen?
     int recognizedCount = 0;   // count of decoded instructions, for confidence
 
+    // ── mov rax,rsp prologue tracking ──
+    // Functions that start with `48 8B C4` (mov rax, rsp) capture the original
+    // RSP into RAX, then push N callee-saved regs, then `lea rbp, [rax-imm]`.
+    // After that they read everything (including stack args 5+) via `[rbp+disp]`
+    // instead of `[rsp+disp]`. We need to compute the rbp→original-rsp delta so
+    // we can translate `[rbp+disp]` reads into stack-arg indices.
+    //
+    // Layout once the prologue completes:
+    //   original RSP at function entry      = saved in RAX
+    //   pushes consume N*8 bytes             = RSP shrinks by N*8 from RAX
+    //   lea rbp, [rax + leaImm]              = RBP relative to ORIGINAL RSP
+    //
+    // Stack arg N (N >= 5) lives at [original_rsp + 0x28 + 8*(N-5)].
+    // So [rbp+disp] is a stack arg iff (disp - leaImm) >= 0x28.
+    bool    sawMovRaxRsp     = false;
+    int32_t rbpLeaFromRax    = 0;     // signed displacement in `lea rbp, [rax+disp]`
+    bool    haveRbpFrame     = false; // set once `lea rbp, [rax+disp]` is decoded
+
     int i = 0;
     while (i + 5 <= scanBytes) {
         // Stop before walking off-end of recognizable code:
         // 0xC3 = RET, 0xCC = INT3 padding -> end of prologue/body region of interest.
         if (buf[i] == 0xC3 || buf[i] == 0xCC) break;
+
+        // ── mov rax, rsp ── 48 8B C4 ── (must be the very first instruction
+        // for the RBP-frame trick to work; we still match it anywhere in the
+        // first 16 bytes because compilers sometimes prepend a single `push`).
+        if (buf[i] == 0x48 && buf[i+1] == 0x8B && buf[i+2] == 0xC4 && i < 16) {
+            sawMovRaxRsp = true;
+            i += 3; recognizedCount++;
+            continue;
+        }
+
+        // ── lea rbp, [rax+disp8] ── 48 8D 68 disp8 (signed 8-bit) ──
+        // ── lea rbp, [rax+disp32] ── 48 8D A8 disp32 ──
+        // Only meaningful when we already saw `mov rax, rsp`.
+        if (sawMovRaxRsp && buf[i] == 0x48 && buf[i+1] == 0x8D) {
+            uint8_t modrm = buf[i+2];
+            if (modrm == 0x68) {              // lea rbp, [rax+disp8]
+                if (i + 4 > scanBytes) break;
+                rbpLeaFromRax  = static_cast<int8_t>(buf[i+3]);
+                haveRbpFrame   = true;
+                i += 4; recognizedCount++;
+                continue;
+            }
+            if (modrm == 0xA8) {              // lea rbp, [rax+disp32]
+                if (i + 7 > scanBytes) break;
+                rbpLeaFromRax  = static_cast<int32_t>(
+                    static_cast<uint32_t>(buf[i+3])       |
+                    (static_cast<uint32_t>(buf[i+4]) << 8) |
+                    (static_cast<uint32_t>(buf[i+5]) << 16)|
+                    (static_cast<uint32_t>(buf[i+6]) << 24));
+                haveRbpFrame   = true;
+                i += 7; recognizedCount++;
+                continue;
+            }
+        }
+
+        // ── stack-arg read via [rbp+disp] when the rax-rsp+lea-rbp frame is set ──
+        // disp32 form is the common case for distant args (because leaImm is
+        // typically negative and large, e.g. -0x158, so any positive arg
+        // offset puts the displacement out of disp8 range).
+        // mov rXX, [rbp+disp32]: REX.W [8B] [ModR/M] [disp32]
+        // ModR/M = 0b10 mode | reg<<3 | 0b101 = 0x85 | (reg<<3)
+        if (haveRbpFrame && (buf[i] == 0x48 || buf[i] == 0x4C) && buf[i+1] == 0x8B) {
+            uint8_t modrm = buf[i+2];
+            if ((modrm & 0xC7) == 0x85) {     // [rbp+disp32]
+                if (i + 7 > scanBytes) break;
+                int32_t disp = static_cast<int32_t>(
+                    static_cast<uint32_t>(buf[i+3])       |
+                    (static_cast<uint32_t>(buf[i+4]) << 8) |
+                    (static_cast<uint32_t>(buf[i+5]) << 16)|
+                    (static_cast<uint32_t>(buf[i+6]) << 24));
+                // Translate [rbp+disp] back to original-rsp-relative offset:
+                //   rbp = rax + leaImm = rsp_orig + leaImm
+                //   so [rbp+disp] = rsp_orig + (disp + leaImm)
+                int32_t rspRelative = disp + rbpLeaFromRax;
+                int argIdx = StackReadOffsetToArgIdx(rspRelative);
+                if (argIdx > 0 && argIdx < 64) {
+                    stackReadsByArg[argIdx]++;
+                }
+                i += 7; recognizedCount++;
+                continue;
+            }
+            if ((modrm & 0xC7) == 0x45) {     // [rbp+disp8]
+                if (i + 4 > scanBytes) break;
+                int32_t disp = static_cast<int8_t>(buf[i+3]);
+                int32_t rspRelative = disp + rbpLeaFromRax;
+                int argIdx = StackReadOffsetToArgIdx(rspRelative);
+                if (argIdx > 0 && argIdx < 64) {
+                    stackReadsByArg[argIdx]++;
+                }
+                i += 4; recognizedCount++;
+                continue;
+            }
+        }
 
         // ── push reg (40 50..57 with REX) or 50..57 plain ──
         if (buf[i] == 0x40 || buf[i] == 0x41) {
@@ -234,6 +325,7 @@ Result Analyze(uintptr_t targetAddr, int scanBytes) {
     // Confidence heuristic.
     int conf = 0;
     if (rspAdjusted)            conf += 20;
+    if (haveRbpFrame)           conf += 20;  // mov rax,rsp + lea rbp = strong signal
     if (r.registerArgsSpilled)  conf += 20 + 10 * r.registerArgsSpilled;
     if (r.highestStackArgRead)  conf += 30;
     if (recognizedCount >= 6)   conf += 10;
