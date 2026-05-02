@@ -266,6 +266,24 @@ void GameServer::HandleDisconnect(ENetPeer* peer) {
                          ownedIds.size(), player->name);
         }
 
+        // Tell remaining clients to despawn the disconnecting player's entities.
+        // The entities ARE kept server-side (preserved for reconnection above)
+        // but other clients shouldn't keep ghost copies on screen — when the
+        // player reconnects, the server will re-broadcast EntitySpawn for each
+        // preserved entity. Without this broadcast, IntegrationTest's
+        // "Disconnect Cleanup" assertion failed and other clients would see
+        // a ghost squad standing motionless until the same playerID reconnected.
+        for (EntityID eid : ownedIds) {
+            PacketWriter dwriter;
+            dwriter.WriteHeader(MessageType::S2C_EntityDespawn);
+            MsgEntityDespawn dmsg;
+            dmsg.entityId = eid;
+            dmsg.reason   = 0; // 0 = normal (player disconnected)
+            dwriter.WriteRaw(&dmsg, sizeof(dmsg));
+            BroadcastExcept(player->id, dwriter.Data(), dwriter.Size(),
+                            KMP_CHANNEL_RELIABLE_ORDERED, ENET_PACKET_FLAG_RELIABLE);
+        }
+
         // Notify others that player left
         PacketWriter writer;
         writer.WriteHeader(MessageType::S2C_PlayerLeft);
@@ -935,7 +953,13 @@ void GameServer::HandleBuildRequest(ConnectedPlayer& player, PacketReader& reade
     building.alive = true;
     m_entities[buildId] = building;
 
-    // Broadcast placement
+    // Broadcast placement to ALL clients including the builder. The builder
+    // needs the same S2C_BuildPlaced as the others — that's their "build
+    // accepted, here's its server-assigned entity ID" confirmation. Without
+    // it, the placer never learns whether the server accepted the request,
+    // and the IntegrationTest "Client 1 received building placement
+    // confirmation" assertion fails. Mirrors how inventory/squad/faction
+    // broadcasts already include the originator.
     PacketWriter writer;
     writer.WriteHeader(MessageType::S2C_BuildPlaced);
     MsgBuildPlaced placed{};
@@ -947,8 +971,8 @@ void GameServer::HandleBuildRequest(ConnectedPlayer& player, PacketReader& reade
     placed.compressedQuat = msg.compressedQuat;
     placed.builderId = player.id;
     writer.WriteRaw(&placed, sizeof(placed));
-    BroadcastExcept(player.id, writer.Data(), writer.Size(),
-                    KMP_CHANNEL_RELIABLE_ORDERED, ENET_PACKET_FLAG_RELIABLE);
+    Broadcast(writer.Data(), writer.Size(),
+              KMP_CHANNEL_RELIABLE_ORDERED, ENET_PACKET_FLAG_RELIABLE);
 
     spdlog::info("GameServer: Player '{}' placed building {} at ({:.1f}, {:.1f}, {:.1f})",
                  player.name, buildId, msg.posX, msg.posY, msg.posZ);
