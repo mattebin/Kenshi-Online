@@ -17,6 +17,8 @@ The commits below are listed newest-first.
 
 | # | Commit | Source | Area | Summary |
 |---|---|---|---|---|
+| 22 | `d2a7828` | original | MP correctness | **Stop infinite retry on cap-rejected spawns.** The cap-rejected branch in `Hook_CharacterCreate` was calling `RequeueSpawn` without bumping `retryCount` — the spawn manager kept popping the same request, hitting the same full cap, and re-queuing forever. Surface area got bigger when the cap was raised to 32. Now properly increments the retry counter so `MAX_SPAWN_RETRIES` (200, ~10s) eventually fires the drop-with-warn. **Not in andperks6 or muddxyii — original.** |
+| 21 | `1d7abf0` | original | MP scaling | **Raise per-player spawn cap from 4 to 32 (configurable).** Upstream `MAX_SPAWNS_PER_PLAYER = 4` (commit `ef8d242`) silently dropped everything past the first 4 chars per remote player — catastrophically low for the project's 16-player co-op goal since vanilla Kenshi squads regularly exceed 4. New default is 32 (above vanilla squad cap of 30, leaves a safety margin). Exposed as `ClientConfig::maxSpawnsPerPlayer` in `client.json`, refreshed on every `ResumeForNetwork` so retuning takes effect on reconnect. Clamped to `[1, 256]`. **Not in andperks6 or muddxyii — original.** |
 | 20 | `cdd9209` | borrowed (andperks6 `3d5bdfc`) | crash safety | **Permanent CharacterCreate passthrough.** The MovRaxRsp naked detour wrapping `CharacterCreate` is unsafe for sustained runtime interception. andperks6 bisect traced intermittent zone-stream NPC crashes to the post-load full-body re-enable. Hook now stays in lightweight passthrough (timestamp + counter + factory capture) for the entire DLL lifetime. char_tracker_hooks (animation tick) covers active-character discovery from a stable game-tick context that doesn't go through MovRaxRsp. |
 | 19 | `e903674` | borrowed (andperks6 `0385189`) | MP correctness | **Position read fallback chain.** AnimClass-chain position read returns zero on the first ~1-2s after world load while animClass is still being populated. Sending a zero position made the server interpret it as a teleport. Now reads `char + offsets.character.position` first (works frame 1), falls back to AnimClass chain. |
 | 18 | `4d47939` | borrowed (andperks6 `2d1a04c`) | MP correctness | **OIS keyDown/keyUp swallow.** Fixes the double-input bug where typing in chat or interacting with the multiplayer menu also drove Kenshi's game actions. WndProc handles overlay input, but Kenshi reads keyboard separately through OIS — both consumers received the same keystroke without this hook. |
@@ -47,6 +49,8 @@ The commits below are listed newest-first.
 - **Faction-pointer identity tracking** (`23c8ef8`) — avoids `Player 1` name swap.
 - **Watcher trace markers** (`5e6d2a9`) — flush-forced "where were we when Kenshi died" breadcrumbs.
 - **Auto-discover offset path** (`8d59ee8`) — independent of theirs, slightly older.
+- **Per-player spawn cap raised + configurable** (`1d7abf0`) — was 4, now 32 (configurable).
+- **Cap-rejected spawn retry budget** (`d2a7828`) — fixes infinite retry loop.
 
 ## What andperks6 has that this branch doesn't (yet)
 
