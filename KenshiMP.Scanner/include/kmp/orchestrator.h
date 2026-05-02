@@ -74,6 +74,11 @@ struct PatternEntry {
     float           confidence      = 0.0f;
     bool            isResolved      = false;
     bool            isGlobalPointer = false; // True if this is a global pointer, not a function
+    bool            allowUnaligned  = false; // True if address is *expected* to be mid-function
+                                              // (e.g. CharAnimUpdate's pattern targets an
+                                              // instruction inside the function body, so the
+                                              // resolved address won't be 16-byte aligned —
+                                              // disables the standard alignment rejection).
     bool            critical        = false; // Must-resolve: enables aggressive fallbacks
     int             retryCount      = 0;
 
