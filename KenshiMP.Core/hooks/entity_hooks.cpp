@@ -103,7 +103,15 @@ static std::atomic<int> s_earlyProbeCount{0};
 
 // ── Per-player spawn cap ──
 // Accessed from game thread (Hook_CharacterCreate) and network thread (ResumeForNetwork).
-static constexpr int MAX_SPAWNS_PER_PLAYER = 4;
+//
+// Upstream had this hardcoded at 4 (commit ef8d242, v1.0.2 stability pass).
+// That's far too low for the project's stated 16-player co-op goal — vanilla
+// Kenshi squads regularly have 8+ chars per player and the cap silently
+// drops everything past the first 4 (rest stay queued for retry forever).
+// Now sourced from ClientConfig::maxSpawnsPerPlayer (default 32, configurable
+// in client.json). The atomic mirror is updated by ResumeForNetwork so the
+// hook hot-path doesn't have to traverse Core::Get() to read the config.
+static std::atomic<int> s_maxSpawnsPerPlayer{32};
 static std::mutex s_spawnsPerPlayerMutex;
 static std::unordered_map<PlayerID, int> s_spawnsPerPlayer;
 
@@ -928,7 +936,8 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
                 bool canSpawnForPlayer = false;
                 {
                     std::lock_guard lock(s_spawnsPerPlayerMutex);
-                    canSpawnForPlayer = s_spawnsPerPlayer[spawnReq.owner] < MAX_SPAWNS_PER_PLAYER;
+                    canSpawnForPlayer = s_spawnsPerPlayer[spawnReq.owner] <
+                                        s_maxSpawnsPerPlayer.load(std::memory_order_acquire);
                 }
                 if (canSpawnForPlayer) {
                     spdlog::info("entity_hooks: NPC HIJACK for entity {} owner={} — using just-created NPC",
@@ -1227,6 +1236,12 @@ void ResumeForNetwork() {
         std::lock_guard lock(s_spawnsPerPlayerMutex);
         s_spawnsPerPlayer.clear();
     }
+
+    // Sync the per-player spawn cap from config so re-tuning takes effect on
+    // reconnect without a restart. The atomic is read by the hook hot-path.
+    const int cfgCap = Core::Get().GetConfig().maxSpawnsPerPlayer;
+    s_maxSpawnsPerPlayer.store(cfgCap, std::memory_order_release);
+    spdlog::info("entity_hooks: ResumeForNetwork — maxSpawnsPerPlayer = {}", cfgCap);
 
     // Reset connected-mode statics that don't reset naturally on reconnect
     s_connectedCreateNum.store(0);

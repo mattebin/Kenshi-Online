@@ -34,6 +34,18 @@ struct ClientConfig {
     // file under normal play.
     bool        verboseWatchLog = false;
 
+    // Maximum number of remote-player characters that can spawn into one
+    // local Kenshi instance via the NPC-hijack mechanism in entity_hooks.
+    // Capped at 4 in the upstream v1.0.2 stability pass — too low for
+    // 16-player co-op, since vanilla Kenshi squads regularly run to 8+
+    // characters per player. With the upstream cap, only the first 4 of
+    // each remote player's squad would actually appear; the rest stay
+    // queued forever as the spawn manager retries to find an NPC slot.
+    // Vanilla squad cap is 30; defaulting to 32 leaves a safety margin
+    // and lets typical squads work as designed. Configurable so the cap
+    // can be tuned downward on memory-constrained hosts if needed.
+    int         maxSpawnsPerPlayer = 32;
+
     bool Load(const std::string& path);
     bool Save(const std::string& path) const;
 

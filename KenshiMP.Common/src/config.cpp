@@ -61,6 +61,7 @@ bool ClientConfig::Load(const std::string& path) {
         if (j.contains("useSyncOrchestrator")) useSyncOrchestrator = j["useSyncOrchestrator"].get<bool>();
         if (j.contains("kenshiCrashRecovery")) kenshiCrashRecovery = j["kenshiCrashRecovery"].get<bool>();
         if (j.contains("verboseWatchLog"))     verboseWatchLog     = j["verboseWatchLog"].get<bool>();
+        if (j.contains("maxSpawnsPerPlayer"))  maxSpawnsPerPlayer  = j["maxSpawnsPerPlayer"].get<int>();
 
         // ── Validate loaded values ──
         if (playerName.size() > KMP_MAX_NAME_LENGTH)
@@ -68,6 +69,9 @@ bool ClientConfig::Load(const std::string& path) {
         lastPort    = Clamp<uint16_t>(lastPort, 1024, 65535);
         overlayScale = Clamp(overlayScale, 0.1f, 10.0f);
         masterPort  = Clamp<uint16_t>(masterPort, 1024, 65535);
+        // Floor at 1 (anything lower would block all remote spawns); cap at
+        // 256 so a typo can't blow out the spawn manager's retry budget.
+        maxSpawnsPerPlayer = Clamp(maxSpawnsPerPlayer, 1, 256);
 
         return true;
     } catch (...) {
@@ -88,6 +92,7 @@ bool ClientConfig::Save(const std::string& path) const {
     j["useSyncOrchestrator"] = useSyncOrchestrator;
     j["kenshiCrashRecovery"] = kenshiCrashRecovery;
     j["verboseWatchLog"]     = verboseWatchLog;
+    j["maxSpawnsPerPlayer"]  = maxSpawnsPerPlayer;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;
