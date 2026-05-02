@@ -4,6 +4,28 @@
 
 Kenshi-Online adds seamless multiplayer to Kenshi using native MyGUI integration, ENet networking, and Ogre plugin injection. Players can explore, fight, build, and trade together in the open world of Kenshi.
 
+---
+
+## Fork notice — `mattebin/stability/upstream-base`
+
+> This fork carries 14 stability and correctness fixes for Kenshi 1.0.68 (Steam, "Newland") that aren't in upstream `main`. Branch is fast-forward mergeable into upstream — no conflicts at the time of writing.
+>
+> **Full per-commit details: [`FORK_CHANGES.md`](FORK_CHANGES.md).**
+
+Highlights:
+
+| Area | What this fork fixes |
+|---|---|
+| Combat | `AI::create` hook signature was 2-arg, dropping `Faction*` in R8 → faction-less AI controllers → chars could move but not attack. Fixed with proper 3-arg member-function signature + minimal hook bodies + lazy enable on connect. |
+| Crash safety | VEH-based recovery for the recurring engine null-deref at `[rax+0x90]`. `LOCK` prefix on the MovRaxRsp wrapper depth counter (cross-core race that silently terminated the process). Defer `CharacterCreate` hook arming until spawn manager is ready. |
+| Steam compat | Auto-discover `CharacterHuman` backpointer offset (Steam ≠ GOG `+0x2D8`). `allowUnaligned` flag for patterns like `CharAnimUpdate` that intentionally land mid-function. |
+| MP correctness | Faction-pointer identity (avoids 18-char `Player 1` name-collision swap). Strip `.mod` suffix from server-sent faction strings. Resume sync after main-menu join + world load (was deferred forever). |
+| Diagnostics | Watcher trace markers (`WATCH/HOOK`, `WATCH/PKT`, `WATCH/TICK`, `WATCH/SYNC`, `WATCH/POS`) — flush-forced, gated on a config flag. |
+
+**Verification status:** all fixes verified on a single PC running both client and server. No two-machine, two-Steam-account session has been run yet — the gate test for declaring MP combat works is documented in `FORK_CHANGES.md`.
+
+---
+
 ## Features
 
 - **Up to 16 players** on a single server
