@@ -17,6 +17,7 @@ The commits below are listed newest-first.
 
 | # | Commit | Source | Area | Summary |
 |---|---|---|---|---|
+| 26 | `e40c274` | original | diagnostics | **Three runtime analyzers — `field_diff` + `concurrency_watch` + `leak_watch`.** Close the runtime gaps that install-time analysis can't see. `field_diff` snapshots a pointer arg pre-call and verifies expected fields are non-null post-call (catches AICreate-class "ran but didn't initialise" bugs). `concurrency_watch` is an RAII per-hook depth counter that warns once on same-thread reentrancy or different-thread collision. `leak_watch` snapshots process memory + registered collection sizes every 5 minutes; after ≥3 snapshots, any monotonically-growing collection gets a warn log. All three feed their summaries into the `install_audit::Emit` block so one grep gets you everything. |
 | 25 | `6ad2dc4` | original | diagnostics | **Install audit log block.** Emitted once at end of `Core::InitHooks`. For every installed hook: name, target address, RVA, install/enable flags, MovRaxRsp-fix flag, live call/crash counters, prologue hex (8 bytes), prologue-analyzer arg-count + confidence, callsite-analyzer arg-count + confidence. Surrounded by `=== KMP HOOK AUDIT BEGIN ===` / `=== END ===` so it's grep-and-paste for bug reports. |
 | 24 | `0a124a4` | original | diagnostics | **Call-site analyzer.** Companion to the prologue analyzer. Walks Kenshi's `.text` for any `call rel32` whose displacement resolves to the hook target. Walks back ~512 bytes from that CALL recognising arg-setup patterns (`mov RCX/RDX/R8/R9`, `lea`, `xor self`, `mov [rsp+0x28+]`). Inferred arg count from the caller side cross-checks the prologue analyzer. When both agree we trust the typedef; when they disagree there's real signal worth investigating. |
 | 23 | `9c0c083` | original | diagnostics | **Prologue analyzer for hook arg-count verification.** Static x64 prologue/early-body scanner that infers a function's `__fastcall` arg count by looking for home-space register spills (`mov [rsp+0x08/0x10/0x18/0x20], RCX/RDX/R8/R9`) and stack-arg reads (`mov rXX, [rsp+0x28+]`). At hook install time, every site calls `VerifyArgCount(name, target, expectedCount)` — agreement → info log, high-confidence disagreement → warn log. Would have caught the AI::create 2-vs-6-arg bug at install in one log line, instead of a multi-hour bisect. Wired into AICreate, AIPackages, CharacterDeath, CharacterKO, FactionRelation, ItemPickup, ItemDrop, BuyItem, CharacterCreate. |
@@ -57,6 +58,7 @@ The commits below are listed newest-first.
 - **Hook prologue analyzer** (`9c0c083`) — would have caught the AICreate 2-vs-6-arg bug at install time.
 - **Hook call-site analyzer** (`0a124a4`) — independent cross-check on prologue analysis.
 - **Install audit log** (`6ad2dc4`) — one greppable block summarising every hook for bug reports.
+- **Field-diff / concurrency-watch / leak-watch analyzers** (`e40c274`) — runtime layer that catches struct-field corruption, unsafe concurrent reentry, and long-session memory leaks.
 
 ## What andperks6 has that this branch doesn't (yet)
 
