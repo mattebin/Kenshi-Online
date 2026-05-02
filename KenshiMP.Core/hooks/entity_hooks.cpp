@@ -1260,24 +1260,13 @@ void ResumeForNetwork() {
     s_factionScanCount = 0;
     s_factionVotingDone = false;
 
-    // Disable loading passthrough — full hook body active for multiplayer.
-    // At this point loading is complete — only single/few runtime spawns will
-    // trigger the hook (new zone NPCs, remote player injection). MovRaxRsp
-    // handles single calls fine; it's only the 130+ loading burst that uses
-    // the lightweight passthrough path.
-    s_loadingPassthrough.store(false, std::memory_order_release);
-
-    // Ensure hook is enabled (should already be, but re-enable in case
-    // the loading capture code path disabled it via HookManager::Disable)
-    if (HookManager::Get().Enable("CharacterCreate")) {
-        spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate hook ENABLED (full mode)");
-    } else {
-        spdlog::warn("entity_hooks: ResumeForNetwork — CharacterCreate Enable() returned false");
-    }
-
-    spdlog::info("entity_hooks: ResumeForNetwork — hook active for runtime spawns "
-                 "(earlyFaction=0x{:X}, fallback=0x{:X})", earlyFac,
-                 s_fallbackFaction.load(std::memory_order_relaxed));
+    // Keep CharacterCreate bypassed here. Core::OnGameLoaded() verifies the
+    // spawn path first; enabling full mode before that can crash on late
+    // startup creates from Kenshi presets.
+    s_loadingPassthrough.store(true, std::memory_order_release);
+    spdlog::info("entity_hooks: ResumeForNetwork - CharacterCreate remains bypassed "
+                 "until spawn readiness is verified (earlyFaction=0x{:X}, fallback=0x{:X})",
+                 earlyFac, s_fallbackFaction.load(std::memory_order_relaxed));
 }
 
 void SuspendForDisconnect() {
