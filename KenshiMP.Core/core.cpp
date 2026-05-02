@@ -1229,10 +1229,13 @@ void Core::TransitionTo(ClientPhase newPhase) {
 void Core::OnLoadingGapDetected() {
     ClientPhase current = m_clientPhase.load(std::memory_order_acquire);
 
-    // Accept from MainMenu (normal flow) or GameReady (in-game Load button,
-    // detected by render_hooks as >10s gap). NOT from Startup — engine initialization
-    // gaps are not save game loads.
-    if (current == ClientPhase::MainMenu || current == ClientPhase::GameReady) {
+    // Accept from MainMenu (normal flow), Connected before the save is loaded
+    // (join-from-menu flow), or GameReady (in-game Load button, detected by
+    // render_hooks as >10s gap). NOT from Startup — engine initialization gaps
+    // are not save game loads.
+    if (current == ClientPhase::MainMenu ||
+        (current == ClientPhase::Connected && !m_gameLoaded.load()) ||
+        current == ClientPhase::GameReady) {
         // Reset game-loaded state so OnGameLoaded() can fire again for the new save.
         // Without this, a second load would never trigger OnGameLoaded because
         // m_gameLoaded is already true from the first load.

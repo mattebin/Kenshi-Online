@@ -55,13 +55,11 @@ bool GameServer::Start(const ServerConfig& config) {
                              "Port {} may need manual forwarding.", config.port);
             }
         }
-    }
-
-    // ── Now start listening — port is mapped (or we tried our best) ──
-    else {
+    } else {
         spdlog::info("GameServer: Port forwarding disabled; listening locally/LAN only on UDP {}", config.port);
     }
 
+    // ── Now start listening — port is mapped if enabled (or we tried our best) ──
     ENetAddress address;
     address.host = ENET_HOST_ANY;
     address.port = config.port;

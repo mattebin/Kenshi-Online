@@ -1195,7 +1195,11 @@ bool Install() {
             // events instead of CharacterIterator (which corrupts the heap
             // when reading the lektor during active resizing).
             s_loadingPassthrough.store(true, std::memory_order_release);
-            spdlog::info("entity_hooks: CharacterCreate installed in LOADING PASSTHROUGH mode");
+            if (HookManager::Get().Enable("CharacterCreate")) {
+                spdlog::info("entity_hooks: CharacterCreate installed and ENABLED in LOADING PASSTHROUGH mode");
+            } else {
+                spdlog::warn("entity_hooks: CharacterCreate installed but Enable() failed");
+            }
             OutputDebugStringA("KMP: entity_hooks — CharacterCreate installed (loading passthrough)\n");
         }
     }

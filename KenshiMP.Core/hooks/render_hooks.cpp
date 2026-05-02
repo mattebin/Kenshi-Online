@@ -339,6 +339,15 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
                     // Reset smooth-frame timer.
                     s_loadingSmoothStarted = false;
                     spdlog::debug("render_hooks: Loading gap ({} ms) — reset smooth timer", gap.count());
+                } else if (phase == ClientPhase::Connected && !core.IsGameLoaded()) {
+                    // Connected from the main menu, then the player loaded a save.
+                    // Treat this like the normal MainMenu -> Loading transition so
+                    // the deferred sync hooks resume after the world is ready.
+                    spdlog::info("render_hooks: Connected-before-load save gap detected ({} ms)",
+                                 gap.count());
+                    s_loadingSmoothStarted = false;
+                    s_createsAtLoadingStart = entity_hooks::GetTotalCreates();
+                    core.OnLoadingGapDetected();
                 } else if (phase == ClientPhase::GameReady && gap.count() > 10000) {
                     // Very long gap (>10s) during GameReady = user loaded a new save
                     // from the in-game Load menu. Zone transitions are 2-5s max.
