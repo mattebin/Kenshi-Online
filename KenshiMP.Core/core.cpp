@@ -1089,13 +1089,23 @@ bool Core::InitHooks() {
     }
 
     // Character tracker hooks (animation update — tracks all chars by name)
-    {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Skipped during combat-break bisect (2026-05-02). Bisect proved the bug
+    // is in ai_hooks (AICreate), not here, but this hook was never tested in
+    // isolation. The 14-byte inline hook + 300+/sec firing rate is risky on
+    // Steam 1.0.68 if the relocated bytes contain RIP-relative ops.
+    // TODO: re-enable and test combat. If it still works, leave on. If broken,
+    // the relocation logic in char_tracker_hooks::BuildInlineHook needs fixing.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (false) {
         m_nativeHud.LogStep("HOOK", "Character tracker...");
         if (char_tracker_hooks::Install()) {
             m_nativeHud.LogStep("OK", "Character tracker installed");
         } else {
             m_nativeHud.LogStep("WARN", "Character tracker not available (pattern not found)");
         }
+    } else {
+        m_nativeHud.LogStep("SKIP", "Character tracker SKIPPED (untested post-AICreate-fix)");
     }
 
     // Inventory hooks (ItemPickup, ItemDrop, BuyItem)
@@ -1133,13 +1143,30 @@ bool Core::InitHooks() {
     }
 
     // AI hooks (AICreate + AIPackages)
-    if (m_gameFuncs.AICreate) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // BUG (upstream e71dd3a): Hook_AICreate breaks attack-action dispatch even
+    // when not connected. Bisect 2026-05-02 in pure vanilla Kenshi (no .mod,
+    // no MP server) confirmed: with this hook installed, characters can move
+    // but cannot attack. Likely cause: the SEH-wrapped trampoline call to
+    // AICreate corrupts character state (mov rax,rsp prologue or wrong calling
+    // convention). The CharacterCreate hook in entity_hooks avoids the same
+    // class of bug by installing-but-disabling, only enabling under controlled
+    // timing (entity_hooks::ResumeForNetwork). AI hooks should follow that.
+    //
+    // TODO: refactor ai_hooks to install+Disable, expose ResumeForNetwork(),
+    // and call it from the connect path alongside entity_hooks::ResumeForNetwork.
+    // Until then this is fully skipped — MP remote-char-marking is unused
+    // while we stabilize SP combat first.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (false && m_gameFuncs.AICreate) {
         m_nativeHud.LogStep("HOOK", "AI hooks...");
         if (ai_hooks::Install()) {
             m_nativeHud.LogStep("OK", "AI hooks installed");
         } else {
             m_nativeHud.LogStep("WARN", "AI hooks FAILED");
         }
+    } else {
+        m_nativeHud.LogStep("SKIP", "AI hooks SKIPPED (combat-break bug — see core.cpp comment)");
     }
 
     m_nativeHud.LogStep("OK", "All hooks installed");
