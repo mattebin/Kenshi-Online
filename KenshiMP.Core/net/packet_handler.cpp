@@ -289,9 +289,10 @@ private:
         // (MovRaxRsp wrapper corruption). Instead, defer to OnGameLoaded().
         if (core.IsGameLoaded()) {
             entity_hooks::ResumeForNetwork();
-            spdlog::info("PacketHandler: Entity hooks resumed (game already loaded)");
+            ai_hooks::ResumeForNetwork();
+            spdlog::info("PacketHandler: Entity + AI hooks resumed (game already loaded)");
         } else {
-            spdlog::info("PacketHandler: Entity hooks DEFERRED (game not loaded yet — will resume on game load)");
+            spdlog::info("PacketHandler: Entity + AI hooks DEFERRED (game not loaded yet — will resume on game load)");
             core.GetNativeHud().LogStep("NET", "Connected! Sync starts when you load a save.");
         }
 

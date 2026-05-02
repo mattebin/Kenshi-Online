@@ -23,6 +23,7 @@
 #include "sdk/kenshi_sdk.h"
 #include "sdk/visual_proxy.h"
 #include "hooks/entity_hooks.h"
+#include "hooks/ai_hooks.h"
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <thread>
@@ -109,9 +110,10 @@ public:
             if (m_gameLoaded) {
                 HookManager::Get().Enable("CharacterDeath");
                 HookManager::Get().Enable("CharacterKO");
-                spdlog::info("Core: Combat hooks ENABLED (game loaded)");
+                ai_hooks::ResumeForNetwork();
+                spdlog::info("Core: Combat + AI hooks ENABLED (game loaded)");
             } else {
-                spdlog::info("Core: Combat hooks DEFERRED (game not loaded — will enable on load)");
+                spdlog::info("Core: Combat + AI hooks DEFERRED (game not loaded — will enable on load)");
             }
 
             // shared_save_sync::Init() is called lazily from Update() after
@@ -126,6 +128,9 @@ public:
             // Disable CharacterCreate hook — zone-load bursts while disconnected
             // would go through MovRaxRsp and corrupt the heap
             entity_hooks::SuspendForDisconnect();
+
+            // Disable AI hooks — Hook_AICreate corrupts char state in SP
+            ai_hooks::SuspendForDisconnect();
 
             // Disable combat hooks — no need to sync while disconnected
             HookManager::Get().Disable("CharacterDeath");
