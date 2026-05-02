@@ -819,6 +819,19 @@ void* SpawnManager::SpawnWithModTemplate(int playerSlot, const Vec3& position) {
     return nullptr;
 }
 
+bool SpawnManager::HasSpawnPathReady() const {
+    bool hasFactory = (m_factory != nullptr);
+    bool hasOrigProcess = (m_origProcess != nullptr);
+    bool hasPreCall = m_hasPreCallData;
+    int modCount = m_modTemplateCount.load();
+
+    bool inPlacePath = hasFactory && hasOrigProcess && hasPreCall;
+    bool directPath = hasOrigProcess && hasPreCall;
+    bool modTemplatePath = (modCount > 0) && hasFactory && hasOrigProcess;
+
+    return inPlacePath || directPath || modTemplatePath;
+}
+
 bool SpawnManager::VerifyReadiness() const {
     bool hasFactory = (m_factory != nullptr);
     bool hasOrigProcess = (m_origProcess != nullptr);
@@ -871,7 +884,7 @@ bool SpawnManager::VerifyReadiness() const {
         spdlog::warn("  This means the CharacterCreate hook did not fire during loading.");
     }
 
-    return inPlacePath || directPath || modTemplatePath;
+    return HasSpawnPathReady();
 }
 
 } // namespace kmp

@@ -271,6 +271,10 @@ public:
     // Called from Core::OnGameLoaded() to confirm spawn system is operational.
     // Returns true if at least one spawn path is available.
     bool VerifyReadiness() const;
+
+    // Lightweight readiness check for UI gating.
+    // Returns true if at least one spawn path is available, without logging.
+    bool HasSpawnPathReady() const;
 };
 
 } // namespace kmp

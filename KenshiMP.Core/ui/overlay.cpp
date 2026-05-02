@@ -27,8 +27,9 @@ void Overlay::Update() {
         strncpy(m_settingsName, config.playerName.c_str(), sizeof(m_settingsName) - 1);
         strncpy(m_serverAddress, config.lastServer.c_str(), sizeof(m_serverAddress) - 1);
         snprintf(m_serverPort, sizeof(m_serverPort), "%d", config.lastPort);
-        m_settingsAutoConnect = false; // Auto-connect disabled — use /connect manually
-        m_autoConnectPending = false;
+        m_settingsAutoConnect = config.autoConnect;
+        m_autoConnectPending = config.autoConnect;
+        m_autoConnectDone = false;
         OutputDebugStringA("KMP: Overlay::Update() — first frame config loaded\n");
     }
 

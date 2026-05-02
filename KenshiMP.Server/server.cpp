@@ -30,32 +30,38 @@ bool GameServer::Start(const ServerConfig& config) {
 
     // ── UPnP / Firewall: do this BEFORE listening ──
     // The server doesn't accept any connections until the port is mapped.
-    spdlog::info("GameServer: Setting up port forwarding for port {}...", config.port);
-    if (m_upnp.AddMapping(config.port, config.port, "UDP", "KenshiMP Server")) {
-        std::string extIP = m_upnp.GetExternalIP();
-        if (!extIP.empty()) {
-            spdlog::info("GameServer: UPnP mapped! Others can join at {}:{}", extIP, config.port);
+    if (config.enablePortForwarding) {
+        spdlog::info("GameServer: Setting up port forwarding for port {}...", config.port);
+        if (m_upnp.AddMapping(config.port, config.port, "UDP", "KenshiMP Server")) {
+            std::string extIP = m_upnp.GetExternalIP();
+            if (!extIP.empty()) {
+                spdlog::info("GameServer: UPnP mapped! Others can join at {}:{}", extIP, config.port);
+            } else {
+                spdlog::info("GameServer: UPnP mapped port {} successfully", config.port);
+            }
         } else {
-            spdlog::info("GameServer: UPnP mapped port {} successfully", config.port);
-        }
-    } else {
-        spdlog::info("GameServer: UPnP unavailable — adding Windows Firewall rule instead...");
+            spdlog::info("GameServer: UPnP unavailable — adding Windows Firewall rule instead...");
 
-        std::string deleteCmd = "netsh advfirewall firewall delete rule name=\"KenshiMP Server\" >nul 2>&1";
-        std::system(deleteCmd.c_str());
+            std::string deleteCmd = "netsh advfirewall firewall delete rule name=\"KenshiMP Server\" >nul 2>&1";
+            std::system(deleteCmd.c_str());
 
-        std::string addCmd = "netsh advfirewall firewall add rule name=\"KenshiMP Server\" "
-                             "dir=in action=allow protocol=UDP localport=" + std::to_string(config.port);
-        int result = std::system(addCmd.c_str());
-        if (result == 0) {
-            spdlog::info("GameServer: Firewall rule added — port {} UDP is open", config.port);
-        } else {
-            spdlog::warn("GameServer: Failed to add firewall rule (need admin?). "
-                         "Port {} may need manual forwarding.", config.port);
+            std::string addCmd = "netsh advfirewall firewall add rule name=\"KenshiMP Server\" "
+                                 "dir=in action=allow protocol=UDP localport=" + std::to_string(config.port);
+            int result = std::system(addCmd.c_str());
+            if (result == 0) {
+                spdlog::info("GameServer: Firewall rule added — port {} UDP is open", config.port);
+            } else {
+                spdlog::warn("GameServer: Failed to add firewall rule (need admin?). "
+                             "Port {} may need manual forwarding.", config.port);
+            }
         }
     }
 
     // ── Now start listening — port is mapped (or we tried our best) ──
+    else {
+        spdlog::info("GameServer: Port forwarding disabled; listening locally/LAN only on UDP {}", config.port);
+    }
+
     ENetAddress address;
     address.host = ENET_HOST_ANY;
     address.port = config.port;
@@ -97,7 +103,7 @@ void GameServer::Stop() {
     m_masterConnected = false;
 
     // Remove UPnP port mapping
-    if (m_upnp.IsMapped()) {
+    if (m_config.enablePortForwarding && m_upnp.IsMapped()) {
         m_upnp.RemoveMapping(m_config.port, "UDP");
     }
 

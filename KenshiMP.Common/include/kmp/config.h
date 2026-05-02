@@ -33,6 +33,7 @@ struct ServerConfig {
     int         tickRate     = KMP_TICK_RATE;
     bool        pvpEnabled   = true;
     float       gameSpeed    = 1.0f;
+    bool        enablePortForwarding = false; // UPnP/firewall rule for public hosting
     std::string masterServer = "162.248.94.149"; // Master server address
     uint16_t    masterPort   = 27801;            // Master server port
 

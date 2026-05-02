@@ -267,6 +267,10 @@ void NativeMenu::OnClick(int screenX, int screenY) {
         if (testMainButton(HOST_BTN)) {
             OnHostClicked();
         } else if (testMainButton(JOIN_BTN)) {
+            if (!CanUseJoinFlow("join panel")) {
+                return;
+            }
+
             // Load config values into EditBoxes
             auto& config = Core::Get().GetConfig();
             auto& bridge = MyGuiBridge::Get();
@@ -366,6 +370,10 @@ void NativeMenu::OnClick(int screenX, int screenY) {
                         auto& overlay = Core::Get().GetOverlay();
 
                         if (Core::Get().IsGameLoaded()) {
+                            if (!CanUseJoinFlow("server browser join")) {
+                                break;
+                            }
+
                             // Game loaded — connect immediately
                             ShowPanel(Panel::Join);
                             spdlog::info("NativeMenu: Server row {} selected -> {}:{} (game loaded, showing Join)",
@@ -434,6 +442,25 @@ void NativeMenu::SetStatus(const std::string& text) {
 //  Button action handlers (wired to existing Core logic)
 // ═══════════════════════════════════════════════════════════════
 
+bool NativeMenu::CanUseJoinFlow(const char* action) {
+    auto& core = Core::Get();
+
+    if (!core.IsGameLoaded()) {
+        return true;
+    }
+
+    if (core.GetSpawnManager().HasSpawnPathReady()) {
+        return true;
+    }
+
+    const std::string message =
+        "Multiplayer is not ready yet. Wait a few seconds after loading, then try again.";
+    SetStatus(message);
+    core.GetNativeHud().AddSystemMessage(message);
+    spdlog::warn("NativeMenu: {} blocked - spawn system has no ready spawn path", action);
+    return false;
+}
+
 void NativeMenu::OnHostClicked() {
     spdlog::info("NativeMenu: HOST GAME clicked");
 
@@ -497,6 +524,10 @@ void NativeMenu::OnConnectClicked() {
     spdlog::info("NativeMenu: CONNECT clicked");
 
     auto& core = Core::Get();
+
+    if (!CanUseJoinFlow("connect")) {
+        return;
+    }
 
     std::string ip = GetServerIP();
     std::string portStr = GetServerPort();
