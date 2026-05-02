@@ -957,7 +957,21 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
                             spawnMgr.RequeueSpawn(spawnReq);
                     }
                 } else {
-                    spawnMgr.RequeueSpawn(spawnReq);
+                    // Cap reached for this player. The previous code requeued
+                    // unconditionally without bumping retryCount — meaning every
+                    // subsequent CharacterCreate would re-pop this request, see the
+                    // cap still full, and requeue again forever. With the cap
+                    // recently raised from 4 to 32 (configurable), the surface area
+                    // of this infinite loop got bigger. Bump the retry counter so
+                    // the spawn manager eventually gives up rather than spin.
+                    spawnReq.retryCount++;
+                    if (spawnReq.retryCount < MAX_SPAWN_RETRIES) {
+                        spawnMgr.RequeueSpawn(spawnReq);
+                    } else {
+                        spdlog::warn("entity_hooks: spawn cap exhausted for owner {} entity {} "
+                                     "after {} retries — dropping",
+                                     spawnReq.owner, spawnReq.netId, MAX_SPAWN_RETRIES);
+                    }
                 }
             }
         }
