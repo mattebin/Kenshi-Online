@@ -177,6 +177,25 @@ static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
     }
 }
 
+// ── SEH-protected position read directly from the Character struct ──
+// Used as a fallback when the AnimClass chain returns zero — happens during
+// the first ~1-2 seconds after world load when animClass is still being
+// populated. Borrowed from andperks6/Kenshi-Online (commit 0385189).
+static bool SEH_ReadCharacterPosition(void* charPtr, Vec3& out) {
+    __try {
+        uintptr_t charAddr = reinterpret_cast<uintptr_t>(charPtr);
+        if (charAddr < 0x10000 || charAddr > 0x00007FFFFFFFFFFF) return false;
+
+        int posOff = game::GetOffsets().character.position;
+        if (posOff < 0) return false;
+
+        Memory::ReadVec3(charAddr + posOff, out.x, out.y, out.z);
+        return (out.x != 0.f || out.y != 0.f || out.z != 0.f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // ── SEH-protected position write to AnimClass chain ──
 static bool SEH_WriteAnimClassPosition(void* animClass, const Vec3& pos) {
     __try {
@@ -395,7 +414,16 @@ void Update(float deltaTime) {
         s_lastPosSend = now;
 
         Vec3 myPos;
-        if (SEH_ReadAnimClassPosition(s_ownAnimClass, myPos)) {
+        // Prefer character-direct read (works on frame 1); fall back to
+        // AnimClass chain when the character position field is itself zero.
+        bool gotPos = false;
+        if (s_ownCharPtr) {
+            gotPos = SEH_ReadCharacterPosition(s_ownCharPtr, myPos);
+        }
+        if (!gotPos) {
+            gotPos = SEH_ReadAnimClassPosition(s_ownAnimClass, myPos);
+        }
+        if (gotPos) {
             // Use the existing position update format — the server reads:
             // U32(sourcePlayer) [handled by server from peer], U8(count), then
             // CharacterPosition structs. We need to match this EXACTLY.
