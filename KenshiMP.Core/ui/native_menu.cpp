@@ -502,14 +502,36 @@ void NativeMenu::OnHostClicked() {
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
 
-            auto& overlay = Core::Get().GetOverlay();
+            auto& core = Core::Get();
+            auto& overlay = core.GetOverlay();
+            std::string name = GetPlayerName();
+            if (name.empty()) name = "Player";
+
             overlay.SetHostingServer(true);
-            overlay.SetAutoConnect("127.0.0.1", KMP_DEFAULT_PORT);
+            overlay.SetConnectionInfo("127.0.0.1", KMP_DEFAULT_PORT, name);
 
             spdlog::info("NativeMenu: Launched server: {}", serverExe);
 
-            // HIDE the panel so user can click Kenshi's New Game button
-            Hide();
+            core.GetNativeHud().LogStep("NET", "Starting local server and connecting...");
+            core.GetNativeHud().AddSystemMessage("Starting local server and connecting as '" + name + "'...");
+
+            auto& client = core.GetClient();
+            if (client.IsConnected() || client.IsConnecting()) {
+                client.Disconnect();
+                core.SetConnected(false);
+            }
+
+            if (client.ConnectAsync("127.0.0.1", KMP_DEFAULT_PORT)) {
+                overlay.SetConnecting(true);
+                core.TransitionTo(ClientPhase::Connecting);
+                spdlog::info("NativeMenu: Host ConnectAsync started immediately (gameLoaded={})",
+                             core.IsGameLoaded());
+                Hide();
+            } else {
+                overlay.SetAutoConnect("127.0.0.1", KMP_DEFAULT_PORT);
+                SetStatus("Server launched. Will connect when game loads.");
+                spdlog::warn("NativeMenu: Immediate host ConnectAsync failed; falling back to auto-connect");
+            }
         } else {
             SetStatus("Failed to launch server.");
             spdlog::error("NativeMenu: CreateProcess failed: {}", GetLastError());

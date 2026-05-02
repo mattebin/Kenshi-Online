@@ -322,8 +322,11 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
         if (s_hasPrevPresentTime) {
             auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_prevPresentTime);
             if (gap.count() > 2000) {
-                if (phase == ClientPhase::MainMenu) {
-                    // Only detect loading gap from MainMenu — NOT from Startup.
+                if (phase == ClientPhase::MainMenu ||
+                    ((phase == ClientPhase::Connected || phase == ClientPhase::Connecting) &&
+                     !core.IsGameLoaded())) {
+                    // Detect initial save loads from MainMenu, or from an
+                    // already-connected pre-load state. NOT from Startup.
                     // The initial engine loading (shaders, textures, splash screen)
                     // creates >2s gaps during Startup, which is NOT a save game load.
                     // Startup → MainMenu transition happens after 5s of smooth Present calls.

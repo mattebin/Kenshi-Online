@@ -1483,13 +1483,15 @@ void Core::TransitionTo(ClientPhase newPhase) {
 void Core::OnLoadingGapDetected() {
     ClientPhase current = m_clientPhase.load(std::memory_order_acquire);
 
-    // Accept from MainMenu (normal flow), Connected before the save is loaded
-    // (join-from-menu flow), or GameReady (in-game Load button, detected by
-    // render_hooks as >10s gap). NOT from Startup — engine initialization gaps
+    // Accept from MainMenu (normal flow), GameReady (in-game Load button,
+    // detected by render_hooks as >10s gap), or a pre-load network
+    // connection (Connected or Connecting before the save is loaded —
+    // join-from-menu flow). NOT from Startup; engine initialization gaps
     // are not save game loads.
     if (current == ClientPhase::MainMenu ||
-        (current == ClientPhase::Connected && !m_gameLoaded.load()) ||
-        current == ClientPhase::GameReady) {
+        current == ClientPhase::GameReady ||
+        ((current == ClientPhase::Connected || current == ClientPhase::Connecting)
+            && !m_gameLoaded.load())) {
         // Reset game-loaded state so OnGameLoaded() can fire again for the new save.
         // Without this, a second load would never trigger OnGameLoaded because
         // m_gameLoaded is already true from the first load.
@@ -1554,7 +1556,7 @@ void Core::PollForGameLoad() {
     // Poll during Loading (normal), but also Startup/MainMenu as fallback.
     // Loading gap detection can miss fast loads (user clicks Continue immediately).
     ClientPhase phase = m_clientPhase.load(std::memory_order_acquire);
-    if (phase == ClientPhase::Connected || phase == ClientPhase::Connecting) return;
+    if ((phase == ClientPhase::Connected || phase == ClientPhase::Connecting) && m_gameLoaded.load()) return;
 
     // Try to resolve PlayerBase/GameWorld globals.
     // During initial scan (before game loads), these point into the module or are 0.
@@ -1653,8 +1655,9 @@ void Core::PollForGameLoad() {
 void Core::OnGameLoaded() {
     if (m_gameLoaded.exchange(true)) return; // Only run once
 
-    // Transition to GameReady phase
-    TransitionTo(ClientPhase::GameReady);
+    // If we connected from the main menu, stay in the connected phase once the
+    // world is ready. Otherwise this is an offline-ready game world.
+    TransitionTo(m_connected.load() ? ClientPhase::Connected : ClientPhase::GameReady);
 
     m_nativeHud.LogStep("GAME", "=== Game world loaded! ===");
     OutputDebugStringA("KMP: === Core::OnGameLoaded() START ===\n");
