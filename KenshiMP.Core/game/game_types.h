@@ -647,7 +647,13 @@ using BuyItemFn           = void(__fastcall*)(void* buyer, void* seller, void* i
 using FactionRelationFn   = void(__fastcall*)(void* factionA, void* factionB, float relation);
 
 // AI
-using AICreateFn          = void*(__fastcall*)(void* character, void* faction);
+// AI::create is a constructor-style initializer with 6 parameters:
+//   RCX=this, RDX=character, R8=arg3, R9=arg4, stack args 5/6 stored at
+//   this+0x318 and this+0x10. Forwarding only RCX/RDX leaves +0x318 null
+//   and AI scoring crashes later at game+0x59820D (null `this` AV at +0x60).
+// Signature documented by andperks6 fork (commit f5330f9, 2026-05-02).
+using AICreateFn          = void(__fastcall*)(void* ai, void* character, void* arg3,
+                                              void* arg4, void* arg5, void* arg6);
 using AIPackagesFn        = void(__fastcall*)(void* character, void* aiPackage);
 
 // Turret

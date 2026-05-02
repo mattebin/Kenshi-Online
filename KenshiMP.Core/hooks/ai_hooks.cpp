@@ -10,21 +10,17 @@
 namespace kmp::ai_hooks {
 
 // ── Function typedefs ──
-// AI::create is a C++ MEMBER function: void* AI::create(Character*, Faction*)
-//   RCX = AI* this        — the AI controller instance being created
-//   RDX = Character*       — the character the AI is being attached to
-//   R8  = Faction*         — the faction the character belongs to
-// Bug fixed 2026-05-02: previously typed as 2-arg (character, faction). RCX was
-// misread as character (was actually `this`), RDX as faction (was actually
-// character), and R8 (the real faction) was never forwarded — it leaked whatever
-// junk was in the register. The original then took the "[AI::create] No faction
-// for" error path and produced a faction-less AI controller, which couldn't
-// dispatch attack actions. Symptom: chars could move but not attack.
-using AICreateFn   = void*(__fastcall*)(void* aiThis, void* character, void* faction);
-// AI::loadPackages is similarly likely a member function. Add the `this` slot
-// for consistency. If this turns out to be a free 2-arg function, the only cost
-// is one extra register pass (R8 unused) — harmless.
-using AIPackagesFn = void(__fastcall*)(void* aiThis, void* character, void* aiPackage);
+// Local typedefs match KenshiMP.Core/game/game_types.h (kept in sync).
+// AI::create is a constructor-style initializer with 6 parameters:
+//   RCX=this, RDX=character, R8=arg3, R9=arg4, stack args 5/6 stored at
+//   this+0x318 and this+0x10. Forwarding only RCX/RDX leaves +0x318 null
+//   and AI scoring crashes later at game+0x59820D (null `this` AV at +0x60).
+// Earlier 2-arg/3-arg signatures both produced the deferred crash signature
+// — bisect 2026-05-02 (and independent confirmation from andperks6 fork
+// commit f5330f9) showed all 6 args must be forwarded.
+using AICreateFn   = void(__fastcall*)(void* ai, void* character, void* arg3,
+                                       void* arg4, void* arg5, void* arg6);
+using AIPackagesFn = void(__fastcall*)(void* character, void* aiPackage);
 
 // ── State ──
 static AICreateFn   s_origAICreate   = nullptr;
@@ -58,48 +54,40 @@ bool IsRemoteControlled(void* character) {
 
 // ── Hooks ──
 
-// Hook_AICreate: MINIMAL PASS-THROUGH.
+// Hook_AICreate: 6-arg pass-through.
 //
-// AI::create(this, Character*, Faction*) is sensitive to anything our hook does
-// beyond forwarding the call. Bisect 2026-05-02:
-//   - Minimal body (this version):              NPCs behave normally
-//   - + SEH __try/__except wrap:                MP crash at game+0x59820D ~5s
-//                                                after world load (null this).
-//                                                SEH frame interferes with C++
-//                                                exception unwinding inside
-//                                                AICreate.
-//   - + Core::Get/EntityRegistry/MarkRemote:    NPC flee on attack, then crash
-//                                                on next attack. Mutex/singleton
-//                                                access from this context is
-//                                                unsafe.
+// AI::create is a constructor-style initializer:
+//   RCX=this, RDX=character, R8=arg3, R9=arg4,
+//   stack arg 5 stored at this+0x318, stack arg 6 stored at this+0x10.
 //
-// ai_hooks::IsRemoteControlled() tracking should be done from the entity
-// registry's MarkRemote path or in packet_handler when a remote entity is
-// registered — NOT from inside this hook. (Currently it has no consumer
-// either way: movement_hooks is also bypassed for trampoline reasons.)
+// Earlier wrong signatures (2-arg upstream, our 3-arg) caused a deferred
+// null-this crash at game+0x59820D (~5s into world load) — the args 5/6
+// path leaves this+0x318 null and AI scoring later dereferences it.
+// Bisect history (2026-05-02):
+//   2-arg / 3-arg + SEH:                       crash on world load
+//   3-arg minimal pass-through:                no immediate crash, but
+//                                              this+0x318 still gets junk;
+//                                              latent corruption.
+//   6-arg minimal pass-through (this version): all upper slots forwarded;
+//                                              this+0x318 / this+0x10 land
+//                                              correctly.
 //
-// Args (verified by log inspection of real Kenshi 1.0.68 calls):
-//   RCX = AI* this — instance being created
-//   RDX = Character* — character receiving the AI controller
-//   R8  = Faction* — faction the character belongs to
-// Pre-fix the typedef was 2-arg, dropping R8 (the real faction). That made
-// the original take the "[AI::create] No faction for" error path and produce
-// a faction-less AI controller — char could move but not attack.
-static void* __fastcall Hook_AICreate(void* aiThis, void* character, void* faction) {
-    return s_origAICreate(aiThis, character, faction);
+// Independent verification from andperks6/Kenshi-Online fork (commit f5330f9).
+//
+// No SEH, no post-call. The hook body is intentionally a forwarder; any
+// Core::Get / EntityRegistry / mutex access from inside this context
+// destabilizes the engine in MP. IsRemoteControlled tracking, when its
+// consumer (movement_hooks) gets re-enabled, should live in
+// packet_handler::HandleSpawnEntity instead.
+static void __fastcall Hook_AICreate(void* ai, void* character, void* arg3,
+                                     void* arg4, void* arg5, void* arg6) {
+    s_origAICreate(ai, character, arg3, arg4, arg5, arg6);
 }
 
-// Hook_AIPackages: MINIMAL PASS-THROUGH (same constraints as Hook_AICreate).
-//
-// AI::loadPackages signature mirrors AI::create — assumed to be a member
-// function (this, Character*, AIPackage*). The 3-arg signature has not been
-// independently verified by binary inspection; if the underlying function is
-// actually 2-arg, the extra R8 forwarding is harmless (callee ignores it).
-//
-// No SEH, no post-call. Same hard-won lesson as Hook_AICreate: any work beyond
-// forwarding from inside this hook destabilizes the engine.
-static void __fastcall Hook_AIPackages(void* aiThis, void* character, void* aiPackage) {
-    s_origAIPackages(aiThis, character, aiPackage);
+// Hook_AIPackages: minimal 2-arg pass-through.
+// Signature confirmed 2-arg by andperks6 binary inspection (commit f5330f9).
+static void __fastcall Hook_AIPackages(void* character, void* aiPackage) {
+    s_origAIPackages(character, aiPackage);
 }
 
 // ── Install / Uninstall ──
