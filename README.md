@@ -8,7 +8,7 @@ Kenshi-Online adds seamless multiplayer to Kenshi using native MyGUI integration
 
 ## Fork notice — `mattebin/stability/upstream-base`
 
-> This fork carries 22 stability and correctness fixes for Kenshi 1.0.68 (Steam, "Newland") that aren't in upstream `main`. Branch is fast-forward mergeable into upstream — no conflicts at the time of writing.
+> This fork carries 25 stability, correctness, and diagnostic improvements for Kenshi 1.0.68 (Steam, "Newland") that aren't in upstream `main`. Branch is fast-forward mergeable into upstream — no conflicts at the time of writing.
 >
 > Borrows several engine-level fixes from the parallel `andperks6/Kenshi-Online` fork (each commit credits the source). Combined with original work here on crash recovery, faction identity, and diagnostics.
 >
@@ -23,7 +23,7 @@ Highlights:
 | Steam compat | Auto-discover `CharacterHuman` backpointer offset (Steam ≠ GOG `+0x2D8`). `allowUnaligned` flag for patterns like `CharAnimUpdate` that intentionally land mid-function. |
 | MP correctness | Faction-pointer identity (avoids 18-char `Player 1` name-collision swap). Strip `.mod` suffix from server-sent faction strings. Resume sync after main-menu join + world load. Position read fallback chain (char-direct + AnimClass) for the first ~1-2s after world load. OIS keyDown/keyUp swallow when chat/menu modal is open (fixes double-input bug). |
 | MP scaling | Per-player spawn cap raised from upstream's hardcoded 4 to a configurable default of 32 (matches vanilla squad sizes). Infinite-retry bug fixed where cap-rejected spawn requests could spin in the spawn manager forever without ever bumping `retryCount`. |
-| Diagnostics | Watcher trace markers (`WATCH/HOOK`, `WATCH/PKT`, `WATCH/TICK`, `WATCH/SYNC`, `WATCH/POS`) — flush-forced, gated on a config flag. `KMP_DISABLE_HOOKS` runtime gate (file or env var) for per-hook bypass without recompiling. |
+| Diagnostics | Watcher trace markers (`WATCH/HOOK`, `WATCH/PKT`, `WATCH/TICK`, `WATCH/SYNC`, `WATCH/POS`) — flush-forced, gated on a config flag. `KMP_DISABLE_HOOKS` runtime gate (file or env var) for per-hook bypass without recompiling. **Static hook arg-count verification** at install time via prologue + call-site analyzers — would have caught the AI::create 2-vs-6-arg bug from one log line. **Single-block install audit** dump for bug-report attachment. |
 
 **Verification status:** all fixes verified on a single PC running both client and server. No two-machine, two-Steam-account session has been run yet — the gate test for declaring MP combat works is documented in `FORK_CHANGES.md`.
 
