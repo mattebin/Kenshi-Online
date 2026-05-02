@@ -1,5 +1,6 @@
 #include "inventory_hooks.h"
 #include "kmp/hook_manager.h"
+#include "../sys/prologue_analyzer.h"
 #include "kmp/patterns.h"
 #include "kmp/protocol.h"
 #include "kmp/messages.h"
@@ -205,6 +206,9 @@ bool Install() {
     int installed = 0;
 
     if (funcs.ItemPickup) {
+        prologue_analyzer::VerifyArgCount(
+            "ItemPickup", reinterpret_cast<uintptr_t>(funcs.ItemPickup),
+            /*expectedArgCount=*/3);
         if (hooks.InstallAt("ItemPickup", reinterpret_cast<uintptr_t>(funcs.ItemPickup),
                             &Hook_ItemPickup, &s_origItemPickup)) {
             installed++;
@@ -213,6 +217,9 @@ bool Install() {
     }
 
     if (funcs.ItemDrop) {
+        prologue_analyzer::VerifyArgCount(
+            "ItemDrop", reinterpret_cast<uintptr_t>(funcs.ItemDrop),
+            /*expectedArgCount=*/2);
         if (hooks.InstallAt("ItemDrop", reinterpret_cast<uintptr_t>(funcs.ItemDrop),
                             &Hook_ItemDrop, &s_origItemDrop)) {
             installed++;
@@ -221,6 +228,9 @@ bool Install() {
     }
 
     if (funcs.BuyItem) {
+        prologue_analyzer::VerifyArgCount(
+            "BuyItem", reinterpret_cast<uintptr_t>(funcs.BuyItem),
+            /*expectedArgCount=*/4);
         if (hooks.InstallAt("BuyItem", reinterpret_cast<uintptr_t>(funcs.BuyItem),
                             &Hook_BuyItem, &s_origBuyItem)) {
             installed++;

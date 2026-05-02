@@ -9,6 +9,7 @@
 #include "../game/asset_facilitator.h"
 #include "../sync/pipeline_state.h"
 #include "kmp/hook_manager.h"
+#include "../sys/prologue_analyzer.h"
 #include "kmp/protocol.h"
 #include "kmp/memory.h"
 #include "kmp/string_convert.h"
@@ -1182,6 +1183,9 @@ bool Install() {
                   (unsigned long long)s_createTargetAddr);
         OutputDebugStringA(buf);
 
+        prologue_analyzer::VerifyArgCount(
+            "CharacterCreate", s_createTargetAddr,
+            /*expectedArgCount=*/2);
         if (!hookMgr.InstallAt("CharacterCreate",
                                s_createTargetAddr,
                                &Hook_CharacterCreate, &s_origCreate)) {

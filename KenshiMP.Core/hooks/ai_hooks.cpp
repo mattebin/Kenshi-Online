@@ -3,6 +3,7 @@
 #include "kmp/patterns.h"
 #include "../core.h"
 #include "../game/game_types.h"
+#include "../sys/prologue_analyzer.h"
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <mutex>
@@ -106,6 +107,13 @@ bool Install() {
     // ─────────────────────────────────────────────────────────────────────────
 
     if (funcs.AICreate) {
+        // Verify our typedef arg count against the live binary BEFORE
+        // installing — same diagnostic that would have caught the
+        // upstream 2-arg-vs-actually-6 bug at install time instead of
+        // ~5s into world load.
+        prologue_analyzer::VerifyArgCount(
+            "AICreate", reinterpret_cast<uintptr_t>(funcs.AICreate),
+            /*expectedArgCount=*/6);
         if (hooks.InstallAt("AICreate", reinterpret_cast<uintptr_t>(funcs.AICreate),
                             &Hook_AICreate, &s_origAICreate)) {
             hooks.Disable("AICreate");
@@ -115,6 +123,9 @@ bool Install() {
     }
 
     if (funcs.AIPackages) {
+        prologue_analyzer::VerifyArgCount(
+            "AIPackages", reinterpret_cast<uintptr_t>(funcs.AIPackages),
+            /*expectedArgCount=*/2);
         if (hooks.InstallAt("AIPackages", reinterpret_cast<uintptr_t>(funcs.AIPackages),
                             &Hook_AIPackages, &s_origAIPackages)) {
             hooks.Disable("AIPackages");

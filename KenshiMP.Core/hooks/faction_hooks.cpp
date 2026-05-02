@@ -1,5 +1,6 @@
 #include "faction_hooks.h"
 #include "kmp/hook_manager.h"
+#include "../sys/prologue_analyzer.h"
 #include "kmp/patterns.h"
 #include "kmp/protocol.h"
 #include "kmp/messages.h"
@@ -84,6 +85,9 @@ bool Install() {
     auto& hooks = HookManager::Get();
 
     if (funcs.FactionRelation) {
+        prologue_analyzer::VerifyArgCount(
+            "FactionRelation", reinterpret_cast<uintptr_t>(funcs.FactionRelation),
+            /*expectedArgCount=*/3);
         if (hooks.InstallAt("FactionRelation", reinterpret_cast<uintptr_t>(funcs.FactionRelation),
                             &Hook_FactionRelation, &s_origFactionRelation)) {
             spdlog::info("faction_hooks: FactionRelation hook installed");

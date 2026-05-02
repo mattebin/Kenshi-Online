@@ -4,6 +4,7 @@
 #include "../game/game_types.h"
 #include "../sys/watcher.h"
 #include "kmp/hook_manager.h"
+#include "../sys/prologue_analyzer.h"
 #include "kmp/protocol.h"
 #include "kmp/safe_hook.h"
 #include <spdlog/spdlog.h>
@@ -291,12 +292,18 @@ bool Install() {
     }
 
     if (funcs.CharacterDeath) {
+        prologue_analyzer::VerifyArgCount(
+            "CharacterDeath", reinterpret_cast<uintptr_t>(funcs.CharacterDeath),
+            /*expectedArgCount=*/2);
         hookMgr.InstallAt("CharacterDeath",
                           reinterpret_cast<uintptr_t>(funcs.CharacterDeath),
                           &Hook_CharacterDeath, &s_origCharDeath);
     }
 
     if (funcs.CharacterKO) {
+        prologue_analyzer::VerifyArgCount(
+            "CharacterKO", reinterpret_cast<uintptr_t>(funcs.CharacterKO),
+            /*expectedArgCount=*/3);
         hookMgr.InstallAt("CharacterKO",
                           reinterpret_cast<uintptr_t>(funcs.CharacterKO),
                           &Hook_CharacterKO, &s_origCharKO);
