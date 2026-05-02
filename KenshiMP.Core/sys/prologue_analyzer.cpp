@@ -332,13 +332,36 @@ Result Analyze(uintptr_t targetAddr, int scanBytes) {
     if (recognizedCount < 3)    conf  = (std::min)(conf, 30);
     r.confidence = (std::min)(conf, 100);
 
-    // Build the summary string.
+    // Build the summary string. Distinguish "we recognized the prologue but
+    // the function doesn't home-spill or read stack args" from "we recognized
+    // nothing" — same inferredArgCount==0 outcome, very different meanings:
+    //
+    //   recognized prologue (mov-rax-rsp+lea-rbp OR rsp adjust) but no spills/
+    //   reads = function uses ≤4 args via registers without home-spill. Honest
+    //   limitation; arg count is unprovable from the prologue alone.
+    //
+    //   no prologue recognized = we couldn't decode the start of the function.
+    //   The pattern scanner may have landed on something that isn't a function
+    //   entry, or we hit a calling-convention we don't know.
     char tmp[256];
     if (r.inferredArgCount == 0) {
-        sprintf_s(tmp, sizeof(tmp),
-                  "no recognizable __fastcall prologue patterns "
-                  "(scanned %d bytes, %d insns recognized)",
-                  r.bytesScanned, recognizedCount);
+        if (haveRbpFrame || rspAdjusted) {
+            const char* shape = haveRbpFrame
+                ? "mov-rax-rsp + lea-rbp prologue"
+                : "rsp-adjust prologue";
+            sprintf_s(tmp, sizeof(tmp),
+                      "%s recognized but no register-arg home-spills or "
+                      "stack-arg reads in %d bytes — function likely takes "
+                      "≤4 args via registers without home-spill (arg count "
+                      "unprovable from prologue alone)",
+                      shape, r.bytesScanned);
+        } else {
+            sprintf_s(tmp, sizeof(tmp),
+                      "no recognizable __fastcall prologue patterns "
+                      "(scanned %d bytes, %d insns recognized) — pattern "
+                      "scanner may have landed off-target",
+                      r.bytesScanned, recognizedCount);
+        }
     } else {
         sprintf_s(tmp, sizeof(tmp),
                   "spills %d reg arg(s), reads up to stack arg %d, "
@@ -357,8 +380,21 @@ bool VerifyArgCount(const char* tag, uintptr_t targetAddr, int expectedArgCount)
 
     // Always log the prologue hex so cross-build comparisons are easy.
     if (r.inferredArgCount == 0) {
-        spdlog::debug("prologue_analyzer[{}] @0x{:X}: {} (prologue {})",
-                      tag, targetAddr, r.summary, r.prologueHex);
+        // Two sub-cases (Result.summary distinguishes them now):
+        //   "prologue recognized but no signal" → expected for small register-
+        //     only functions. Log at info so the reader sees we DID recognize
+        //     something, just couldn't infer arg count from it.
+        //   "no prologue recognized" → pattern scanner may have landed wrong.
+        //     Log at debug — interesting but not actionable without more info.
+        const bool prologueRecognized =
+            r.summary.find("prologue recognized") != std::string::npos;
+        if (prologueRecognized) {
+            spdlog::info("prologue_analyzer[{}] @0x{:X}: {} (prologue {})",
+                         tag, targetAddr, r.summary, r.prologueHex);
+        } else {
+            spdlog::debug("prologue_analyzer[{}] @0x{:X}: {} (prologue {})",
+                          tag, targetAddr, r.summary, r.prologueHex);
+        }
         return false;
     }
 
