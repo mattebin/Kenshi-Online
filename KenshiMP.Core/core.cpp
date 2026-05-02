@@ -1040,8 +1040,19 @@ bool Core::InitHooks() {
         }
     }
 
-    // Input hooks: handled by WndProc in render_hooks now
-    // input_hooks not needed
+    // Input hooks (OIS keyDown/keyUp gate for modal UI — supplements WndProc)
+    // Fixes the double-input bug where typing in chat also drove Kenshi's
+    // game actions because OIS reads keyboard separately from WndProc.
+    if (kmp::hook_gate::IsDisabled("input")) {
+        m_nativeHud.LogStep("SKIP", "Input hooks disabled via KMP_DISABLE_HOOKS");
+    } else {
+        m_nativeHud.LogStep("HOOK", "Input hooks (OIS gate)...");
+        if (input_hooks::Install()) {
+            m_nativeHud.LogStep("OK", "Input hooks installed");
+        } else {
+            m_nativeHud.LogStep("WARN", "Input hooks FAILED — OIS RVAs may not match this Kenshi build");
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════
     // CharacterCreate hook is INSTALLED but DISABLED immediately.
