@@ -8,7 +8,9 @@ Kenshi-Online adds seamless multiplayer to Kenshi using native MyGUI integration
 
 ## Fork notice — `mattebin/stability/upstream-base`
 
-> This fork carries 26 stability, correctness, and diagnostic improvements for Kenshi 1.0.68 (Steam, "Newland") that aren't in upstream `main`. Branch is fast-forward mergeable into upstream — no conflicts at the time of writing.
+> This fork carries 27 stability, correctness, and diagnostic improvements for Kenshi 1.0.68 (Steam, "Newland") that aren't in upstream `main`. Branch is fast-forward mergeable into upstream — no conflicts at the time of writing.
+>
+> **`KenshiMP.IntegrationTest` automated 2-client suite passes 70/70** against this branch. Two real cross-client server bugs (EntityDespawn-on-disconnect and BuildPlaced-confirmation-for-placer) were found and fixed via the suite during development.
 >
 > Borrows several engine-level fixes from the parallel `andperks6/Kenshi-Online` fork (each commit credits the source). Combined with original work here on crash recovery, faction identity, and diagnostics.
 >

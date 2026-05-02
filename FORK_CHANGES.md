@@ -17,6 +17,7 @@ The commits below are listed newest-first.
 
 | # | Commit | Source | Area | Summary |
 |---|---|---|---|---|
+| 27 | `2cb41d4` | original | MP correctness | **Two server-side cross-client bugs found and fixed via `KenshiMP.IntegrationTest`.** (1) `HandleDisconnect` was preserving entities for reconnect but never broadcasting `S2C_EntityDespawn` for them — other clients kept ghost squads of disconnected players on screen. Now sends `EntityDespawn` per owned entity before `PlayerLeft`. (2) `HandleBuildRequest` used `BroadcastExcept(player.id, ...)` for `S2C_BuildPlaced` — placer never got their own confirmation. Switched to `Broadcast` (matches inventory/squad/faction patterns). IntegrationTest score: 64/66 → **70/70** after fixes. Both bugs invisible on single-PC, found only by running 2 simulated clients against the same server. |
 | 26 | `e40c274` | original | diagnostics | **Three runtime analyzers — `field_diff` + `concurrency_watch` + `leak_watch`.** Close the runtime gaps that install-time analysis can't see. `field_diff` snapshots a pointer arg pre-call and verifies expected fields are non-null post-call (catches AICreate-class "ran but didn't initialise" bugs). `concurrency_watch` is an RAII per-hook depth counter that warns once on same-thread reentrancy or different-thread collision. `leak_watch` snapshots process memory + registered collection sizes every 5 minutes; after ≥3 snapshots, any monotonically-growing collection gets a warn log. All three feed their summaries into the `install_audit::Emit` block so one grep gets you everything. |
 | 25 | `6ad2dc4` | original | diagnostics | **Install audit log block.** Emitted once at end of `Core::InitHooks`. For every installed hook: name, target address, RVA, install/enable flags, MovRaxRsp-fix flag, live call/crash counters, prologue hex (8 bytes), prologue-analyzer arg-count + confidence, callsite-analyzer arg-count + confidence. Surrounded by `=== KMP HOOK AUDIT BEGIN ===` / `=== END ===` so it's grep-and-paste for bug reports. |
 | 24 | `0a124a4` | original | diagnostics | **Call-site analyzer.** Companion to the prologue analyzer. Walks Kenshi's `.text` for any `call rel32` whose displacement resolves to the hook target. Walks back ~512 bytes from that CALL recognising arg-setup patterns (`mov RCX/RDX/R8/R9`, `lea`, `xor self`, `mov [rsp+0x28+]`). Inferred arg count from the caller side cross-checks the prologue analyzer. When both agree we trust the typedef; when they disagree there's real signal worth investigating. |
@@ -59,6 +60,7 @@ The commits below are listed newest-first.
 - **Hook call-site analyzer** (`0a124a4`) — independent cross-check on prologue analysis.
 - **Install audit log** (`6ad2dc4`) — one greppable block summarising every hook for bug reports.
 - **Field-diff / concurrency-watch / leak-watch analyzers** (`e40c274`) — runtime layer that catches struct-field corruption, unsafe concurrent reentry, and long-session memory leaks.
+- **Two server-side MP bugs** (`2cb41d4`) — EntityDespawn-on-disconnect missing, BuildPlaced confirmation missing for placer. Found by IntegrationTest, fixed and verified 70/70.
 
 ## What andperks6 has that this branch doesn't (yet)
 
@@ -99,13 +101,25 @@ Mechanically-verified state on a single PC:
 - Faction identity is stable across the 18-character `Player 1` placeholder
   squad
 
-**Gate test for declaring co-op multiplayer functions:**
+**Automated cross-client MP coverage:**
+> `KenshiMP.IntegrationTest.exe` spawns its own server, connects two
+> simulated clients, and runs **70 assertions** covering handshake,
+> entity spawn + broadcast, position sync (both directions), chat
+> relay, disconnect cleanup (incl. EntityDespawn), time sync, multi-
+> entity per player, inventory add/remove, trade accept, squad
+> creation broadcast, faction-relation sync, building placement +
+> dismantle, server-browser query, and full end-to-end session.
+> Currently passing 70/70 against the head of `stability/upstream-base`.
+
+**Gate test for declaring co-op multiplayer functions in real
+two-machine play:**
 > Two PCs, two Steam accounts. Client A attacks client B's character with
 > fists. Watch HP drop on both sides via `WATCH/PKT C2S_CombatKO` →
 > `WATCH/PKT S2C_CombatKO` in both clients' logs.
 
 Until that test runs and passes, treat the MP-correctness fixes as
-"compiles, launches, doesn't crash, looks right in single-PC tests."
+"compiles, launches, doesn't crash, looks right in single-PC tests +
+70/70 on automated 2-client integration tests."
 
 ---
 
