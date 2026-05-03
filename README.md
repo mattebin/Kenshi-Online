@@ -17,7 +17,9 @@ Latest stable build for **Kenshi 1.0.68 (Steam, Newland)**:
 3. Extract the zip into that folder. It adds `KenshiMP.Core.dll`, `KenshiMP.Server.exe`, `KenshiMP.Injector.exe`, the Multiplayer UI layouts under `data\gui\layout\`, and a `server.json` template.
 4. Restart Steam, launch Kenshi normally.
 5. **Joining a friend**: in the main menu, click the new "Multiplayer" button. Enter the host's IP and port (default `27800`), pick a player name, hit Connect.
-6. **Hosting locally**: run `KenshiMP.Server.exe` once. It listens on `0.0.0.0:27800`. Forward TCP+UDP `27800` if friends are joining over the internet.
+6. **Hosting locally**: run `KenshiMP.Server.exe` once. It listens on `0.0.0.0:27800`.
+   - **Same network (LAN)**: friends connect to your local IP (run `ipconfig` in cmd → `IPv4 Address`, usually `192.168.x.x`) on port `27800`. No router config needed.
+   - **Over the internet**: forward TCP+UDP `27800` on your router to your PC, then friends connect to your public IP (Google "what is my ip") on port `27800`.
 
 **Known limit on 1.0.68:** game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See the release README for full troubleshooting.
 
