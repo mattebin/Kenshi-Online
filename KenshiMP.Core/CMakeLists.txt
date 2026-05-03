@@ -70,6 +70,7 @@ add_library(KenshiMP.Core SHARED
     sys/exit_safety.cpp
     sys/in_game_events.cpp
     sys/host_game_speed.cpp
+    sys/speed_probe.cpp
     sys/rva_validator.cpp
     game/character_accessors.cpp
     game/game_world_iter.cpp

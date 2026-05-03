@@ -34,6 +34,7 @@
 #include "sys/exit_safety.h"
 #include "sys/in_game_events.h"
 #include "sys/host_game_speed.h"
+#include "sys/speed_probe.h"
 #include "sys/rva_validator.h"
 #include "game/character_accessors.h"
 #include <spdlog/spdlog.h>
@@ -2305,6 +2306,11 @@ void Core::OnGameTick(float deltaTime) {
     // host_game_speed::Tick is a one-shot disabled-warning; it does not
     // send packets until a live source is proven.
     kmp::host_game_speed::Tick(deltaTime);
+
+    // Read-only RE_Kenshi-derived layout probe. Off by default; opt in by
+    // setting KMP_SPEED_PROBE=1 in the environment before launching Kenshi.
+    // Logs once and becomes a no-op forever after. Safe to leave compiled in.
+    kmp::speed_probe::TickOnce();
 
     // Deferred install of GameWorld dtor hook — needs the singleton instance
     // to exist (only valid after the user loads a save). Polls every ~120
