@@ -19,7 +19,9 @@ Latest stable build for **Kenshi 1.0.68 (Steam, Newland)**:
 5. **Joining a friend**: in the main menu, click the new "Multiplayer" button. Enter the host's IP and port (default `27800`), pick a player name, hit Connect.
 6. **Hosting locally**: run `KenshiMP.Server.exe` once. It listens on `0.0.0.0:27800`.
    - **Same network (LAN)**: friends connect to your local IP (run `ipconfig` in cmd → `IPv4 Address`, usually `192.168.x.x`) on port `27800`. No router config needed.
-   - **Over the internet**: forward TCP+UDP `27800` on your router to your PC, then friends connect to your public IP (Google "what is my ip") on port `27800`.
+   - **Over the internet**: forward **UDP `27800`** on your router to your PC (KenshiMP uses ENet over UDP — TCP forwarding isn't needed). Friends connect to your public IP (Google "what is my ip") on port `27800`. Pin your PC's local IP via DHCP reservation so the rule doesn't break on reboot.
+
+> Don't trust online port checkers like yougetsignal for UDP — they false-negative on ENet because the server only replies to a valid handshake, not random probes. The only reliable test is a friend actually trying to connect.
 
 **Known limit on 1.0.68:** game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See the release README for full troubleshooting.
 
