@@ -327,6 +327,12 @@ struct MsgTimeSync {
     uint8_t  gameSpeed;   // 1-4
 };
 
+// Experimental host speed message. Client-side sending is currently disabled
+// on Kenshi v1.0.68 until a live host time/speed source is proven.
+struct MsgHostGameSpeed {
+    float speed;
+};
+
 // ── Chat ──
 
 struct MsgChatMessage {

@@ -655,8 +655,16 @@ void CharacterIterator::Reset() {
     if (m_listBase != 0) {
         uintptr_t firstEntry = 0;
         if (!Memory::Read(m_listBase, firstEntry) || !isValidHeapPtr(firstEntry)) {
-            spdlog::debug("CharacterIterator: PlayerBase dereference 0x{:X} has no valid entries — trying GameWorld",
-                         m_listBase);
+            static auto s_lastPlayerBaseFallbackLog = std::chrono::steady_clock::time_point{};
+            auto now = std::chrono::steady_clock::now();
+            bool shouldLogPlayerBaseFallback =
+                s_lastPlayerBaseFallbackLog.time_since_epoch().count() == 0 ||
+                std::chrono::duration_cast<std::chrono::seconds>(now - s_lastPlayerBaseFallbackLog).count() >= 5;
+            if (shouldLogPlayerBaseFallback) {
+                s_lastPlayerBaseFallbackLog = now;
+                spdlog::debug("CharacterIterator: PlayerBase dereference 0x{:X} has no valid entries - trying GameWorld",
+                              m_listBase);
+            }
             m_listBase = 0;
         }
     }

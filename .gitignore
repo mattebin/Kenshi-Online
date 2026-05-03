@@ -37,3 +37,7 @@ desktop.ini
 
 # Offset cache (generated at runtime)
 KenshiOnline_offset_cache.json
+
+# Local build/test scratch dirs
+build-codex/
+server-smoke-codex/

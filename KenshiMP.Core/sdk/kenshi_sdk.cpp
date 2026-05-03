@@ -212,7 +212,9 @@ void KenshiSDK::PollEntities(WorldSnapshot& snapshot) {
     if (gameWorld != 0) {
         game::GameWorldAccessor world(gameWorld);
         snapshot.timeOfDay = world.GetTimeOfDay();
-        snapshot.gameSpeed = world.GetGameSpeed();
+        // GameWorld+0x700 is stale on Kenshi v1.0.68, so do not expose it as
+        // a live speed source in snapshots.
+        snapshot.gameSpeed = 1.0f;
     }
 }
 

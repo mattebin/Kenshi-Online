@@ -326,7 +326,14 @@ bool Install() {
                           &Hook_CharacterKO, &s_origCharKO);
     }
 
-    spdlog::info("combat_hooks: Installed (damage=SKIPPED, death={}, ko={})",
+    // Keep combat hooks dormant during save/new-game loading. CharacterKO can
+    // fire repeatedly for loading-time unconscious/dead actors before the
+    // registry and world state are stable, which is unsafe on v1.0.68.
+    if (funcs.CharacterDeath) HookManager::Get().Disable("CharacterDeath");
+    if (funcs.CharacterKO) HookManager::Get().Disable("CharacterKO");
+
+    spdlog::info("combat_hooks: Installed dormant (damage=SKIPPED, death={}, ko={}); "
+                 "will enable after load if network sync is active",
                  funcs.CharacterDeath != nullptr, funcs.CharacterKO != nullptr);
     return true;
 }

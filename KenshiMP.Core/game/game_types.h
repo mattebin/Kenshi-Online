@@ -36,11 +36,27 @@ struct CharacterOffsets {
     int name          = 0x18;    // Kenshi std::string (KServerMod verified)
     int faction       = 0x10;    // Faction* (KServerMod verified)
     int position      = 0x48;    // Vec3 read-only cached position (KServerMod verified)
-    int rotation      = 0x58;    // Quat rotation (KServerMod verified)
+    int rotation      = 0xB0;    // Quat rotation (Ogre::Quaternion rot in Character/RootObject)
+                                 // 0x58 was the historical value but it points at the
+                                 // "hand handle" struct (a 24-byte block of pointers in
+                                 // RootObjectBase), not the rotation quaternion. The
+                                 // sync_orchestrator "looks like a pointer, skip rotation
+                                 // write" guard at sync_orchestrator.cpp:50 was suppressing
+                                 // garbage writes that resulted from reading 4 floats out
+                                 // of pointer-shaped memory at +0x58. With this offset
+                                 // corrected to 0xB0, that guard never trips on real
+                                 // rotation reads — it's preserved as defense in depth.
     int sceneNode     = -1;      // Ogre::SceneNode* (not yet verified — runtime probe)
-    int aiPackage     = -1;      // AI package pointer (not yet verified)
+    int aiPackage     = 0x650;   // AI* (Character::ai per KenshiLib layout)
     int inventory     = 0x2E8;   // Inventory* (KServerMod verified)
     int stats         = 0x450;   // Stats base (KServerMod verified)
+    int platoon       = 0x658;   // ActivePlatoon* (Character::platoon per KenshiLib)
+                                 // aiPackage, platoon, animClassOffset (further down)
+                                 // and squad (alias of platoon further down) should all
+                                 // be re-checked by sys/offset_validator at runtime; if
+                                 // it reports anything below ~80% pointer-plausibility
+                                 // on real tracked chars, the offset is wrong for this
+                                 // build and we should re-investigate.
     int equipment     = -1;      // Equipment array (runtime probed)
     int currentTask   = -1;      // Current task type (not yet verified)
     int isAlive       = -1;      // Alive flag — use health chain fallback
@@ -66,13 +82,19 @@ struct CharacterOffsets {
     //     -> writable Vec3 (+writablePosOffset from CharMovement)
     //       -> x,y,z floats (+writablePosVecOffset within Vec3 struct)
     // Writing here actually moves the character in the physics engine.
-    int animClassOffset      = -1;    // Offset to AnimationClassHuman* on character
+    int animClassOffset      = 0x448; // Character::animation — AnimationClassHuman*
+                                       // (KenshiLib Character.h layout). Was -1 with a
+                                       // runtime probe walking 0x60..0x600 in 8-byte
+                                       // strides; the probe still works as fallback if
+                                       // this gets wrong on a future build, but the
+                                       // direct read short-circuits the probe overhead.
     int charMovementOffset   = 0xC0;  // AnimClass -> CharMovement* (KServerMod verified)
     int writablePosOffset    = 0x320; // CharMovement -> writable position struct
     int writablePosVecOffset = 0x20;  // position struct -> x float
 
-    // Squad pointer (heuristic: near faction in struct)
-    int squad         = -1;      // Offset to KSquad* (discovered at runtime)
+    // Squad pointer — same field as `platoon` above; Kenshi's "squad" and
+    // "platoon" terminology converge on ActivePlatoon* at this offset.
+    int squad         = 0x658;   // Character::platoon (alias of `platoon` above)
 
     // GameData backpointer (template/archetype data)
     int gameDataPtr   = 0x40;    // Offset to GameData* template
@@ -94,7 +116,14 @@ struct SquadOffsets {
 
 struct WorldOffsets {
     int timeOfDay      = -1;     // On TimeManager (+0x08), NOT GameWorld — use time_hooks
-    int gameSpeed      = 0x700;  // GameWorld+0x700 (KenshiLib verified)
+    int gameSpeed      = 0x700;  // GameWorld+0x700 (KenshiLib v0.3.0, v1.0.51).
+                                 // NOTE: stale on v1.0.68 (Newland) — reads
+                                 // a stable 64-bit pointer's low half as float
+                                 // (e.g. 2.63e+20). A one-shot field-scan
+                                 // candidate of 0x658 turned out to be coincidence
+                                 // (different value next session). The real
+                                 // v1.0.68 offset is still TBD; sync code must
+                                 // not use this as a live speed source.
     int weatherState   = -1;     // Not yet verified on GameWorld
     int characterList  = 0x0888; // GameWorld+0x0888 characterArray (KenshiLib verified)
     int buildingList   = -1;     // Not yet verified

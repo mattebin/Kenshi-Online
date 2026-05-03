@@ -450,6 +450,7 @@ void MyGuiBridge::SetAlpha(void* widget, float alpha) {
     }
 }
 
+
 void* MyGuiBridge::CreateChildWidget(void* parent, const std::string& type, const std::string& skin,
                                       float x, float y, float w, float h, int align, const std::string& name) {
     if (!m_ready || !parent || !m_fnWidgetCreateWidgetReal) return nullptr;

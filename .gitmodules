@@ -1,0 +1,9 @@
+[submodule "lib/kenshilib"]
+	path = lib/kenshilib
+	url = https://github.com/BFrizzleFoShizzle/KenshiLib.git
+[submodule "lib/re_kenshi"]
+	path = lib/re_kenshi
+	url = https://github.com/BFrizzleFoShizzle/RE_Kenshi.git
+[submodule "lib/opencs"]
+	path = lib/opencs
+	url = https://github.com/lmaydev/OpenConstructionSet.git

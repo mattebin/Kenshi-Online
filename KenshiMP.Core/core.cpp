@@ -31,6 +31,11 @@
 #include "sys/hook_gate.h"
 #include "sys/install_audit.h"
 #include "sys/leak_watch.h"
+#include "sys/exit_safety.h"
+#include "sys/in_game_events.h"
+#include "sys/host_game_speed.h"
+#include "sys/rva_validator.h"
+#include "game/character_accessors.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
@@ -435,6 +440,19 @@ bool Core::Initialize() {
     // Filtered to only log crashes in game module or NULL (skips system DLL noise).
     g_vehHandle = AddVectoredExceptionHandler(1, VectoredCrashHandler);
 
+    // Add a UEF on top of the VEH. VEH catches first-chance exceptions and
+    // chooses what to handle; the UEF catches anything that falls through.
+    // Together: complete coverage. The UEF also captures whatever filter
+    // Kenshi installed before us so we can restore it before ~GameWorld
+    // teardown (see exit_safety::InstallGameWorldDestructorHook).
+    kmp::exit_safety::Install();
+
+    // Hand exit_safety the VEH handle so RestoreVanillaUnhandledFilter()
+    // can tear down BOTH layers atomically before ~GameWorld runs. UEF
+    // restore alone leaves VEH catching the destructor's normal-flow
+    // exceptions, which then end up in CRASH.log as false positives.
+    kmp::exit_safety::RegisterVectoredHandler(g_vehHandle);
+
     // ── Session header in CRASH.log ──
     // Mark session boundaries so crash analysis can tell which entries belong together.
     {
@@ -818,7 +836,16 @@ void Core::Shutdown() {
         OutputDebugStringA("KMP: SEH — HookManager::Shutdown crashed\n");
     }
 
-    // Remove vectored exception handler
+    // Tear down BOTH UEF and VEH via exit_safety. Idempotent — if the
+    // GameWorld destructor hook already ran, this is a no-op for the
+    // VEH side and just confirms the UEF restore. If we never reached
+    // ~GameWorld (e.g. the user killed the process from Task Manager
+    // and we're in DLL_PROCESS_DETACH), this is the *only* place the
+    // VEH gets removed.
+    kmp::exit_safety::RestoreVanillaUnhandledFilter();
+    // Belt-and-braces: in case RegisterVectoredHandler was never called
+    // (shouldn't happen on the normal init path, but defends against
+    // partial-init failures), drop the local handle too.
     if (g_vehHandle) {
         RemoveVectoredExceptionHandler(g_vehHandle);
         g_vehHandle = nullptr;
@@ -1185,6 +1212,50 @@ bool Core::InitHooks() {
             m_nativeHud.LogStep("WARN", "AI hooks FAILED");
         }
     }
+
+    // ── Reference-implementation-aligned hooks (RE_Kenshi-style) ──
+    //
+    // RVA validator: survey every documented RVA against the actual binary
+    // shape. KenshiLib documents 1.0.51-era RVAs; RE_Kenshi ships .br files
+    // for up to Kenshi 1.0.65; users on 1.0.68 (no upstream RVA file
+    // available) get most of these wrong. This tells us at startup which
+    // hooks are likely to install and which to expect to fail.
+    kmp::rva_validator::RunBuiltinSurvey();
+
+    // exit_safety: detach our exception handlers before ~GameWorld throws.
+    // Eliminates spurious KenshiOnline_CRASH.log entries on normal exit.
+    // The dtor hook install runs in two paths:
+    //   1. Eager install here (vtable lookup if singleton already valid)
+    //   2. Deferred install via TryInstallDestructorHookLater() polled from
+    //      OnGameTick — covers the common case where the singleton instance
+    //      doesn't exist until after the user loads a save.
+    if (kmp::hook_gate::IsDisabled("exit_safety")) {
+        m_nativeHud.LogStep("SKIP", "exit_safety disabled via KMP_DISABLE_HOOKS");
+    } else {
+        kmp::exit_safety::InstallGameWorldDestructorHook();
+        m_nativeHud.LogStep("OK", "exit_safety: install attempted (deferred fallback active)");
+    }
+
+    // in_game_events: direct hooks on LoadingWindow::hide and
+    // MainBarGUI::_CONSTRUCTOR — replace render_hooks timing heuristics.
+    if (kmp::hook_gate::IsDisabled("in_game_events")) {
+        m_nativeHud.LogStep("SKIP", "in_game_events disabled via KMP_DISABLE_HOOKS");
+    } else {
+        if (kmp::in_game_events::Install()) {
+            m_nativeHud.LogStep("OK", "in_game_events installed");
+        } else {
+            m_nativeHud.LogStep("WARN", "in_game_events install failed — heuristics fallback");
+        }
+    }
+
+    // host_game_speed is disabled on v1.0.68 until a live HUD/time source is
+    // proven. No install needed; the disabled module is invoked from OnGameTick.
+
+    // character_accessors: resolve RVAs for isDead / isPlayerCharacter /
+    // isUnconcious / getMovementSpeed / getName so callers can use them
+    // instead of fragile per-build offsets.
+    kmp::char_accessors::Resolve();
+    m_nativeHud.LogStep("OK", "character_accessors resolved");
 
     m_nativeHud.LogStep("OK", "All hooks installed");
 
@@ -2227,6 +2298,16 @@ void Core::OnGameTick(float deltaTime) {
     // every 5 minutes by default — cheap unless the interval has elapsed).
     kmp::leak_watch::Tick();
 
+    // Host game-speed propagation is currently quarantined for v1.0.68.
+    // host_game_speed::Tick is a one-shot disabled-warning; it does not
+    // send packets until a live source is proven.
+    kmp::host_game_speed::Tick(deltaTime);
+
+    // Deferred install of GameWorld dtor hook — needs the singleton instance
+    // to exist (only valid after the user loads a save). Polls every ~120
+    // ticks until success, then becomes a no-op.
+    kmp::exit_safety::TryInstallDestructorHookLater();
+
     // ── Pre-check diagnostics ──
     static int s_preCheckCount = 0;
     s_preCheckCount++;
@@ -2329,13 +2410,9 @@ void Core::OnGameTick(float deltaTime) {
                         spdlog::info("Core: Forced unpause (multiplayer — pause disabled)");
                     }
                 }
-                // Force game speed to 1.0 (server-controlled; prevents local speed changes)
-                float currentSpeed = 0.f;
-                Memory::Read(gwPtr + offsets.world.gameSpeed, currentSpeed);
-                if (currentSpeed < 0.5f || currentSpeed > 3.5f) {
-                    float normalSpeed = 1.0f;
-                    Memory::Write(gwPtr + offsets.world.gameSpeed, normalSpeed);
-                }
+                (void)offsets;
+                // GameWorld+0x700 is not a proven live speed field on
+                // Kenshi v1.0.68, so do not read or clamp it here.
             }
         }
     }

@@ -482,6 +482,39 @@ void GameServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t size, 
         if (player) HandleLobbyReady(*player, reader);
         break;
     }
+    case MessageType::C2S_HostGameSpeed: {
+        // Dormant on current v1.0.68 clients: host speed sending is disabled
+        // until a live host source is proven. Keep validation here for older
+        // test clients, but do not treat this as evidence of working sync.
+        // Only the host (first connected = m_hostPlayerId) can dictate speed.
+        // Anyone else sending this is either a buggy client or malicious — log
+        // once and ignore.
+        auto* player = GetPlayer(peer);
+        if (!player) break;
+        if (player->id != m_hostPlayerId) {
+            static int s_warnedNonHost = 0;
+            if (++s_warnedNonHost <= 5) {
+                spdlog::warn("GameServer: Non-host player '{}' (id={}) sent C2S_HostGameSpeed — ignored",
+                             player->name, player->id);
+            }
+            break;
+        }
+        MsgHostGameSpeed msg{};
+        if (!reader.ReadRaw(&msg, sizeof(msg))) break;
+        // Sanity-clamp to Kenshi's known speeds. Real Kenshi exposes 1/2/3/5;
+        // we accept any positive value and clamp to [0.1, 16] to avoid
+        // breaking the time accumulator with NaN / inf / tiny negative values.
+        if (!std::isfinite(msg.speed) || msg.speed <= 0.f) break;
+        const float clamped = std::clamp(msg.speed, 0.1f, 16.f);
+        if (std::abs(clamped - m_config.gameSpeed) < 0.001f) break; // no-op
+        spdlog::info("GameServer: host '{}' set game-speed {:.2f} -> {:.2f}",
+                     player->name, m_config.gameSpeed, clamped);
+        m_config.gameSpeed = clamped;
+        // Push out a fresh TimeSync immediately so other clients pick up the
+        // new speed without waiting for the next periodic broadcast.
+        BroadcastTimeSync();
+        break;
+    }
     case MessageType::C2S_Keepalive: {
         // Reset activity timer and send ack
         auto* player = GetPlayer(peer);

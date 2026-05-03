@@ -479,21 +479,9 @@ void Update(float deltaTime) {
         }
     }
 
-    // ── STEP 4: Game speed sync ──
-    float speed = s_remoteGameSpeed.load();
-    if (speed >= 0.f) {
-        uintptr_t gwSingleton = core.GetGameFunctions().GameWorldSingleton;
-        if (gwSingleton != 0) {
-            game::GameWorldAccessor gw(gwSingleton);
-            if (gw.IsValid()) {
-                float currentSpeed = gw.GetGameSpeed();
-                if (std::abs(currentSpeed - speed) > 0.01f) {
-                    gw.WriteGameSpeed(speed);
-                }
-            }
-        }
-        s_remoteGameSpeed.store(-1.f);
-    }
+    // Game speed sync is quarantined on Kenshi v1.0.68. The previous path
+    // wrote GameWorld+0x700, which is not a proven live speed field.
+    s_remoteGameSpeed.store(-1.f);
 }
 
 void OnRemotePositionReceived(const Vec3& pos) {
@@ -503,7 +491,14 @@ void OnRemotePositionReceived(const Vec3& pos) {
 }
 
 void OnRemoteGameSpeedReceived(float speed) {
-    s_remoteGameSpeed.store(speed);
+    s_remoteGameSpeed.store(-1.f);
+    static std::atomic<bool> s_loggedSpeedUnsupported{false};
+    bool expected = false;
+    if (s_loggedSpeedUnsupported.compare_exchange_strong(expected, true,
+            std::memory_order_acq_rel)) {
+        spdlog::warn("shared_save_sync: remote game-speed apply disabled on v1.0.68 "
+                     "(received {:.2f}, no proven write path)", speed);
+    }
 }
 
 bool IsOwnCharacterFound() { return s_ownFound; }

@@ -24,12 +24,7 @@ public:
     }
 
     float GetGameSpeed() const {
-        auto& offsets = GetOffsets();
-        if (offsets.world.gameSpeed < 0 || m_worldPtr == 0) return 1.0f;
-
-        float speed = 1.0f;
-        Memory::Read(m_worldPtr + offsets.world.gameSpeed, speed);
-        return speed;
+        return 1.0f;
     }
 
     int GetWeatherState() const {
@@ -51,10 +46,8 @@ public:
     }
 
     bool SetGameSpeed(float speed) {
-        auto& offsets = GetOffsets();
-        if (offsets.world.gameSpeed < 0 || m_worldPtr == 0) return false;
-
-        return Memory::Write(m_worldPtr + offsets.world.gameSpeed, speed);
+        (void)speed;
+        return false;
     }
 
     bool SetWeatherState(int weather) {
@@ -117,16 +110,7 @@ float GameWorldAccessor::GetTimeOfDay() const {
 }
 
 float GameWorldAccessor::GetGameSpeed() const {
-    auto& offsets = GetOffsets();
-    if (offsets.world.gameSpeed < 0 || m_addr == 0) return 1.0f;
-
-    uintptr_t worldPtr = 0;
-    Memory::Read(m_addr, worldPtr);
-    if (worldPtr == 0 || worldPtr < 0x10000) return 1.0f;
-
-    float speed = 1.0f;
-    Memory::Read(worldPtr + offsets.world.gameSpeed, speed);
-    return speed;
+    return 1.0f;
 }
 
 int GameWorldAccessor::GetWeatherState() const {
@@ -154,14 +138,8 @@ bool GameWorldAccessor::WriteTimeOfDay(float time) {
 }
 
 bool GameWorldAccessor::WriteGameSpeed(float speed) {
-    auto& offsets = GetOffsets();
-    if (offsets.world.gameSpeed < 0 || m_addr == 0) return false;
-
-    uintptr_t worldPtr = 0;
-    Memory::Read(m_addr, worldPtr);
-    if (worldPtr == 0 || worldPtr < 0x10000) return false;
-
-    return Memory::Write(worldPtr + offsets.world.gameSpeed, speed);
+    (void)speed;
+    return false;
 }
 
 } // namespace kmp::game

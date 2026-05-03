@@ -116,6 +116,11 @@ enum class MessageType : uint8_t {
     S2C_EntityHeartbeat   = 0x14,  // Server periodic entity presence list
     C2S_EntityAck         = 0x15,  // Client confirms receipt (optional)
 
+    // ── Host game-speed propagation ──
+    // Client-side sending is disabled on Kenshi v1.0.68 until a live host
+    // time/speed source is proven.
+    C2S_HostGameSpeed     = 0x16,  // Host reports new game-speed multiplier
+
     // ── Lobby ──
     S2C_FactionAssignment = 0xF0,  // Server assigns faction string to client
     C2S_LobbyReady        = 0xF1,  // Client confirms ready with faction loaded
