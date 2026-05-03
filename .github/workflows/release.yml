@@ -25,6 +25,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Clean stale build dir
+        shell: pwsh
+        run: |
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+
       - name: Configure (MSVC x64 Release)
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 
