@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 
 namespace kmp::speed_probe {
 
@@ -110,6 +111,70 @@ bool ProbeAt(uintptr_t gw, HMODULE kenshiMod, Candidate& out) {
     return true;
 }
 
+// Walk every section in kenshi_x64.exe that contains writable initialized
+// data (.data, .CRT, occasionally a custom section) and look for any 8-byte
+// aligned slot that holds a pointer to something with the GameWorld signature
+// (vtable in module + sane frameSpeedMult + zoneMgr/audioThread point to
+// vtables in module). Returns up to 8 best candidates by score, deduped by
+// target gw.
+std::vector<Candidate> ScanDataForGameWorld(HMODULE kenshiMod) {
+    std::vector<Candidate> out;
+    if (!kenshiMod) return out;
+
+    auto base = reinterpret_cast<uintptr_t>(kenshiMod);
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(kenshiMod);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return out;
+    auto* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return out;
+
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    int seen = 0;
+    int hits = 0;
+    constexpr int kHitCap = 16;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        // Only writable initialized data sections; skip .text/.rdata/.pdata.
+        DWORD c = sec->Characteristics;
+        bool writable    = (c & IMAGE_SCN_MEM_WRITE) != 0;
+        bool initialized = (c & IMAGE_SCN_CNT_INITIALIZED_DATA) != 0;
+        if (!writable || !initialized) continue;
+
+        uintptr_t secStart = base + sec->VirtualAddress;
+        uintptr_t secEnd   = secStart + sec->Misc.VirtualSize;
+        // Walk 8-byte aligned slots.
+        for (uintptr_t p = (secStart + 7) & ~uintptr_t(7); p + 8 <= secEnd; p += 8) {
+            uintptr_t target = 0;
+            if (!SafeRead(reinterpret_cast<const void*>(p), target)) continue;
+            ++seen;
+            // Heap-ish range: typical user-mode allocs sit in 0x000001'00000000+
+            // and below 0x00007FFF'FFFFFFFF. We exclude anything inside the
+            // module itself (vtables/static data) which can't be a GameWorld
+            // heap object.
+            if (target == 0) continue;
+            if (target < 0x000010000ULL) continue;
+            if (target >= 0x00800000000000ULL) continue;
+            if (IsInModule(target, kenshiMod)) continue;
+
+            Candidate c{};
+            if (!ProbeAt(target, kenshiMod, c)) continue;
+            if (c.score < 3) continue; // filter noise
+            // Dedup by target gw.
+            bool dup = false;
+            for (const auto& e : out) if (e.gw == c.gw) { dup = true; break; }
+            if (dup) continue;
+            out.push_back(c);
+            ++hits;
+            if (hits >= kHitCap) {
+                spdlog::info("speed_probe: scan hit cap ({}), stopping early "
+                             "(seen={} pointers)", kHitCap, seen);
+                return out;
+            }
+        }
+    }
+    spdlog::info("speed_probe: scan complete (examined {} 8-byte slots, kept {})",
+                 seen, hits);
+    return out;
+}
+
 void EmitLog(const char* label, const Candidate& c) {
     spdlog::info(
         "speed_probe[{}]: gw=0x{:X} vt=0x{:X}{} score={}/5 "
@@ -135,50 +200,65 @@ void TickOnce() {
     DWORD len = GetEnvironmentVariableA("KMP_SPEED_PROBE", buf, sizeof(buf));
     if (len == 0) return; // not opted in
 
-    uintptr_t slot = game::GetResolvedGameWorld();
-    if (slot == 0) return; // wait until core resolves it
-
     HMODULE kenshiMod = GetModuleHandleA(nullptr);
+    uintptr_t slot = game::GetResolvedGameWorld();
 
     spdlog::info("=== KMP SPEED_PROBE BEGIN ===");
-    spdlog::info("speed_probe: GameWorld slot = 0x{:X}", slot);
+    spdlog::info("speed_probe: existing resolver slot = 0x{:X}", slot);
 
-    // Case A — slot holds a pointer to the GameWorld struct (RE_Kenshi
-    // pattern: a global like `GameWorld* g_gw`).
     Candidate caseA{};
-    uintptr_t derefed = 0;
-    if (SafeRead(reinterpret_cast<const void*>(slot), derefed) && derefed != 0
-        && ProbeAt(derefed, kenshiMod, caseA)) {
-        EmitLog("A:slot->ptr->gw", caseA);
-    } else {
-        spdlog::info("speed_probe[A:slot->ptr->gw]: dereference failed or null "
-                     "(deref=0x{:X})", derefed);
-    }
-
-    // Case B — slot IS the GameWorld struct (static singleton inlined into
-    // .data, e.g. `static GameWorld g_gw;`).
     Candidate caseB{};
-    if (ProbeAt(slot, kenshiMod, caseB)) {
-        EmitLog("B:slot==gw", caseB);
+
+    if (slot != 0) {
+        // Case A — slot holds a pointer to the GameWorld struct.
+        uintptr_t derefed = 0;
+        if (SafeRead(reinterpret_cast<const void*>(slot), derefed) && derefed != 0
+            && ProbeAt(derefed, kenshiMod, caseA)) {
+            EmitLog("A:slot->ptr->gw", caseA);
+        } else {
+            spdlog::info("speed_probe[A:slot->ptr->gw]: failed (deref=0x{:X})", derefed);
+        }
+        // Case B — slot IS the GameWorld struct.
+        if (ProbeAt(slot, kenshiMod, caseB)) {
+            EmitLog("B:slot==gw", caseB);
+        } else {
+            spdlog::info("speed_probe[B:slot==gw]: read failed");
+        }
     } else {
-        spdlog::info("speed_probe[B:slot==gw]: read failed at slot");
+        spdlog::info("speed_probe: existing resolver returned 0 — falling back "
+                     "to .data section scan.");
     }
 
-    // Suggest the winner so the next person reading the log doesn't have to
-    // squint at the score columns.
-    if (caseA.gw && caseA.score >= 4) {
-        spdlog::info("speed_probe: VERDICT — Case A wins (slot is a pointer to "
-                     "GameWorld). Use *(uintptr_t*)0x{:X} → +0x700 for speed.",
-                     slot);
-    } else if (caseB.gw && caseB.score >= 4) {
-        spdlog::info("speed_probe: VERDICT — Case B wins (slot IS GameWorld). "
-                     "Use 0x{:X} + 0x700 for speed.", slot);
+    // Always scan: finds the real GameWorld even when the existing resolver
+    // failed, and lets us cross-check Case A/B when it didn't.
+    spdlog::info("speed_probe: scanning kenshi_x64.exe .data for GameWorld "
+                 "candidates (this is read-only and one-shot)...");
+    auto scanCandidates = ScanDataForGameWorld(kenshiMod);
+    spdlog::info("speed_probe: scan found {} candidate(s)", scanCandidates.size());
+    int idx = 0;
+    Candidate bestScan{};
+    for (const auto& sc : scanCandidates) {
+        char label[32];
+        wsprintfA(label, "C%d:scan", idx++);
+        EmitLog(label, sc);
+        if (sc.score > bestScan.score) bestScan = sc;
+    }
+
+    // Verdict — explicit so the next person reading doesn't squint at scores.
+    auto winner = [](const Candidate& c) { return c.gw && c.score >= 4; };
+    if (winner(caseA)) {
+        spdlog::info("speed_probe: VERDICT — Case A. *(uintptr_t*)0x{:X} → "
+                     "+0x700 for speed.", slot);
+    } else if (winner(caseB)) {
+        spdlog::info("speed_probe: VERDICT — Case B. 0x{:X} + 0x700 for speed.", slot);
+    } else if (winner(bestScan)) {
+        spdlog::info("speed_probe: VERDICT — scan winner. GameWorld at 0x{:X} "
+                     "(score {}/5). Read 0x{:X}+0x700 for frameSpeedMult.",
+                     bestScan.gw, bestScan.score, bestScan.gw);
     } else {
-        spdlog::warn(
-            "speed_probe: VERDICT — neither case scored ≥4. "
-            "Either the resolver pointed at the wrong global, or the GameWorld "
-            "layout shifted between Kenshi 1.0.51 and 1.0.68. Highest scoring: "
-            "A={}/5 B={}/5", caseA.score, caseB.score);
+        spdlog::warn("speed_probe: VERDICT — no candidate scored >=4. Best: "
+                     "A={}/5 B={}/5 scan={}/5. Layout may have shifted.",
+                     caseA.score, caseB.score, bestScan.score);
     }
     spdlog::info("=== KMP SPEED_PROBE END ===");
 
