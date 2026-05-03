@@ -130,6 +130,47 @@ This is the protocol shape, agreed during the previous hunt and still valid:
   the validation routine on 1.0.68. Resuming cold from "where were we" was
   expensive, hence this file.
 
+## 2026-05-04 attempt — outcome
+
+Spent an evening trying to runtime-validate the offsets above on 1.0.68
+Steam Newland with a background-thread probe (`KenshiMP.Core/sys/speed_probe.{h,cpp}`,
+env-gated by `KMP_SPEED_PROBE=1`, inert otherwise — left in tree for future
+attempts). Findings:
+
+- **`?ou@@3PEAVGameWorld@@EA` is NOT exported on 1.0.68.**
+  `GetProcAddress(kenshi_x64.exe, "?ou@@3PEAVGameWorld@@EA")` returns NULL.
+  Lo-Fi stripped exports between 1.0.51 (when KenshiLib captured them) and
+  the current build. Scratch the cleanest GameWorld-acquisition path.
+
+- **Our existing `GameWorldSingleton` resolver also fails on 1.0.68.**
+  String-xref via `dayTime` returns no functions; direct .rdata search for
+  the string returns nothing; the prologue-RVA fallback lands on `FF FF FF FF`.
+  The static address path is dead too.
+
+- **.data-section scan finds GameWorld-shaped candidates but none have
+  `frameSpeedMult` near `+0x700`.** Two candidates consistently surface:
+  one at a typical heap address with score 4/5 (vtable + zoneMgr +
+  audioThread + paused all valid, but `+0x700` reads uninit garbage like
+  `~3.3e35`), and one at a DLL-data-segment-shaped address that's almost
+  certainly a false positive. Across multiple in-game tests with the user
+  pressing speed hotkeys, NO float in `±0x800` of `+0x700` on either
+  candidate transitioned in a way matching the speed change. Either the
+  field moved more than `±0x800` away on 1.0.68, or our candidate isn't
+  the live GameWorld.
+
+- **No other 1.0.68-targeted mod reads or writes `frameSpeedMult` that we
+  can crib from.** RE_Kenshi advertises support for "Kenshi 1.0.x" on
+  Nexus but its public source still references the 1.0.51 KenshiLib
+  layout. Either Lo-Fi's binary diff is small enough that RE_Kenshi just
+  works without code changes (and we're missing something simple about
+  resolution), or RE_Kenshi has private updates not committed upstream.
+
+**Conclusion for this branch:** parked indefinitely until either (a) Lo-Fi
+ships an exports update, (b) RE_Kenshi publishes an updated KenshiLib
+header for the current build, or (c) someone with IDA / Ghidra rebuilds
+the GameWorld layout for 1.0.68 from the binary. Probing blindly past this
+point is a known-bad investment.
+
 ## Sources
 
 - RE_Kenshi (Nexus 847, GitHub `BFrizzleFoShizzle/RE_Kenshi`): live mod
