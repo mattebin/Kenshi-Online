@@ -3,9 +3,13 @@
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <cstdint>
 #include <Windows.h>
 
 namespace kmp::input_hooks {
+
+// Forward decl — defined below.
+static bool IsModalUiActive();
 
 // WndProc handles our UI text input and visible keybinds, but Kenshi also
 // consumes keyboard events through OIS. Hook Kenshi's InputHandler so modal
@@ -44,14 +48,17 @@ static constexpr int OIS_KC_F1 = 0x3B;
 static std::atomic<uint32_t> s_swallowedKeyDown{0};
 static std::atomic<uint32_t> s_swallowedKeyUp{0};
 
-static bool ShouldCaptureOisKey(int key) {
-    // F1 is our menu-toggle; Kenshi otherwise binds it. Always swallow.
-    if (key == OIS_KC_F1) return true;
-
+static bool IsModalUiActive() {
     auto& core = Core::Get();
     if (core.GetNativeHud().IsChatInputActive()) return true;
     if (core.GetOverlay().GetNativeMenu().IsVisible()) return true;
     return false;
+}
+
+static bool ShouldCaptureOisKey(int key) {
+    // F1 is our menu-toggle; Kenshi otherwise binds it. Always swallow.
+    if (key == OIS_KC_F1) return true;
+    return IsModalUiActive();
 }
 
 static void __fastcall Hook_InputKeyDown(void* inputHandler, int key) {
@@ -100,13 +107,142 @@ bool Install() {
     return keyDownOk && keyUpOk;
 }
 
+// ── MyGUI input swallowing ─────────────────────────────────────────────────
+//
+// In addition to OIS-level swallowing above, hook MyGUI's InputManager so
+// keystrokes delivered to MyGUI widgets (e.g. squad UI, character pickers,
+// inventory list filters) don't fire while our chat or native menu is the
+// active modal. Hooks are installed lazily from render_hooks once
+// MyGUIEngine_x64.dll has finished loading.
+//
+// MyGUI exports are version-stable mangled names — these have been the same
+// across MyGUI 3.x. If a future MyGUI bumps the export naming the install
+// will simply fail and we degrade to OIS-only swallowing.
+
+using InjectKeyPressFn   = bool (*)(void*, std::uint32_t, std::uint32_t);
+using InjectKeyReleaseFn = bool (*)(void*, std::uint32_t);
+
+static InjectKeyPressFn   s_origInjectKeyPress   = nullptr;
+static InjectKeyReleaseFn s_origInjectKeyRelease = nullptr;
+static bool s_myguiInstalled = false;
+
+static std::atomic<uint32_t> s_swallowedMyGuiPress{0};
+static std::atomic<uint32_t> s_swallowedMyGuiRelease{0};
+
+// Walk simple jump trampolines so hot-patched MyGUI exports still hook the
+// real implementation. Pattern matches what x64dbg/IDA see for E9 / EB / FF25.
+static void* ResolveCodeTarget(void* p) {
+    auto* cur = static_cast<std::uint8_t*>(p);
+    if (!cur) return nullptr;
+    for (int i = 0; i < 8; ++i) {
+        if (cur[0] == 0xE9) {
+            std::int32_t r = *reinterpret_cast<std::int32_t*>(cur + 1);
+            cur += 5 + r;
+            continue;
+        }
+        if (cur[0] == 0xEB) {
+            std::int8_t r = *reinterpret_cast<std::int8_t*>(cur + 1);
+            cur += 2 + r;
+            continue;
+        }
+        if (cur[0] == 0xFF && cur[1] == 0x25) {
+            std::int32_t d = *reinterpret_cast<std::int32_t*>(cur + 2);
+            cur = *reinterpret_cast<std::uint8_t**>(cur + 6 + d);
+            continue;
+        }
+        break;
+    }
+    return cur;
+}
+
+static bool Hook_MyGui_InjectKeyPress(void* inputMgr, std::uint32_t keyCode,
+                                       std::uint32_t text) {
+    if (IsModalUiActive()) {
+        s_swallowedMyGuiPress.fetch_add(1, std::memory_order_relaxed);
+        return true; // tell MyGUI we handled it; no widget receives the press
+    }
+    return s_origInjectKeyPress
+        ? s_origInjectKeyPress(inputMgr, keyCode, text)
+        : false;
+}
+
+static bool Hook_MyGui_InjectKeyRelease(void* inputMgr, std::uint32_t keyCode) {
+    if (IsModalUiActive()) {
+        s_swallowedMyGuiRelease.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    return s_origInjectKeyRelease
+        ? s_origInjectKeyRelease(inputMgr, keyCode)
+        : false;
+}
+
+bool InstallMyGuiSwallow() {
+    if (s_myguiInstalled) return true;
+
+    HMODULE mygui = GetModuleHandleA("MyGUIEngine_x64.dll");
+    if (!mygui) {
+        // Caller is expected to retry once MyGuiBridge::IsReady() is true.
+        return false;
+    }
+
+    auto pPress = GetProcAddress(
+        mygui,
+        "?injectKeyPress@InputManager@MyGUI@@QEAA_NUKeyCode@2@I@Z");
+    auto pRelease = GetProcAddress(
+        mygui,
+        "?injectKeyRelease@InputManager@MyGUI@@QEAA_NUKeyCode@2@@Z");
+    if (!pPress || !pRelease) {
+        spdlog::warn(
+            "input_hooks: MyGUI injectKeyPress/Release exports not found — "
+            "MyGUI swallow not installed (degrading to OIS-only)");
+        return false;
+    }
+
+    auto rPress   = ResolveCodeTarget(reinterpret_cast<void*>(pPress));
+    auto rRelease = ResolveCodeTarget(reinterpret_cast<void*>(pRelease));
+
+    auto& hookMgr = HookManager::Get();
+    bool pressOk = hookMgr.InstallAt(
+        "MyGUI_InjectKeyPress",
+        reinterpret_cast<uintptr_t>(rPress),
+        &Hook_MyGui_InjectKeyPress, &s_origInjectKeyPress);
+    bool releaseOk = hookMgr.InstallAt(
+        "MyGUI_InjectKeyRelease",
+        reinterpret_cast<uintptr_t>(rRelease),
+        &Hook_MyGui_InjectKeyRelease, &s_origInjectKeyRelease);
+
+    if (!pressOk || !releaseOk) {
+        spdlog::warn(
+            "input_hooks: MyGUI hook install partial (press={}, release={})",
+            pressOk, releaseOk);
+        return false;
+    }
+
+    s_myguiInstalled = true;
+    spdlog::info("input_hooks: MyGUI keyboard hooks installed");
+    return true;
+}
+
 void Uninstall() {
+    auto& hookMgr = HookManager::Get();
     if (s_installed) {
-        HookManager::Get().Remove("InputKeyDown");
-        HookManager::Get().Remove("InputKeyUp");
-        spdlog::info("input_hooks: Uninstalled (swallowedDown={}, swallowedUp={})",
+        hookMgr.Remove("InputKeyDown");
+        hookMgr.Remove("InputKeyUp");
+        spdlog::info("input_hooks: Uninstalled OIS gate "
+                     "(swallowedDown={}, swallowedUp={})",
                      s_swallowedKeyDown.load(std::memory_order_relaxed),
                      s_swallowedKeyUp.load(std::memory_order_relaxed));
+    }
+    if (s_myguiInstalled) {
+        hookMgr.Remove("MyGUI_InjectKeyPress");
+        hookMgr.Remove("MyGUI_InjectKeyRelease");
+        s_origInjectKeyPress   = nullptr;
+        s_origInjectKeyRelease = nullptr;
+        s_myguiInstalled = false;
+        spdlog::info("input_hooks: Uninstalled MyGUI swallow "
+                     "(swallowedPress={}, swallowedRelease={})",
+                     s_swallowedMyGuiPress.load(std::memory_order_relaxed),
+                     s_swallowedMyGuiRelease.load(std::memory_order_relaxed));
     }
     s_installed = false;
 }

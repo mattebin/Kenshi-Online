@@ -1,6 +1,8 @@
 #include "render_hooks.h"
 #include "../core.h"
 #include "entity_hooks.h"
+#include "input_hooks.h"
+#include "../ui/mygui_bridge.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
 #include <d3d11.h>
@@ -68,72 +70,91 @@ static bool IsMainMenuReady() {
     return elapsed.count() >= 15;
 }
 
+static bool IsMouseMessage(UINT msg) {
+    switch (msg) {
+    case WM_MOUSEMOVE:
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+    case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool IsKeyboardMessage(UINT msg) {
+    switch (msg) {
+    case WM_KEYDOWN: case WM_KEYUP:
+    case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+    case WM_CHAR: case WM_SYSCHAR: case WM_UNICHAR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool IsPrintableChatChar(WPARAM wParam) {
+    // Basic printable range. Keeps chat simple and prevents weird control chars.
+    return (wParam >= 32 && wParam != 127);
+}
+
 // ── WndProc Hook (pure Win32 input — no ImGui) ──
 // Inner function does the actual work — called from SEH wrapper.
+//
+// Modal-gate model (borrowed from upstream The404Studios commit 5731fc4,
+// adapted to coexist with our OIS + MyGUI hooks). When chat or our native
+// menu is open we are MODAL: every keyboard / mouse message that isn't
+// explicitly forwarded to the active UI gets swallowed here. Anything we
+// do *not* consume here can still reach Kenshi via OIS / GetKeyboardState
+// — those paths are gated by input_hooks.cpp (OIS) and the MyGUI hooks.
 static LRESULT WndProcInner(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    // WM_KMP_SPAWN: no longer used — spawn queue is handled by in-place replay only
+    // WM_KMP_SPAWN: no longer used — spawn queue is handled by in-place replay only.
     if (uMsg == WM_KMP_SPAWN) {
         return 0;
     }
 
-    // F1 key: toggle native menu (ignore auto-repeat: bit 30 of lParam = previous key state)
+    auto& core       = Core::Get();
+    auto& overlay    = core.GetOverlay();
+    auto& nativeMenu = overlay.GetNativeMenu();
+    auto& nativeHud  = core.GetNativeHud();
+
+    bool chatActive    = nativeHud.IsChatInputActive();
+    bool menuVisible   = nativeMenu.IsVisible();
+    bool modalUiActive = chatActive || menuVisible;
+
+    // ── F1: toggle native menu. Disabled while chat is typing. ──
     if (uMsg == WM_KEYDOWN && wParam == VK_F1 && !(lParam & 0x40000000)) {
-        auto& overlay = Core::Get().GetOverlay();
-        auto& nativeMenu = overlay.GetNativeMenu();
-        if (nativeMenu.IsVisible()) {
+        if (chatActive) return 0; // swallow while typing
+        if (menuVisible) {
             nativeMenu.Hide();
-        } else if (!Core::Get().IsGameLoaded() && !IsMainMenuReady()) {
+        } else if (!core.IsGameLoaded() && !IsMainMenuReady()) {
             OutputDebugStringA("KMP: F1 pressed too early (logo/splash) — ignoring\n");
         } else {
-            // Works on main menu AND in-game
             nativeMenu.Show();
         }
-        return 0; // consume the key
-    }
-
-    // Tab key: toggle player list on native HUD (ignore auto-repeat)
-    if (uMsg == WM_KEYDOWN && wParam == VK_TAB && !(lParam & 0x40000000)) {
-        if (Core::Get().IsGameLoaded() && Core::Get().IsConnected()) {
-            Core::Get().GetNativeHud().TogglePlayerList();
-            return 0; // consume — prevent Kenshi Tab action (inventory switch)
-        }
-    }
-
-    // Insert key: toggle loading/debug log panel (native MyGUI)
-    if (uMsg == WM_KEYDOWN && wParam == VK_INSERT && !(lParam & 0x40000000)) {
-        Core::Get().GetNativeHud().ToggleLogPanel();
         return 0;
     }
 
-    // Backtick key: toggle debug info on native HUD (ignore auto-repeat)
-    if (uMsg == WM_KEYDOWN && wParam == VK_OEM_3 && !(lParam & 0x40000000)) {
-        if (Core::Get().IsGameLoaded() && Core::Get().IsConnected()) {
-            Core::Get().GetNativeHud().ToggleDebugInfo();
-            return 0; // consume — prevent Kenshi console/debug action
-        }
-    }
-
-    // Escape key: close chat input or native menu (ignore auto-repeat)
+    // ── Escape: close active modal first; otherwise let the game handle it. ──
     if (uMsg == WM_KEYDOWN && wParam == VK_ESCAPE && !(lParam & 0x40000000)) {
-        auto& nativeHud = Core::Get().GetNativeHud();
-        if (nativeHud.IsChatInputActive()) {
+        if (chatActive) {
             nativeHud.CloseChatInput();
             return 0;
         }
-        auto& nativeMenu = Core::Get().GetOverlay().GetNativeMenu();
-        if (nativeMenu.IsVisible()) {
+        if (menuVisible) {
             nativeMenu.OnKeyDown(VK_ESCAPE);
             nativeMenu.Hide();
             return 0;
         }
     }
 
-    // Enter key: toggle chat input (when game loaded, no menu open)
+    // ── Enter: open chat or commit chat line (game-loaded only). ──
     if (uMsg == WM_KEYDOWN && wParam == VK_RETURN && !(lParam & 0x40000000)) {
-        auto& nativeMenu = Core::Get().GetOverlay().GetNativeMenu();
-        if (!nativeMenu.IsVisible() && Core::Get().IsGameLoaded()) {
-            auto& nativeHud = Core::Get().GetNativeHud();
-            if (nativeHud.IsChatInputActive()) {
+        if (!menuVisible && core.IsGameLoaded()) {
+            if (chatActive) {
                 nativeHud.OnChatKeyDown(VK_RETURN);
             } else {
                 nativeHud.OpenChatInput();
@@ -142,77 +163,109 @@ static LRESULT WndProcInner(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
     }
 
-    // ── Modal input gates ──
-    // When chat or menu is active, consume ALL keyboard input to prevent
-    // the game (OIS/MyGUI/DirectInput) from also processing keystrokes.
-    // This fixes double-typing and prevents game actions while UI is open.
-    bool chatActive = Core::Get().GetNativeHud().IsChatInputActive();
-    bool menuVisible = Core::Get().GetOverlay().GetNativeMenu().IsVisible();
-
-    // WM_CHAR: forward printable characters to active UI, always consume when modal
-    if (uMsg == WM_CHAR) {
-        if (chatActive) {
-            Core::Get().GetNativeHud().OnChatChar(static_cast<wchar_t>(wParam));
+    // ── Tab: toggle player list. Disabled while modal. ──
+    if (uMsg == WM_KEYDOWN && wParam == VK_TAB && !(lParam & 0x40000000)) {
+        if (modalUiActive) return 0;
+        if (core.IsGameLoaded() && core.IsConnected()) {
+            nativeHud.TogglePlayerList();
             return 0;
         }
-        if (menuVisible) {
-            auto& nativeMenu = Core::Get().GetOverlay().GetNativeMenu();
-            if (nativeMenu.HasActiveEditBox()) {
-                nativeMenu.OnChar(static_cast<wchar_t>(wParam));
-            }
-            return 0; // always consume when menu is visible (modal)
+    }
+
+    // ── Insert: toggle log panel. Disabled while modal. ──
+    if (uMsg == WM_KEYDOWN && wParam == VK_INSERT && !(lParam & 0x40000000)) {
+        if (modalUiActive) return 0;
+        nativeHud.ToggleLogPanel();
+        return 0;
+    }
+
+    // ── Backtick: toggle debug info. Disabled while modal. ──
+    if (uMsg == WM_KEYDOWN && wParam == VK_OEM_3 && !(lParam & 0x40000000)) {
+        if (modalUiActive) return 0;
+        if (core.IsGameLoaded() && core.IsConnected()) {
+            nativeHud.ToggleDebugInfo();
+            return 0;
         }
     }
 
-    // WM_KEYDOWN: forward control keys to active UI, always consume when modal
-    if (uMsg == WM_KEYDOWN && wParam != VK_F1 && wParam != VK_ESCAPE) {
+    // ── Strict modal gates ──
+    // When chat or menu is active, swallow ALL further input that isn't
+    // explicitly forwarded to the active UI. This is the line of defense
+    // for Win32 messages; OIS / MyGUI gates handle the engine-side paths.
+    if (modalUiActive) {
         if (chatActive) {
-            if (wParam == VK_BACK || wParam == VK_RETURN) {
-                Core::Get().GetNativeHud().OnChatKeyDown(static_cast<int>(wParam));
+            if (uMsg == WM_CHAR || uMsg == WM_SYSCHAR || uMsg == WM_UNICHAR) {
+                if (IsPrintableChatChar(wParam)) {
+                    nativeHud.OnChatChar(static_cast<wchar_t>(wParam));
+                }
+                return 0;
             }
-            return 0; // consume ALL keydowns when chat is active
+            if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
+                switch (wParam) {
+                case VK_BACK:
+                case VK_RETURN:
+                case VK_ESCAPE:
+                    nativeHud.OnChatKeyDown(static_cast<int>(wParam));
+                    break;
+                default:
+                    break; // swallow everything else
+                }
+                return 0;
+            }
+            if (uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP) return 0;
+            if (IsMouseMessage(uMsg)) return 0;
         }
+
         if (menuVisible) {
-            auto& nativeMenu = Core::Get().GetOverlay().GetNativeMenu();
-            if (wParam == VK_BACK || wParam == VK_RETURN || wParam == VK_TAB) {
-                nativeMenu.OnKeyDown(static_cast<int>(wParam));
+            if (uMsg == WM_CHAR || uMsg == WM_SYSCHAR || uMsg == WM_UNICHAR) {
+                if (nativeMenu.HasActiveEditBox() && IsPrintableChatChar(wParam)) {
+                    nativeMenu.OnChar(static_cast<wchar_t>(wParam));
+                }
+                return 0;
             }
-            return 0; // consume ALL keydowns when menu is visible (modal)
+            if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
+                switch (wParam) {
+                case VK_BACK:
+                case VK_RETURN:
+                case VK_TAB:
+                case VK_ESCAPE:
+                    nativeMenu.OnKeyDown(static_cast<int>(wParam));
+                    break;
+                default:
+                    break;
+                }
+                return 0;
+            }
+            if (uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP) return 0;
+            if (uMsg == WM_LBUTTONDOWN) {
+                nativeMenu.OnClick(LOWORD(lParam), HIWORD(lParam));
+                return 0;
+            }
+            if (IsMouseMessage(uMsg)) return 0;
         }
+
+        // Failsafe: any other input message is swallowed while modal.
+        if (IsKeyboardMessage(uMsg) || IsMouseMessage(uMsg)) return 0;
     }
 
-    // WM_KEYUP: consume when chat or menu is active to prevent unpaired key-up
-    // events reaching OIS (which would desync its internal key state tracking)
-    if (uMsg == WM_KEYUP) {
-        if (chatActive || menuVisible) return 0;
-    }
-
-    // Mouse click handling
+    // ── Mouse click handling outside modal UI ──
     if (uMsg == WM_LBUTTONDOWN) {
         int mx = LOWORD(lParam);
         int my = HIWORD(lParam);
-
-        auto& nativeMenu = Core::Get().GetOverlay().GetNativeMenu();
-
-        if (nativeMenu.IsVisible()) {
-            // Native panel is open — forward click to its handler
-            nativeMenu.OnClick(mx, my);
-        } else if (!Core::Get().IsGameLoaded() && IsMainMenuReady()) {
+        if (!core.IsGameLoaded() && IsMainMenuReady()) {
             // On main menu — check if click hit our MULTIPLAYER button
             RECT clientRect;
             if (GetClientRect(hWnd, &clientRect)) {
                 float screenW = static_cast<float>(clientRect.right - clientRect.left);
                 float screenH = static_cast<float>(clientRect.bottom - clientRect.top);
-
                 if (screenW > 0 && screenH > 0) {
                     float nx = static_cast<float>(mx) / screenW;
                     float ny = static_cast<float>(my) / screenH;
-
                     if (nx >= MP_BTN_X && nx <= (MP_BTN_X + MP_BTN_W) &&
                         ny >= MP_BTN_Y && ny <= (MP_BTN_Y + MP_BTN_H)) {
                         spdlog::info("render_hooks: MULTIPLAYER button clicked ({}, {})", mx, my);
                         nativeMenu.Show();
-                        return 0; // consume the click
+                        return 0;
                     }
                 }
             }
@@ -437,6 +490,21 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
         SEH_OverlayUpdate();
         // NativeHud handles all display
         SEH_NativeHudUpdate();
+    }
+
+    // ── Lazy MyGUI input-swallow install ──
+    // input_hooks::Install() (OIS gate) ran during Core::InitHooks. The MyGUI
+    // gate has to wait until MyGUIEngine_x64.dll is mapped and its singletons
+    // are constructed; otherwise GetProcAddress finds nothing or hooks the
+    // wrong target. MyGuiBridge::IsReady() flips true the moment we can
+    // resolve the engine, so polling here per-frame is cheap and correct.
+    {
+        static bool s_myguiInputInstalled = false;
+        if (!s_myguiInputInstalled && MyGuiBridge::Get().IsReady()) {
+            if (input_hooks::InstallMyGuiSwallow()) {
+                s_myguiInputInstalled = true;
+            }
+        }
     }
 
     // ── OnGameTick driver ──
