@@ -6,6 +6,25 @@ Kenshi-Online adds seamless multiplayer to Kenshi using native MyGUI integration
 
 ---
 
+## Quick install (just want to play)
+
+Latest stable build for **Kenshi 1.0.68 (Steam, Newland)**:
+
+> **[Download the latest release](https://github.com/mattebin/Kenshi-Online/releases/latest)** → grab `KenshiMP-stability-1.0.68.zip`.
+
+1. Quit Steam fully (system tray → Exit).
+2. Locate your Kenshi install folder (right-click Kenshi in Steam → Manage → Browse local files).
+3. Extract the zip into that folder. It adds `KenshiMP.Core.dll`, `KenshiMP.Server.exe`, `KenshiMP.Injector.exe`, the Multiplayer UI layouts under `data\gui\layout\`, and a `server.json` template.
+4. Restart Steam, launch Kenshi normally.
+5. **Joining a friend**: in the main menu, click the new "Multiplayer" button. Enter the host's IP and port (default `27800`), pick a player name, hit Connect.
+6. **Hosting locally**: run `KenshiMP.Server.exe` once. It listens on `0.0.0.0:27800`. Forward TCP+UDP `27800` if friends are joining over the internet.
+
+**Known limit on 1.0.68:** game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See the release README for full troubleshooting.
+
+For the technical details and what changed vs. upstream, keep reading.
+
+---
+
 ## Fork notice — `mattebin/stability/upstream-base`
 
 > This fork carries 27 stability, correctness, and diagnostic improvements for Kenshi 1.0.68 (Steam, "Newland") that aren't in upstream `main`. Branch is fast-forward mergeable into upstream — no conflicts at the time of writing.
