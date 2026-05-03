@@ -340,7 +340,7 @@ end;
 procedure RemovePluginLineFromCfg(const CfgPath: String);
 var
   Lines, Kept: TArrayOfString;
-  Out: AnsiString;
+  Joined: AnsiString;
   i, n: Integer;
 begin
   if not FileExists(CfgPath) then Exit;
@@ -353,16 +353,16 @@ begin
       Kept[n] := Lines[i];
       n := n + 1;
     end;
-  Out := '';
+  Joined := '';
   for i := 0 to GetArrayLength(Kept) - 1 do
-    Out := Out + Kept[i] + #13#10;
-  SaveStringToFile(CfgPath, Out, False);
+    Joined := Joined + Kept[i] + #13#10;
+  SaveStringToFile(CfgPath, Joined, False);
 end;
 
 procedure RemoveModFromList(const ListPath: String);
 var
   Lines, Kept: TArrayOfString;
-  Out: AnsiString;
+  Joined: AnsiString;
   i, n: Integer;
 begin
   if not FileExists(ListPath) then Exit;
@@ -375,10 +375,10 @@ begin
       Kept[n] := Lines[i];
       n := n + 1;
     end;
-  Out := '';
+  Joined := '';
   for i := 0 to GetArrayLength(Kept) - 1 do
-    Out := Out + Kept[i] + #13#10;
-  SaveStringToFile(ListPath, Out, False);
+    Joined := Joined + Kept[i] + #13#10;
+  SaveStringToFile(ListPath, Joined, False);
 end;
 
 procedure RestoreBackupIfPresent(const KenshiDir, RelPath, BackupName: String);
