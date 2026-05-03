@@ -62,7 +62,7 @@ Highlights:
 - **Server-authoritative** combat and world state
 - **Native MyGUI HUD** - status bar, chat with timestamps, player list, debug log
 - **Client commands** - `/tp`, `/time`, `/kick`, `/announce`, `/connect`, `/disconnect`, `/pos`, `/players`, `/status`, `/entities`, `/ping`, `/debug`, `/help`
-- **Just launch and play** - Ogre plugin injection, no manual setup
+- **One-time install + Injector launcher** - Ogre plugin injection, no DLL injectors or process attach
 
 ## Architecture
 
@@ -75,18 +75,42 @@ KenshiMP.Common.lib      -> Shared types, protocol, serialization
 KenshiMP.Scanner.lib     -> Pattern scanning, MinHook wrapper
 ```
 
-## Quick Start
+## Install & Play (Players)
 
-### Player
-1. Build the solution (see Building below)
-2. Run `KenshiMP.Injector.exe`
-3. Set your player name and server address
-4. Click **PLAY**
-5. Kenshi launches with multiplayer enabled
+You do **not** need to build anything. Grab the latest prebuilt zip:
 
-### Server (Local or VPS)
-1. Copy `KenshiMP.Server.exe` to your VPS
-2. Create `server.json` (or let it generate defaults):
+1. **Download** the latest `Kenshi-Online-vX.Y.Z.zip` from the
+   [Releases page](../../releases/latest).
+2. **Extract** it anywhere (Desktop is fine).
+3. **Run `install.bat`** once. It auto-detects your Kenshi install,
+   backs up the files it touches, and copies the DLL, GUI layouts, and
+   `kenshi-online.mod` into place. Set `KENSHI_DIR` first if you want
+   to override auto-detection.
+4. **Launch with `KenshiMP.Injector.exe`**. Set your player name and
+   server address, click **PLAY**, and Kenshi starts with multiplayer
+   enabled. You can also launch Kenshi normally and use the
+   **MULTIPLAYER** button on the main menu.
+
+To undo everything, run `uninstall.bat` — it restores the vanilla files
+from the backups created during install.
+
+> **Why two scripts?** `install.bat` handles first-time setup
+> (GUI layouts, backups, mod-list edits). `KenshiMP.Injector.exe` is the
+> day-to-day launcher (player name, server picker, Plugins_x64.cfg
+> management, launches Kenshi). The Injector will absorb the installer
+> over time; until then, run `install.bat` once and use the Injector
+> after that.
+
+For full in-game controls, commands, hosting tips, and troubleshooting,
+see [`dist/JOINING.md`](dist/JOINING.md) (also bundled in the release zip).
+
+## Hosting a Server
+
+Anyone can host. Run `KenshiMP.Server.exe` on your PC or a VPS.
+
+1. Copy `KenshiMP.Server.exe` (and optionally `server.json`) to the host
+   machine.
+2. Create or edit `server.json`:
 ```json
 {
   "serverName": "My Kenshi Server",
@@ -97,20 +121,23 @@ KenshiMP.Scanner.lib     -> Pattern scanning, MinHook wrapper
 }
 ```
 3. Run: `./KenshiMP.Server.exe`
-4. Forward port **27800 UDP** on your router/firewall
-5. Players connect via your IP address or the server browser
+4. Forward port **27800 UDP** on your router/firewall (or rely on UPnP).
+5. Players connect via your IP, or find you in the in-game server browser.
 
 ### Server Commands
 ```
-status   - Show server info
-players  - List connected players
+status    - Show server info
+players   - List connected players
 kick <id> - Kick a player
 say <msg> - Broadcast system message
-save     - Save world state
-stop     - Shutdown server
+save      - Save world state
+stop      - Shutdown server
 ```
 
-## Building
+## Building from Source (Developers)
+
+> Only needed if you're hacking on the mod. End users should use the
+> prebuilt zip from the [Releases page](../../releases/latest).
 
 ### Requirements
 - **Visual Studio 2022** (or 2019) with **Desktop development with C++** workload

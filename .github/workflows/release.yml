@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag to publish (leave blank to upload as workflow artifact only)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (MSVC x64 Release)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run unit tests
+        run: build\bin\Release\KenshiMP.UnitTest.exe
+
+      - name: Stage release payload
+        shell: pwsh
+        run: |
+          $stage = "release/Kenshi-Online"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # Built binaries (must exist)
+          $binaries = @(
+            "build/bin/Release/KenshiMP.Core.dll",
+            "build/bin/Release/KenshiMP.Injector.exe",
+            "build/bin/Release/KenshiMP.Server.exe",
+            "build/bin/Release/KenshiMP.MasterServer.exe"
+          )
+          foreach ($f in $binaries) {
+            if (-not (Test-Path $f)) { throw "Missing build artifact: $f" }
+            Copy-Item $f $stage
+          }
+
+          # Game assets shipped from the repo (must exist)
+          $assets = @(
+            "kenshi-online.mod",
+            "dist/Kenshi_MainMenu.layout",
+            "dist/Kenshi_MultiplayerPanel.layout",
+            "dist/Kenshi_MultiplayerHUD.layout",
+            "dist/server.json",
+            "dist/JOINING.md",
+            "dist/uninstall.bat",
+            "install.bat"
+          )
+          foreach ($f in $assets) {
+            if (-not (Test-Path $f)) { throw "Missing asset: $f" }
+            Copy-Item $f $stage
+          }
+
+          Get-ChildItem $stage | Format-Table Name, Length
+
+      - name: Zip release payload
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.tag_name }}") -eq $false) {
+            $tag = "${{ inputs.tag_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($tag) -or $tag -eq "main") {
+            $tag = "dev-$(Get-Date -Format yyyyMMdd-HHmmss)"
+          }
+          $zip = "Kenshi-Online-$tag.zip"
+          # Zip the folder itself so extraction creates a Kenshi-Online/ dir
+          # rather than dumping files into wherever the user extracted.
+          Compress-Archive -Path "release/Kenshi-Online" -DestinationPath $zip -Force
+          "ZIP_NAME=$zip"  | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZIP_PATH=$zip"  | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}
+          name: ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: ${{ env.ZIP_PATH }}
+          fail_on_unmatched_files: true
