@@ -63,19 +63,38 @@ jobs:
               ENetEvent ev;
               // Wait up to 4000ms for ENET_EVENT_TYPE_CONNECT
               int rc = enet_host_service(client, &ev, 4000);
-              if (rc > 0 && ev.type == ENET_EVENT_TYPE_CONNECT) {
-                  printf("[probe] OK — server answered handshake. Port forward works.\n");
-                  enet_peer_disconnect_now(peer, 0);
+              if (rc <= 0 || ev.type != ENET_EVENT_TYPE_CONNECT) {
+                  printf("[probe] FAIL — no CONNECT_VERIFY within 4s. rc=%d type=%d\n",
+                         rc, rc > 0 ? (int)ev.type : -1);
+                  enet_peer_reset(peer);
                   enet_host_destroy(client);
                   enet_deinitialize();
-                  return 0;
+                  return 1;
               }
-              printf("[probe] FAIL — no CONNECT_VERIFY within 4s. rc=%d type=%d\n",
-                     rc, rc > 0 ? (int)ev.type : -1);
-              enet_peer_reset(peer);
+              printf("[probe] OK — server answered handshake. Port forward works.\n");
+              printf("[probe] holding connection for 2s so the server logs us...\n");
+              fflush(stdout);
+
+              // Hold for 2s, pumping events so the server's ENET_EVENT_TYPE_CONNECT
+              // fires and HandleConnect logs the incoming peer.
+              for (int i = 0; i < 4; ++i) {
+                  enet_host_service(client, &ev, 500);
+                  if (ev.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(ev.packet);
+              }
+
+              // Graceful disconnect (server logs HandleDisconnect too)
+              enet_peer_disconnect(peer, 0);
+              for (int i = 0; i < 6; ++i) {
+                  if (enet_host_service(client, &ev, 500) > 0
+                      && ev.type == ENET_EVENT_TYPE_DISCONNECT) {
+                      printf("[probe] disconnected cleanly.\n");
+                      break;
+                  }
+                  if (ev.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(ev.packet);
+              }
               enet_host_destroy(client);
               enet_deinitialize();
-              return 1;
+              return 0;
           }
           EOF
           gcc probe.c -o probe -lenet
