@@ -244,6 +244,47 @@ void TickOnce() {
         if (sc.score > bestScan.score) bestScan = sc;
     }
 
+    // ── Offset hunt ──
+    // If we found a strong GameWorld candidate but +0x700 is garbage, the
+    // layout shifted from 1.0.51 → 1.0.68. Dump every 4-byte float in a
+    // ±0x300 window around the documented offset that looks like a sane
+    // game-speed value. The user runs the game at 1× → list narrows to
+    // candidates near 1.0f. They press 2× → re-run, the slot whose value
+    // jumped to 2.0f is frameSpeedMult.
+    auto huntFloats = [&](const Candidate& c, const char* label) {
+        if (!c.gw || c.score < 4) return;
+        spdlog::info("speed_probe[hunt {}]: dumping float candidates around "
+                     "+0x700 in 0x{:X}", label, c.gw);
+        constexpr std::ptrdiff_t kHuntWindow = 0x300;
+        constexpr std::ptrdiff_t kHuntStart  = kOff_FrameSpeedMult - kHuntWindow;
+        constexpr std::ptrdiff_t kHuntEnd    = kOff_FrameSpeedMult + kHuntWindow;
+        int found = 0;
+        for (std::ptrdiff_t off = kHuntStart; off + 4 <= kHuntEnd; off += 4) {
+            float f;
+            if (!SafeRead(reinterpret_cast<const void*>(c.gw + off), f)) continue;
+            // Sane game-speed range, plus a "looks like 1.0f / 2.0f / etc." check.
+            if (!(f > 0.04f && f < 10.0f)) continue;
+            // Skip values that are clearly not multipliers (e.g. random ratios).
+            // A speed mult is almost always 1.0, 0.5, 2.0, 3.0, 5.0 etc., or an
+            // int-like value with at most 2 decimal places. Cheap filter:
+            // |f - round(f*10)/10| < 0.01.
+            float rounded = static_cast<float>(static_cast<int>(f * 10.0f + 0.5f)) / 10.0f;
+            bool nice = (f - rounded < 0.01f) && (rounded - f < 0.01f);
+            if (!nice) continue;
+            spdlog::info("speed_probe[hunt {}]:   +0x{:X}  = {:.4f}",
+                         label, off, f);
+            ++found;
+        }
+        spdlog::info("speed_probe[hunt {}]: {} sane-looking float(s) found in "
+                     "[+0x{:X} .. +0x{:X}]",
+                     label, found,
+                     static_cast<unsigned>(kOff_FrameSpeedMult - kHuntWindow),
+                     static_cast<unsigned>(kOff_FrameSpeedMult + kHuntWindow));
+    };
+    huntFloats(bestScan, "scan");
+    huntFloats(caseA, "A");
+    huntFloats(caseB, "B");
+
     // Verdict — explicit so the next person reading doesn't squint at scores.
     auto winner = [](const Candidate& c) { return c.gw && c.score >= 4; };
     if (winner(caseA)) {
