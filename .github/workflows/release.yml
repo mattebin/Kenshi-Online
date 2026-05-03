@@ -87,11 +87,49 @@ jobs:
           "ZIP_NAME=$zip"  | Out-File -FilePath $env:GITHUB_ENV -Append
           "ZIP_PATH=$zip"  | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Upload workflow artifact
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.tag_name }}") -eq $false) {
+            $tag = "${{ inputs.tag_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($tag) -or $tag -eq "main") {
+            $tag = "dev-$(Get-Date -Format yyyyMMdd-HHmmss)"
+          }
+          # Strip a leading 'v' for the AppVersion field; Inno is happy with anything else.
+          $version = $tag -replace '^v',''
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup not found at $iscc" }
+
+          & $iscc /Qp `
+            "/DSourceDir=release\Kenshi-Online" `
+            "/DAppVersion=$version" `
+            installer\KenshiMP.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          # ISCC writes KenshiMP-Setup.exe into installer\OutputDir which we set to '.'.
+          $built = "installer\KenshiMP-Setup.exe"
+          if (-not (Test-Path $built)) { throw "Installer .exe not produced" }
+
+          $exe = "KenshiMP-Setup-$tag.exe"
+          Copy-Item $built $exe -Force
+          "EXE_NAME=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "EXE_PATH=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload workflow artifact (zip)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      - name: Upload workflow artifact (installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EXE_NAME }}
+          path: ${{ env.EXE_PATH }}
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -103,5 +141,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: ${{ env.ZIP_PATH }}
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.EXE_PATH }}
           fail_on_unmatched_files: true
