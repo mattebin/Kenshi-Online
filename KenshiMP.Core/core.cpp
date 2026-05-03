@@ -2307,10 +2307,8 @@ void Core::OnGameTick(float deltaTime) {
     // send packets until a live source is proven.
     kmp::host_game_speed::Tick(deltaTime);
 
-    // Read-only RE_Kenshi-derived layout probe. Off by default; opt in by
-    // setting KMP_SPEED_PROBE=1 in the environment before launching Kenshi.
-    // Logs once and becomes a no-op forever after. Safe to leave compiled in.
-    kmp::speed_probe::TickOnce();
+    // (speed_probe is now driven from render_hooks::HookPresent so it can
+    // fire even when the user hasn't connected yet — see speed_probe.h.)
 
     // Deferred install of GameWorld dtor hook — needs the singleton instance
     // to exist (only valid after the user loads a save). Polls every ~120

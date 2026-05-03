@@ -2,6 +2,7 @@
 #include "../core.h"
 #include "entity_hooks.h"
 #include "input_hooks.h"
+#include "../sys/speed_probe.h"
 #include "../ui/mygui_bridge.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
@@ -491,6 +492,12 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
         // NativeHud handles all display
         SEH_NativeHudUpdate();
     }
+
+    // ── Read-only speed/time layout probe (env-gated, one-shot) ──
+    // Fires once when GameWorld resolves; no-op forever after. Off unless
+    // KMP_SPEED_PROBE=1 is set. Driven from here instead of OnGameTick so
+    // it works without a server connection.
+    kmp::speed_probe::TickOnce();
 
     // ── Lazy MyGUI input-swallow install ──
     // input_hooks::Install() (OIS gate) ran during Core::InitHooks. The MyGUI
