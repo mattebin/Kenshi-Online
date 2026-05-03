@@ -151,7 +151,7 @@ No vcpkg needed -- all dependencies are bundled as git submodules.
 ### One-Click Build
 
 ```bash
-git clone --recursive https://github.com/yourname/Kenshi-Online.git
+git clone --recursive https://github.com/mattebin/Kenshi-Online.git
 cd Kenshi-Online
 build.bat
 ```
@@ -179,7 +179,7 @@ Set configuration to **Release** and build.
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/yourname/Kenshi-Online.git
+git clone --recursive https://github.com/mattebin/Kenshi-Online.git
 cd Kenshi-Online
 
 # If you forgot --recursive:

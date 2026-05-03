@@ -98,8 +98,9 @@ target_compile_definitions(KenshiMP.Core PRIVATE KMP_EXPORTS)
 # Generate MAP file for crash debugging
 target_link_options(KenshiMP.Core PRIVATE /MAP)
 
-# Auto-copy DLL to Kenshi game directory so Ogre can load it as a plugin
-set(KENSHI_DIR "${CMAKE_SOURCE_DIR}/..")
+# Auto-copy DLL to Kenshi game directory so Ogre can load it as a plugin.
+set(KENSHI_DIR "${CMAKE_SOURCE_DIR}/.." CACHE PATH "Path to Kenshi install directory")
+get_filename_component(KENSHI_DIR "${KENSHI_DIR}" ABSOLUTE)
 if(EXISTS "${KENSHI_DIR}/kenshi_x64.exe")
     add_custom_command(TARGET KenshiMP.Core POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -121,4 +122,6 @@ if(EXISTS "${KENSHI_DIR}/kenshi_x64.exe")
             )
         endif()
     endforeach()
+else()
+    message(WARNING "KENSHI_DIR does not contain kenshi_x64.exe: ${KENSHI_DIR}. Skipping KenshiMP.Core auto-deploy.")
 endif()
