@@ -1,0 +1,85 @@
+name: Port Forward Test
+
+# Triggers an ENet handshake against a public IP:port from a GitHub Actions
+# runner (Azure-hosted, real public IP). This is a definitive external
+# reachability test — no NAT loopback, no Windows weak-host issues.
+#
+# Run from the repo's Actions tab → "Port Forward Test" → "Run workflow".
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ip:
+        description: 'Public IP to test'
+        required: true
+        default: '31.208.67.17'
+      target_port:
+        description: 'UDP port to test'
+        required: true
+        default: '27800'
+
+jobs:
+  probe:
+    name: ENet handshake from cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Show target
+        run: |
+          echo "Target: ${{ inputs.target_ip }}:${{ inputs.target_port }}"
+
+      - name: Install ENet C library + build probe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libenet-dev gcc
+          cat > probe.c <<'EOF'
+          // Minimal ENet probe. Connects to target, waits up to 4s for the
+          // server to ACK with CONNECT_VERIFY. Exit 0 = port is open and an
+          // ENet server answered. Exit 1 = no response (closed/filtered).
+          #include <enet/enet.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <stdlib.h>
+
+          int main(int argc, char** argv) {
+              if (argc != 3) { fprintf(stderr, "usage: %s <ip> <port>\n", argv[0]); return 2; }
+              if (enet_initialize() != 0) { fprintf(stderr, "enet init failed\n"); return 2; }
+
+              ENetHost* client = enet_host_create(NULL, 1, 2, 0, 0);
+              if (!client) { fprintf(stderr, "host create failed\n"); return 2; }
+
+              ENetAddress addr;
+              if (enet_address_set_host(&addr, argv[1]) != 0) {
+                  fprintf(stderr, "address resolve failed for %s\n", argv[1]);
+                  return 2;
+              }
+              addr.port = (enet_uint16)atoi(argv[2]);
+
+              printf("[probe] connecting to %s:%u ...\n", argv[1], addr.port);
+              ENetPeer* peer = enet_host_connect(client, &addr, 2, 0);
+              if (!peer) { fprintf(stderr, "connect call failed\n"); return 2; }
+
+              ENetEvent ev;
+              // Wait up to 4000ms for ENET_EVENT_TYPE_CONNECT
+              int rc = enet_host_service(client, &ev, 4000);
+              if (rc > 0 && ev.type == ENET_EVENT_TYPE_CONNECT) {
+                  printf("[probe] OK — server answered handshake. Port forward works.\n");
+                  enet_peer_disconnect_now(peer, 0);
+                  enet_host_destroy(client);
+                  enet_deinitialize();
+                  return 0;
+              }
+              printf("[probe] FAIL — no CONNECT_VERIFY within 4s. rc=%d type=%d\n",
+                     rc, rc > 0 ? (int)ev.type : -1);
+              enet_peer_reset(peer);
+              enet_host_destroy(client);
+              enet_deinitialize();
+              return 1;
+          }
+          EOF
+          gcc probe.c -o probe -lenet
+
+      - name: Run probe
+        run: |
+          ./probe "${{ inputs.target_ip }}" "${{ inputs.target_port }}"
