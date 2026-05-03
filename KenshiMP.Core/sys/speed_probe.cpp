@@ -23,11 +23,10 @@ constexpr std::ptrdiff_t kOff_GameResetting  = 0x8BA;  // bool
 constexpr std::ptrdiff_t kOff_AudioThread    = 0x8C0;  // AudioSystemGlobal*
 constexpr std::ptrdiff_t kOff_SteamEnabled   = 0x4F0;  // bool
 
-// Float-search window: ±0x800 around the documented offset. On 1.0.68 the
-// layout shifted from 1.0.51 so the real frameSpeedMult is somewhere in this
-// range — we find it by watching for a slot whose value changes.
-constexpr std::ptrdiff_t kHuntStart = kOff_FrameSpeedMult - 0x800;  // -0x100
-constexpr std::ptrdiff_t kHuntEnd   = kOff_FrameSpeedMult + 0x800;  //  0xF00
+// Float-search window: scan the entire first 0x1000 bytes of GameWorld so we
+// don't miss frameSpeedMult if its offset shifted by a lot in 1.0.68.
+constexpr std::ptrdiff_t kHuntStart = 0x000;
+constexpr std::ptrdiff_t kHuntEnd   = 0x1000;
 
 // Background thread cadence — 1 ms / 1 kHz, per "fire every milisec".
 constexpr auto kPollInterval = std::chrono::milliseconds(1);
@@ -89,6 +88,21 @@ bool LooksLikeGameWorld(uintptr_t gw, HMODULE kenshiMod) {
     return paused <= 1;
 }
 
+// PRIMARY: Kenshi exports the global GameWorld* (`ou`) as a mangled symbol.
+// KenshiLib's symbols.asm shows the export name and confirms the RVA on
+// 1.0.51 was 0x2131020; on 1.0.68 the RVA may have shifted, but the export
+// name is stable across builds.
+uintptr_t ResolveOuExport(HMODULE kenshiMod) {
+    if (!kenshiMod) return 0;
+    auto addr = reinterpret_cast<uintptr_t>(
+        GetProcAddress(kenshiMod, "?ou@@3PEAVGameWorld@@EA"));
+    if (addr == 0) return 0;
+    // The export points at the static slot. Read the pointer it holds.
+    uintptr_t gw = 0;
+    if (!SafeRead(reinterpret_cast<const void*>(addr), gw)) return 0;
+    return gw;
+}
+
 uintptr_t ScanForGameWorld(HMODULE kenshiMod) {
     if (!kenshiMod) return 0;
     auto base = reinterpret_cast<uintptr_t>(kenshiMod);
@@ -135,9 +149,19 @@ bool LooksLikeSpeedValue(float v) {
 
 void ProbeThread() {
     HMODULE kenshiMod = GetModuleHandleA(nullptr);
+
+    // Try the export FIRST — definitive answer if it works.
+    {
+        auto exportSlot = reinterpret_cast<uintptr_t>(
+            GetProcAddress(kenshiMod, "?ou@@3PEAVGameWorld@@EA"));
+        spdlog::info("speed_probe: export '?ou@@3PEAVGameWorld@@EA' = 0x{:X}",
+                     exportSlot);
+    }
+
     spdlog::info("speed_probe: background thread started (poll every {} ms, "
-                 "kenshi base=0x{:X}, window=±0x800 around +0x700)",
-                 (long)kPollInterval.count(), (uintptr_t)kenshiMod);
+                 "kenshi base=0x{:X}, window=+0x{:X}..+0x{:X})",
+                 (long)kPollInterval.count(), (uintptr_t)kenshiMod,
+                 (long)kHuntStart, (long)kHuntEnd);
 
     std::vector<float> prev(kWindowFloats, NAN);
     std::vector<float> curr(kWindowFloats, NAN);
@@ -146,14 +170,25 @@ void ProbeThread() {
     while (!s_stopRequested.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(kPollInterval);
 
-        // 1. Acquire GameWorld pointer (rescan periodically until found).
+        // 1. Acquire GameWorld pointer.
+        //    a) Resolve via Kenshi's exported `ou` symbol (works on any build
+        //       that didn't change the C++ name).
+        //    b) Re-validate the cached pointer; if it failed, fall back to
+        //       the .data scan.
         uintptr_t gw = s_cachedGw.load(std::memory_order_acquire);
-        if (gw == 0 || !LooksLikeGameWorld(gw, kenshiMod)) {
+        uintptr_t fromExport = ResolveOuExport(kenshiMod);
+        if (fromExport && fromExport != gw) {
+            spdlog::info("speed_probe: GameWorld via 'ou' export = 0x{:X} "
+                         "(was 0x{:X})", fromExport, gw);
+            s_cachedGw.store(fromExport, std::memory_order_release);
+            havePrev = false;
+            gw = fromExport;
+        } else if (gw == 0 || !LooksLikeGameWorld(gw, kenshiMod)) {
             uintptr_t found = ScanForGameWorld(kenshiMod);
             if (found != gw) {
                 if (found) {
-                    spdlog::info("speed_probe: GameWorld discovered at 0x{:X}", found);
-                    havePrev = false; // reset diff state on new pointer
+                    spdlog::info("speed_probe: GameWorld via .data scan = 0x{:X}", found);
+                    havePrev = false;
                 }
                 s_cachedGw.store(found, std::memory_order_release);
             }
