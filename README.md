@@ -12,10 +12,10 @@ Latest stable build for **Kenshi 1.0.68 (Steam, Newland)**:
 
 > **[Download the latest release](https://github.com/mattebin/Kenshi-Online/releases/latest)** → grab `KenshiMP-stability-1.0.68.zip`.
 
-1. Quit Steam fully (system tray → Exit).
+1. Make sure Kenshi isn't running (Steam can stay open).
 2. Locate your Kenshi install folder (right-click Kenshi in Steam → Manage → Browse local files).
 3. Extract the zip into that folder. It adds `KenshiMP.Core.dll`, `KenshiMP.Server.exe`, `KenshiMP.Injector.exe`, the Multiplayer UI layouts under `data\gui\layout\`, and a `server.json` template.
-4. Restart Steam, launch Kenshi normally.
+4. Launch Kenshi normally from Steam.
 5. **Joining a friend**: in the main menu, click the new "Multiplayer" button. Enter the host's IP and port (default `27800`), pick a player name, hit Connect.
 6. **Hosting locally**: run `KenshiMP.Server.exe` once. It listens on `0.0.0.0:27800`.
    - **Same network (LAN)**: friends connect to your local IP (run `ipconfig` in cmd → `IPv4 Address`, usually `192.168.x.x`) on port `27800`. No router config needed.
