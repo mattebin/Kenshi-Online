@@ -1125,23 +1125,37 @@ bool Install() {
     {
         uintptr_t modBase = Memory::GetModuleBase();
 
-        auto validateFactoryFunc = [](uintptr_t addr, const char* name) -> bool {
-            // .pdata validation — confirms this is a real function entry point
+        // Returns the address to use (recovered via .pdata if mid-function),
+        // or 0 if invalid/unreadable.
+        //
+        // 2026-05-04 host+Kenny logs: the historic 1.0.51-derived RVAs
+        // 0x583400 / 0x5836E0 fall MID-FUNCTION on at least one shipping
+        // 1.0.68 exe (both inside the same parent at +0x480 and +0x760 on
+        // Kenny's build, suggesting Kenshi inlined both factory entries
+        // into one bigger function). Even on builds where the bytes at
+        // 0x583400 happened to look like a valid prologue, the host log
+        // shows FactoryCreate never actually fired. Prior behavior was to
+        // SKIP on mid-function which left the spawn system permanently
+        // unready. New behavior: walk to the .pdata-reported real start
+        // and use that address. .pdata is authoritative — it's the same
+        // table Windows uses for SEH unwinding.
+        auto validateFactoryFunc = [](uintptr_t addr, const char* name) -> uintptr_t {
+            uintptr_t target = addr;
             DWORD64 imageBase = 0;
             auto* rtFunc = RtlLookupFunctionEntry(
                 static_cast<DWORD64>(addr), &imageBase, nullptr);
             if (rtFunc) {
                 uintptr_t funcStart = static_cast<uintptr_t>(imageBase) + rtFunc->BeginAddress;
                 if (funcStart != addr) {
-                    spdlog::error("entity_hooks: {} at 0x{:X} is MID-FUNCTION "
-                                  "(real start 0x{:X}, offset +0x{:X}) — SKIPPING",
-                                  name, addr, funcStart, addr - funcStart);
-                    return false;
+                    spdlog::warn("entity_hooks: {} at 0x{:X} is MID-FUNCTION "
+                                 "(real start 0x{:X}, offset +0x{:X}) — RECOVERING "
+                                 "to real start",
+                                 name, addr, funcStart, addr - funcStart);
+                    target = funcStart;
                 }
             }
-            // Prologue byte check — verify it looks like a function start
             __try {
-                auto* p = reinterpret_cast<const uint8_t*>(addr);
+                auto* p = reinterpret_cast<const uint8_t*>(target);
                 bool validPrologue =
                     (p[0] == 0x48 && p[1] == 0x8B && p[2] == 0xC4) || // mov rax, rsp
                     (p[0] == 0x48 && p[1] == 0x89)                  || // mov [rsp+xx], reg
@@ -1150,23 +1164,26 @@ bool Install() {
                     (p[0] == 0x40 && p[1] >= 0x53 && p[1] <= 0x57)  || // push r64
                     (p[0] == 0x55);                                     // push rbp
                 spdlog::info("entity_hooks: {} at 0x{:X} prologue: {:02X} {:02X} {:02X} {}",
-                             name, addr, p[0], p[1], p[2],
+                             name, target, p[0], p[1], p[2],
                              validPrologue ? "[OK]" : "[UNUSUAL]");
                 if (!validPrologue) {
                     spdlog::warn("entity_hooks: {} has unexpected prologue — may crash on call", name);
                 }
-                return true; // Don't block on unusual prologue — SEH catches crashes
+                return target;
             } __except (EXCEPTION_EXECUTE_HANDLER) {
-                spdlog::error("entity_hooks: {} at 0x{:X} — cannot read memory", name, addr);
-                return false;
+                spdlog::error("entity_hooks: {} at 0x{:X} — cannot read memory", name, target);
+                return 0;
             }
         };
 
         // RootObjectFactory::create — the dispatcher called by 11 game systems.
         uintptr_t createAddr = modBase + 0x583400;
-        if (validateFactoryFunc(createAddr, "FactoryCreate")) {
-            s_factoryCreate = reinterpret_cast<CharacterCreateFn>(createAddr);
-            spdlog::info("entity_hooks: FactoryCreate VALIDATED at 0x{:X}", createAddr);
+        uintptr_t resolvedCreate = validateFactoryFunc(createAddr, "FactoryCreate");
+        if (resolvedCreate) {
+            s_factoryCreate = reinterpret_cast<CharacterCreateFn>(resolvedCreate);
+            spdlog::info("entity_hooks: FactoryCreate VALIDATED at 0x{:X}{}",
+                         resolvedCreate,
+                         resolvedCreate != createAddr ? " (recovered)" : "");
         } else {
             spdlog::warn("entity_hooks: FactoryCreate at 0x{:X} FAILED validation — "
                          "mod template spawn disabled, will use createRandomChar or NPC hijack",
@@ -1175,20 +1192,35 @@ bool Install() {
 
         // RootObjectFactory::createRandomChar — creates random NPC character.
         uintptr_t createRandomAddr = modBase + 0x5836E0;
-        if (validateFactoryFunc(createRandomAddr, "CreateRandomChar")) {
-            s_factoryCreateRandomChar = reinterpret_cast<CharacterCreateFn>(createRandomAddr);
-            spdlog::info("entity_hooks: CreateRandomChar VALIDATED at 0x{:X}", createRandomAddr);
+        uintptr_t resolvedCreateRandom = validateFactoryFunc(createRandomAddr, "CreateRandomChar");
+        // If the random-char path resolves to the exact same function as
+        // FactoryCreate, the engine inlined them on this build. Use the
+        // shared function for both — the dispatcher will route by arg
+        // count or some flag inside the function.
+        if (resolvedCreateRandom && resolvedCreate
+            && resolvedCreateRandom == resolvedCreate) {
+            spdlog::warn("entity_hooks: FactoryCreate and CreateRandomChar resolve to "
+                         "the same function 0x{:X} — engine appears to have inlined both. "
+                         "Using shared entry for both spawn paths.", resolvedCreate);
+            s_factoryCreateRandomChar = reinterpret_cast<CharacterCreateFn>(resolvedCreateRandom);
+        } else if (resolvedCreateRandom) {
+            s_factoryCreateRandomChar = reinterpret_cast<CharacterCreateFn>(resolvedCreateRandom);
+            spdlog::info("entity_hooks: CreateRandomChar VALIDATED at 0x{:X}{}",
+                         resolvedCreateRandom,
+                         resolvedCreateRandom != createRandomAddr ? " (recovered)" : "");
         } else {
             spdlog::warn("entity_hooks: CreateRandomChar at 0x{:X} FAILED validation — "
                          "random char fallback disabled, will rely on NPC hijack only",
                          createRandomAddr);
         }
 
-        // Store in GameFunctions for other subsystems
+        // Store in GameFunctions for other subsystems — must use the RESOLVED
+        // address (post .pdata recovery) so downstream callers don't dispatch
+        // to the original mid-function pointer.
         core.GetGameFunctions().FactoryCreate = reinterpret_cast<void*>(
-            s_factoryCreate ? createAddr : 0);
+            s_factoryCreate ? resolvedCreate : 0);
         core.GetGameFunctions().CreateRandomChar = reinterpret_cast<void*>(
-            s_factoryCreateRandomChar ? createRandomAddr : 0);
+            s_factoryCreateRandomChar ? resolvedCreateRandom : 0);
     }
 
     if (funcs.CharacterSpawn) {
