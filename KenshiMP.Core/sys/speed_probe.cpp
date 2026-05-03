@@ -22,7 +22,16 @@ constexpr std::ptrdiff_t kOff_GameResetting      = 0x8BA;  // bool
 constexpr std::ptrdiff_t kOff_AudioThread        = 0x8C0;  // AudioSystemGlobal*
 constexpr std::ptrdiff_t kOff_SteamEnabled       = 0x4F0;  // bool
 
-std::atomic<bool> s_logged{false};
+// One-shot for the initial scan. After that we poll periodically.
+std::atomic<bool> s_loggedInitial{false};
+// Cached GameWorld pointer once we've found a strong candidate.
+std::atomic<uintptr_t> s_cachedGw{0};
+// Last frame we polled (we throttle to one poll per ~60 Present frames).
+std::atomic<uint32_t> s_pollCounter{0};
+// Cap how many "value changed" emissions we log — once we've seen the speed
+// move 20 times, the slot is identified and we stop spamming.
+std::atomic<int> s_changeEmissions{0};
+constexpr int kChangeEmissionCap = 20;
 
 // Read with a SEH guard; returns false on access violation.
 template <typename T>
@@ -193,15 +202,88 @@ void EmitLog(const char* label, const Candidate& c) {
 
 } // namespace
 
-void TickOnce() {
-    if (s_logged.load(std::memory_order_acquire)) return;
+// Snapshot every "interesting" float (in [0.04, 10.0]) within ±0x800 of where
+// frameSpeedMult used to live in 1.0.51. Returns the (offset, value) pairs.
+struct FloatHit { std::ptrdiff_t off; float value; };
+std::vector<FloatHit> SnapshotFloats(uintptr_t gw) {
+    std::vector<FloatHit> out;
+    if (!gw) return out;
+    constexpr std::ptrdiff_t kHuntWindow = 0x800;
+    for (std::ptrdiff_t off = kOff_FrameSpeedMult - kHuntWindow;
+         off + 4 <= kOff_FrameSpeedMult + kHuntWindow; off += 4) {
+        float f;
+        if (!SafeRead(reinterpret_cast<const void*>(gw + off), f)) continue;
+        if (!(f > 0.04f && f < 10.0f)) continue;
+        out.push_back({off, f});
+    }
+    return out;
+}
 
+void TickOnce() {
     char buf[8];
     DWORD len = GetEnvironmentVariableA("KMP_SPEED_PROBE", buf, sizeof(buf));
     if (len == 0) return; // not opted in
 
+    // Throttle: only do work every ~60 Present frames after the initial scan.
+    uint32_t cnt = s_pollCounter.fetch_add(1, std::memory_order_relaxed);
+    if (s_loggedInitial.load(std::memory_order_acquire) && (cnt % 60) != 0) {
+        return;
+    }
+
     HMODULE kenshiMod = GetModuleHandleA(nullptr);
     uintptr_t slot = game::GetResolvedGameWorld();
+
+    // ── Polling phase ──────────────────────────────────────────────────────
+    if (s_loggedInitial.load(std::memory_order_acquire)) {
+        uintptr_t gw = s_cachedGw.load(std::memory_order_acquire);
+        if (gw == 0) return;
+        // Re-validate: GameWorld might have moved (it shouldn't, but cheap to check).
+        Candidate c{};
+        if (!ProbeAt(gw, kenshiMod, c)) return;
+
+        // Track per-offset last value so we only log when something actually
+        // changed. The map lives in a static — small (<= a few hundred entries)
+        // and only present when the env var is set.
+        static std::vector<FloatHit> lastSnapshot;
+        auto current = SnapshotFloats(gw);
+
+        // Build a quick lookup of last-by-offset.
+        auto findLast = [](std::ptrdiff_t off) -> float* {
+            for (auto& h : lastSnapshot) if (h.off == off) return &h.value;
+            return nullptr;
+        };
+
+        std::vector<FloatHit> changes;
+        for (const auto& h : current) {
+            float* prev = findLast(h.off);
+            if (!prev) {
+                // New offset entered the sane range — interesting.
+                changes.push_back(h);
+            } else if (*prev != h.value) {
+                changes.push_back(h);
+                *prev = h.value;
+            }
+        }
+        // Add any entirely-new offsets to the cache.
+        for (const auto& h : current) {
+            if (!findLast(h.off)) lastSnapshot.push_back(h);
+        }
+
+        if (!changes.empty()
+            && s_changeEmissions.fetch_add(1, std::memory_order_relaxed) < kChangeEmissionCap) {
+            spdlog::info("=== KMP SPEED_PROBE (poll) ===");
+            spdlog::info("speed_probe[poll]: gw=0x{:X} {} float(s) changed/new "
+                         "in window:", gw, changes.size());
+            for (const auto& h : changes) {
+                spdlog::info("speed_probe[poll]:   +0x{:X}  = {:.4f}",
+                             h.off, h.value);
+            }
+            spdlog::info("=== KMP SPEED_PROBE (poll) END ===");
+        }
+        return;
+    }
+
+    // ── Initial scan phase (runs exactly once) ─────────────────────────────
 
     spdlog::info("=== KMP SPEED_PROBE BEGIN ===");
     spdlog::info("speed_probe: existing resolver slot = 0x{:X}", slot);
@@ -301,9 +383,29 @@ void TickOnce() {
                      "A={}/5 B={}/5 scan={}/5. Layout may have shifted.",
                      caseA.score, caseB.score, bestScan.score);
     }
+    // Cache the winning GameWorld so the polling phase can re-read it.
+    if (winner(caseA)) {
+        uintptr_t derefed = 0;
+        if (SafeRead(reinterpret_cast<const void*>(slot), derefed))
+            s_cachedGw.store(derefed, std::memory_order_release);
+    } else if (winner(caseB)) {
+        s_cachedGw.store(slot, std::memory_order_release);
+    } else if (winner(bestScan)) {
+        s_cachedGw.store(bestScan.gw, std::memory_order_release);
+    }
+
+    if (s_cachedGw.load(std::memory_order_acquire) != 0) {
+        spdlog::info("speed_probe: polling enabled — will re-emit when any "
+                     "float in [+0x{:X}..+0x{:X}] changes (cap {} emissions). "
+                     "Press 1/2/3/etc in-game to surface frameSpeedMult.",
+                     static_cast<unsigned>(kOff_FrameSpeedMult - 0x800),
+                     static_cast<unsigned>(kOff_FrameSpeedMult + 0x800),
+                     kChangeEmissionCap);
+    }
+
     spdlog::info("=== KMP SPEED_PROBE END ===");
 
-    s_logged.store(true, std::memory_order_release);
+    s_loggedInitial.store(true, std::memory_order_release);
 }
 
 } // namespace kmp::speed_probe
