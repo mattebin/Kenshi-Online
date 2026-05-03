@@ -82,9 +82,12 @@ jobs:
           if ([string]::IsNullOrWhiteSpace("${{ inputs.tag_name }}") -eq $false) {
             $tag = "${{ inputs.tag_name }}"
           }
-          if ([string]::IsNullOrWhiteSpace($tag) -or $tag -eq "main") {
+          if ([string]::IsNullOrWhiteSpace($tag) -or $tag -eq "main" -or $tag -match '[/\\]') {
             $tag = "dev-$(Get-Date -Format yyyyMMdd-HHmmss)"
           }
+          # Sanitize for use as a filename: keep alnum, dash, dot, underscore.
+          $tag = ($tag -replace '[^A-Za-z0-9._-]', '-')
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
           $zip = "Kenshi-Online-$tag.zip"
           # Zip the folder itself so extraction creates a Kenshi-Online/ dir
           # rather than dumping files into wherever the user extracted.
@@ -95,13 +98,10 @@ jobs:
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ([string]::IsNullOrWhiteSpace("${{ inputs.tag_name }}") -eq $false) {
-            $tag = "${{ inputs.tag_name }}"
-          }
-          if ([string]::IsNullOrWhiteSpace($tag) -or $tag -eq "main") {
-            $tag = "dev-$(Get-Date -Format yyyyMMdd-HHmmss)"
-          }
+          # Reuse the sanitized tag set by the Zip step so the installer and zip
+          # filenames stay in lock-step.
+          $tag = "$env:TAG"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "dev-$(Get-Date -Format yyyyMMdd-HHmmss)" }
           # Strip a leading 'v' for the AppVersion field; Inno is happy with anything else.
           $version = $tag -replace '^v',''
 
