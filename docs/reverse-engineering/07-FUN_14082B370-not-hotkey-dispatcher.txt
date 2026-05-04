@@ -1,0 +1,145 @@
+kenshi_x64.exe imageBase=0x140000000
+
+=== FUN_14082B370 (suspect hotkey dispatcher) ===
+body = 699 bytes
+
+/* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+
+undefined8 FUN_14082b370(longlong param_1)
+
+{
+  void *pvVar1;
+  char cVar2;
+  undefined8 uVar3;
+  ResourceManager *this;
+  longlong *plVar4;
+  ResourceGroupManager *this_00;
+  longlong *plVar5;
+  undefined1 auStack_68 [32];
+  void *local_48;
+  undefined8 local_40;
+  basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_> local_38;
+  undefined7 uStack_37;
+  undefined8 local_28;
+  ulonglong local_20;
+  ulonglong local_10;
+
+  local_40 = 0xfffffffffffffffe;
+  local_10 = DAT_1421173c8 ^ (ulonglong)auStack_68;
+  cVar2 = (**(code **)(**(longlong **)(param_1 + 0x28) + 0x200))();
+  if (cVar2 == '\0') {
+    (**(code **)(**(longlong **)(param_1 + 0x80) + 0x18))();
+    (**(code **)(**(longlong **)(param_1 + 0x78) + 0x18))();
+    if (*(longlong *)(param_1 + 0x70) == 0) {
+      if (DAT_142133320 != (longlong *)0x0) {
+        (**(code **)(*DAT_142133320 + 0x50))();
+      }
+      (**(code **)(*DAT_142133308 + 8))();
+      if (DAT_1421303d0 != 0) {
+        thunk_FUN_14066ff60(DAT_1421303d0,DAT_142133794);
+      }
+      if ((DAT_1421348a0 != 0) && (cVar2 = thunk_FUN_140785ec0(&DAT_142133490), cVar2 != '\0')) {
+        thunk_FUN_1403beeb0(DAT_1421348a0,DAT_142133794);
+      }
+      if (DAT_142133308[4] != 0) {
+        thunk_FUN_1408df7d0();
+      }
+      thunk_FUN_1409b22f0(&DAT_142135b70);
+    }
+    else {
+      cVar2 = (**(code **)(**(longlong **)(param_1 + 0x28) + 0x1c0))();
+      if (cVar2 != '\0') {
+        thunk_FUN_140913720(*(undefined8 *)(param_1 + 0x70));
+      }
+      cVar2 = thunk_FUN_140913620(*(undefined8 *)(param_1 + 0x70));
+      plVar5 = (longlong *)0x0;
+      if (cVar2 == '\x01') {
+        thunk_FUN_140870ae0(&DAT_142134110);
+        local_20 = 0xf;
+        local_28 = 0;
+        local_38 = (basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>)0x0
+        ;
+        thunk_FUN_140069d10(&local_38,"kenshi_fonts.xml",0x10);
+        this = MyGUI::Singleton<class_MyGUI::ResourceManager>::getInstancePtr();
+        MyGUI::ResourceManager::load(this,&local_38);
+        if (0xf < local_20) {
+          operator_delete((void *)CONCAT71(uStack_37,local_38));
+        }
+        local_48 = Ogre::AllocatedObject<class_Ogre::CategorisedAllocPolicy<0>_>::operator_new(0xf0)
+        ;
+        plVar4 = plVar5;
+        if (local_48 != (void *)0x0) {
+          plVar4 = (longlong *)thunk_FUN_140724af0(local_48);
+        }
+      }
+      else {
+        cVar2 = thunk_FUN_140913620(*(undefined8 *)(param_1 + 0x70));
+        plVar4 = DAT_1421345f0;
+        if ((cVar2 == '\x02') && (DAT_1421336a0 == '\0')) {
+          this_00 = Ogre::ResourceGroupManager::getSingleton();
+          Ogre::ResourceGroupManager::initialiseAllResourceGroups(this_00);
+          thunk_FUN_1403ea7b0(&DAT_142133490);
+          thunk_FUN_14038c680(DAT_1421345c8);
+          DAT_1421336a0 = '\x01';
+          plVar4 = DAT_1421345f0;
+        }
+      }
+      DAT_1421345f0 = plVar4;
+      cVar2 = thunk_FUN_140913610(*(undefined8 *)(param_1 + 0x70));
+      if (cVar2 != '\0') {
+        local_20 = 0xf;
+        local_28 = 0;
+        local_38 = (basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>)0x0
+        ;
+        thunk_FUN_140069d10(&local_38,"Starting Title Screen",0x15);
+        thunk_FUN_14017f6c0(&local_38,2);
+        if (0xf < local_20) {
+          operator_delete((void *)CONCAT71(uStack_37,local_38));
+        }
+        pvVar1 = *(void **)(param_1 + 0x70);
+        if (pvVar1 != (void *)0x0) {
+          thunk_FUN_1409136b0(pvVar1);
+          operator_delete(pvVar1);
+        }
+        *(undefined8 *)(param_1 + 0x70) = 0;
+        local_48 = Ogre::AllocatedObject<class_Ogre::CategorisedAllocPolicy<0>_>::operator_new(0xf0)
+        ;
+        if (local_48 != (void *)0x0) {
+          plVar5 = (longlong *)thunk_FUN_140918ef0(local_48);
+        }
+        DAT_142133320 = plVar5;
+        (**(code **)(*plVar5 + 0x10))(plVar5,1);
+      }
+    }
+    uVar3 = 1;
+  }
+  else {
+    uVar3 = 0;
+  }
+  return uVar3;
+}
+
+
+
+=== Strings referenced inside ===
+  'kenshi_fonts.xml'  at 0x14171C6F0
+  'Starting Title Screen'  at 0x14171C6D0
+
+=== Callees ===
+  RVA 0x69D10  (FUN_140069d10)  body 298 bytes
+  RVA 0x17F6C0  (FUN_14017f6c0)  body 553 bytes
+  RVA 0x38C680  (FUN_14038c680)  body 1895 bytes
+  RVA 0x3BEEB0  (FUN_1403beeb0)  body 160 bytes
+  RVA 0x3EA7B0  (FUN_1403ea7b0)  body 3074 bytes
+  RVA 0x66FF60  (FUN_14066ff60)  body 372 bytes
+  RVA 0x724AF0  (FUN_140724af0)  body 428 bytes
+  RVA 0x785EC0  (FUN_140785ec0)  body 5 bytes
+  RVA 0x82B370  (FUN_14082b370)  body 699 bytes
+  RVA 0x870AE0  (FUN_140870ae0)  body 5142 bytes
+  RVA 0x8DF7D0  (FUN_1408df7d0)  body 780 bytes
+  RVA 0x913610  (FUN_140913610)  body 10 bytes
+  RVA 0x913620  (FUN_140913620)  body 23 bytes
+  RVA 0x9136B0  (FUN_1409136b0)  body 103 bytes
+  RVA 0x913720  (FUN_140913720)  body 342 bytes
+  RVA 0x918EF0  (FUN_140918ef0)  body 4991 bytes
+  RVA 0x9B22F0  (FUN_1409b22f0)  body 3 bytes

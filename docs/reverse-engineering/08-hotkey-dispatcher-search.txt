@@ -1,0 +1,103 @@
+kenshi_x64.exe imageBase=0x140000000
+
+==============================================================================
+=== 1. RVA 0x22B370 (RE_Kenshi commit-text candidate)
+==============================================================================
+RVA 0x22B370 is INSIDE function FUN_14022b2c0 (entry RVA 0x22B2C0, body 859 bytes)
+Bytes at RVA 0x22B370:
+  3C 47 01 45 33 C9 48 8B CF E8 B1 58 DF FF 48 8D
+
+Decompile (first 80 lines):
+    
+    void FUN_14022b2c0(longlong param_1,longlong param_2)
+    
+    {
+      char cVar1;
+      char *_Str;
+      char *pcVar2;
+      uint uVar3;
+      int iVar4;
+      ulonglong local_res20;
+    
+      cVar1 = thunk_FUN_1402428a0(param_2,0x41);
+      if (cVar1 != '\0') {
+        thunk_FUN_140241d80(param_2,param_1 + 200,"swingAxis",0);
+        thunk_FUN_140241bf0(param_2,param_1 + 0xd4,"projectionDistance",0);
+        thunk_FUN_140217d20(param_1 + 0xd8,param_2,"twistLimit");
+        cVar1 = thunk_FUN_1402428a0(param_2,0x3b,"swingLimit");
+        if (cVar1 != '\0') {
+          thunk_FUN_140241bf0(param_2,param_1 + 0x110,"value",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x114,"restitution",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x118,"hardness",0);
+          thunk_FUN_1402421c0(param_2);
+        }
+        cVar1 = thunk_FUN_1402428a0(param_2,0x16,"twistSpring");
+        if (cVar1 != '\0') {
+          thunk_FUN_140241bf0(param_2,param_1 + 0x128,"spring",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 300,"damper",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x130,"targetValue",0);
+          thunk_FUN_1402421c0(param_2);
+        }
+        cVar1 = thunk_FUN_1402428a0(param_2,0x16,"swingSpring");
+        if (cVar1 != '\0') {
+          thunk_FUN_140241bf0(param_2,param_1 + 0x140,"spring",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x144,"damper",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x148,"targetValue",0);
+          thunk_FUN_1402421c0(param_2);
+        }
+        cVar1 = thunk_FUN_1402428a0(param_2,0x16,"jointSpring");
+        if (cVar1 != '\0') {
+          thunk_FUN_140241bf0(param_2,param_1 + 0x158,"spring",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x15c,"damper",0);
+          thunk_FUN_140241bf0(param_2,param_1 + 0x160,"targetValue",0);
+          thunk_FUN_1402421c0(param_2);
+        }
+        iVar4 = 0;
+        if (*(char *)(param_2 + 0x130) == '\0') {
+          cVar1 = thunk_FUN_1402428a0(param_2,0x40,"flags");
+          if (cVar1 != '\0') {
+            *(undefined4 *)(param_1 + 0x170) = 0;
+            uVar3 = 1;
+            do {
+              _Str = (char *)thunk_FUN_140211910(uVar3);
+              if (_Str == (char *)0x0) break;
+              pcVar2 = strstr(_Str,"DUMMY");
+              if (pcVar2 == (char *)0x0) {
+                local_res20 = local_res20 & 0xffffffff00000000;
+                thunk_FUN_140241aa0(param_2,&local_res20,_Str,0);
+                if ((int)local_res20 != 0) {
+                  *(uint *)(param_1 + 0x170) = *(uint *)(param_1 + 0x170) | uVar3;
+                }
+              }
+              iVar4 = iVar4 + 1;
+              uVar3 = uVar3 << 1 | (uint)((int)uVar3 < 0);
+            } while (iVar4 < 0x20);
+            thunk_FUN_1402421c0(param_2);
+          }
+        }
+        else {
+          thunk_FUN_140241b80(param_2,&local_res20,"flags",0);
+          *(int *)(param_1 + 0x170) = (int)local_res20;
+        }
+        if (*(char *)(param_2 + 0x130) == '\0') {
+          local_res20 = 0;
+          thunk_FUN_140241c60(param_2,&local_res20,"projectionMode",0);
+          thunk_FUN_140211630(local_res20,param_1 + 0x174);
+        }
+        else {
+          thunk_FUN_140241b80(param_2,&local_res20);
+          *(int *)(param_1 + 0x174) = (int)local_res20;
+        }
+
+==============================================================================
+=== 2. Callers of FUN_14082A3A0 (VK->Unicode helper)
+==============================================================================
+Direct callers: 0
+
+==============================================================================
+=== 3. Functions matching hotkey-dispatcher shape (heuristic)
+==============================================================================
+Pre-filter candidates (size 200..3000): 12824
+(Decompile will be slow; sampling first 200, then keeping top 10 by score.)
+
+Top hotkey-shape candidates (score, body, RVA):
