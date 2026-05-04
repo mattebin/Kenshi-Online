@@ -25,6 +25,8 @@ Latest stable build for **Kenshi 1.0.68 (Steam, Newland)**:
 
 **Known limit on 1.0.68:** game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See the release README for full troubleshooting.
 
+> **First time playing with someone?** Read [`docs/PLAYING_TOGETHER.md`](docs/PLAYING_TOGETHER.md) — step-by-step recipe for the join order (connect first, load save second), picking the same starting zone, and warming up the spawn pipeline so other players' characters render.
+
 For the technical details and what changed vs. upstream, keep reading.
 
 ---
