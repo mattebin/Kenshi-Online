@@ -38,6 +38,19 @@ static uintptr_t s_destroyTargetAddr = 0;
 static CharacterCreateFn  s_origCreate  = nullptr;
 static CharacterDestroyFn s_origDestroy = nullptr;
 
+// ── AddToUpdateListMain hook (Kenshi 1.0.68 spawn capture) ────────────────
+// RVA 0x787C70 on 1.0.68 — identified by Ghidra recon 2026-05-04.
+// Signature: void(GameWorld* this, Character* character)
+// 51-byte passthrough that wraps the unordered_set::insert into
+// GameWorld::charUpdateListMain at +0x750. EVERY character entering live
+// world state goes through this — factory-spawned, save-loaded,
+// recruited, all of it.
+using AddToUpdateListMainFn = void(__fastcall*)(void* gameWorld, void* character);
+static constexpr uintptr_t RVA_ADD_TO_UPDATE_LIST_MAIN = 0x787C70;
+static AddToUpdateListMainFn s_origAddToUpdateListMain = nullptr;
+static std::atomic<int>      s_totalAddToUpdateList{0};
+static std::atomic<uintptr_t> s_lastCharacterAdded{0};
+
 // s_rawTrampoline: MinHook's raw trampoline (starts with `mov rax, rsp`).
 // Used for REENTRANT calls to avoid corrupting the MovRaxRsp wrapper's global
 // data slots (captured_rsp, stub_rsp, saved_game_ret).
@@ -1089,6 +1102,42 @@ static void* BuildDirectCallStub(void* rawTrampoline) {
     return mem;
 }
 
+// ── AddToUpdateListMain hook implementation ───────────────────────────────
+//
+// Per-character pass-through. Logs the first 5 events for confirmation,
+// then samples (every 32 events) to avoid spamming the log when a zone
+// streams in 50+ NPCs at once. The s_lastCharacterAdded slot lets the sync
+// layer poll for "what was the last character added" without holding a
+// container of pointers (those need their own GC story).
+static void __fastcall Hook_AddToUpdateListMain(void* gameWorld, void* character) {
+    int n = s_totalAddToUpdateList.fetch_add(1, std::memory_order_relaxed);
+    s_lastCharacterAdded.store(reinterpret_cast<uintptr_t>(character),
+                               std::memory_order_relaxed);
+    if (n < 5 || (n % 32) == 0) {
+        spdlog::info(
+            "entity_hooks: AddToUpdateListMain #{} gw=0x{:X} char=0x{:X}",
+            n, reinterpret_cast<uintptr_t>(gameWorld),
+            reinterpret_cast<uintptr_t>(character));
+    }
+
+    if (s_origAddToUpdateListMain) {
+        __try {
+            s_origAddToUpdateListMain(gameWorld, character);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            spdlog::error(
+                "entity_hooks: AddToUpdateListMain trampoline crashed");
+        }
+    }
+}
+
+int GetTotalAddToUpdateList() {
+    return s_totalAddToUpdateList.load(std::memory_order_relaxed);
+}
+
+uintptr_t GetLastCharacterAdded() {
+    return s_lastCharacterAdded.load(std::memory_order_relaxed);
+}
+
 // ── Install/Uninstall ──
 
 bool Install() {
@@ -1278,6 +1327,54 @@ bool Install() {
     // CharacterDestroy hook NOT installed
     s_destroyHookInstalled = false;
 
+    // ── Install AddToUpdateListMain (1.0.68 universal spawn capture) ────────
+    //
+    // Hook target: kenshi_x64.exe + 0x787C70. Identified by Ghidra recon
+    // (docs/reverse-engineering/05-charspawn-tail-and-set-inserter.txt).
+    // The function is a 51-byte passthrough wrapping the unordered_set
+    // insert into GameWorld::charUpdateListMain at +0x750. EVERY character
+    // entering live state — factory-spawned or save-deserialised — flows
+    // through this. Capturing here gives us universal spawn notification
+    // that the higher-level factory hook misses for save-loaded NPCs.
+    {
+        const uintptr_t modBase = Memory::GetModuleBase();
+        const uintptr_t target = modBase + RVA_ADD_TO_UPDATE_LIST_MAIN;
+
+        DWORD64 imageBase = 0;
+        auto* rt = RtlLookupFunctionEntry(
+            static_cast<DWORD64>(target), &imageBase, nullptr);
+        bool prologueOk = false;
+        if (rt) {
+            uintptr_t funcStart = static_cast<uintptr_t>(imageBase) + rt->BeginAddress;
+            if (funcStart == target) {
+                prologueOk = true;
+            } else {
+                spdlog::warn("entity_hooks: AddToUpdateListMain at 0x{:X} is "
+                             "MID-FUNCTION (real start 0x{:X}, +0x{:X}) — "
+                             "will not install",
+                             target, funcStart, target - funcStart);
+            }
+        } else {
+            spdlog::warn("entity_hooks: AddToUpdateListMain at 0x{:X} has no "
+                         ".pdata entry — proceeding with prologue check only",
+                         target);
+            prologueOk = true; // tolerate missing pdata
+        }
+
+        if (prologueOk
+            && hookMgr.InstallAt("AddToUpdateListMain", target,
+                                 &Hook_AddToUpdateListMain,
+                                 &s_origAddToUpdateListMain)) {
+            spdlog::info("entity_hooks: AddToUpdateListMain hook INSTALLED at "
+                         "0x{:X} (RVA 0x{:X}) — universal char-add capture active",
+                         target, RVA_ADD_TO_UPDATE_LIST_MAIN);
+        } else {
+            spdlog::warn("entity_hooks: AddToUpdateListMain hook NOT installed "
+                         "(target=0x{:X}). Falling back to factory-only capture.",
+                         target);
+        }
+    }
+
     spdlog::info("entity_hooks: Installed (create={}, destroy={})",
                  funcs.CharacterSpawn != nullptr, s_destroyHookInstalled);
     return success;
@@ -1285,6 +1382,8 @@ bool Install() {
 
 void Uninstall() {
     HookManager::Get().Remove("CharacterCreate");
+    HookManager::Get().Remove("AddToUpdateListMain");
+    s_origAddToUpdateListMain = nullptr;
     if (s_destroyHookInstalled) {
         HookManager::Get().Remove("CharacterDestroy");
     }

@@ -1,0 +1,254 @@
+kenshi_x64.exe imageBase=0x140000000
+
+==============================================================================
+=== 1. CharacterSpawn (FUN_140581770) — full callee enumeration
+==============================================================================
+CharacterSpawn body 6410 bytes
+Callees found in CharacterSpawn: 69
+
+==============================================================================
+=== 2. Callee analysis — looking for unordered_set inserter shape
+==============================================================================
+Heuristic scoring: small body (60-300 bytes), writes to arg0+0x7??,
+calls a small number of other functions, accesses bucket-like offsets.
+
+Top 12 candidates (score, body_bytes, RVA, arg0 offsets):
+  score 3 body   51  RVA 0x787C70  arg0 offsets: 0x750
+  score 2 body   66  RVA 0x5CBA10  arg0 offsets: 0xDC
+  score 2 body   72  RVA 0xF5380  arg0 offsets: 0x68
+  score 2 body   78  RVA 0x5C8150  arg0 offsets: 0xDB, 0xE0, 0x6FC
+  score 2 body   80  RVA 0xA4530  arg0 offsets: 0x10, 0x18
+  score 2 body   83  RVA 0x296D80  arg0 offsets: (none)
+  score 2 body   83  RVA 0x53EDB0  arg0 offsets: (none)
+  score 2 body   91  RVA 0x76500  arg0 offsets: (none)
+  score 2 body   99  RVA 0xA4700  arg0 offsets: 0x10, 0x18
+  score 2 body  100  RVA 0xA41C0  arg0 offsets: 0x10, 0x18
+  score 2 body  122  RVA 0x649F50  arg0 offsets: 0x198, 0x1A0
+  score 2 body  123  RVA 0xC9BB0  arg0 offsets: 0x2B8
+
+==============================================================================
+=== 3. Decompile of top 5 candidates
+==============================================================================
+
+--- score=3 body=51 bytes  RVA 0x787C70 ---
+    
+    void FUN_140787c70(longlong param_1,undefined8 param_2)
+    
+    {
+      undefined8 *local_res8;
+      undefined8 local_res10 [3];
+      undefined1 local_18 [24];
+    
+      local_res8 = local_res10;
+      local_res10[0] = param_2;
+      thunk_FUN_1405e8130(param_1 + 0x750,local_18,local_res10,&local_res8);
+      return;
+    }
+    
+    
+
+--- score=2 body=66 bytes  RVA 0x5CBA10 ---
+    
+    undefined8 * FUN_1405cba10(undefined8 *param_1)
+    
+    {
+      thunk_FUN_1406223f0();
+      param_1[0xdb] = 0;
+      *param_1 = CharacterHuman::vftable;
+      param_1[0xde] = 0;
+      param_1[0xdf] = 0xf;
+      *(undefined1 *)(param_1 + 0xdc) = 0;
+      return param_1;
+    }
+    
+    
+
+--- score=2 body=72 bytes  RVA 0xF5380 ---
+    
+    undefined8 FUN_1400f5380(longlong param_1,undefined4 param_2)
+    
+    {
+      longlong *plVar1;
+      longlong lVar2;
+      undefined4 local_res8 [2];
+      undefined4 local_res10 [2];
+      undefined1 local_res18 [16];
+    
+      local_res8[0] = param_2;
+      local_res10[0] = param_2;
+      plVar1 = (longlong *)thunk_FUN_1400f33b0(param_1 + 0x68,local_res18,local_res8);
+      if (*plVar1 == 0) {
+        return 0;
+      }
+      lVar2 = thunk_FUN_1400f40e0(param_1 + 0x68,local_res10);
+      return *(undefined8 *)(lVar2 + 8);
+    }
+    
+    
+
+--- score=2 body=78 bytes  RVA 0x5C8150 ---
+    
+    undefined8 * FUN_1405c8150(undefined8 *param_1)
+    
+    {
+      undefined4 in_stack_00000028;
+    
+      thunk_FUN_1406223f0();
+      *(undefined1 *)(param_1 + 0xdb) = 0;
+      *param_1 = CharacterAnimal::vftable;
+      param_1[0xdc] = 0;
+      param_1[0xe1] = 0;
+      *(undefined4 *)((longlong)param_1 + 0x6fc) = in_stack_00000028;
+      *(undefined4 *)(param_1 + 0xe0) = in_stack_00000028;
+      return param_1;
+    }
+    
+    
+
+--- score=2 body=80 bytes  RVA 0xA4530 ---
+    
+    undefined1 * FUN_1400a4530(undefined1 *param_1,undefined8 param_2,undefined8 param_3)
+    
+    {
+      undefined8 uVar1;
+    
+      uVar1 = thunk_FUN_1400957e0(param_2,param_3,0,0xffffffffffffffff);
+      *(undefined8 *)(param_1 + 0x18) = 0xf;
+      *(undefined8 *)(param_1 + 0x10) = 0;
+      *param_1 = 0;
+      thunk_FUN_14009f710(param_1,uVar1);
+      return param_1;
+    }
+    
+    
+
+==============================================================================
+=== 4. Functions writing to arg0+0x7?? AND calling hash-like helpers
+==============================================================================
+Found 0 candidates writing to set range AND calling hash helpers:
+
+==============================================================================
+=== 5. CharacterSpawn TAIL (last 120 lines of decompile)
+==============================================================================
+      local_140[0]._0_1_ = 0;
+      thunk_FUN_140069d10(local_140,&DAT_14168afa8,4);
+      lVar10 = thunk_FUN_14006cf30(param_2[3] + 0x178,local_140);
+      iVar8 = *(int *)(lVar10 + 0x28);
+      if (0xf < local_128) {
+        operator_delete((void *)CONCAT71(local_140[0]._1_7_,local_140[0]._0_1_));
+      }
+      plVar11 = plVar26;
+      if (iVar8 == 0) {
+        local_1e8 = Ogre::AllocatedObject<class_Ogre::CategorisedAllocPolicy<0>_>::operator_new(0x340);
+        if (local_1e8 != (void *)0x0) {
+          plVar11 = (longlong *)thunk_FUN_140934ab0(local_1e8,param_2[3]);
+        }
+      }
+      else {
+        local_1e8 = Ogre::AllocatedObject<class_Ogre::CategorisedAllocPolicy<0>_>::operator_new(0x528);
+        if (local_1e8 != (void *)0x0) {
+          plVar11 = (longlong *)thunk_FUN_140934ae0(local_1e8,param_2[3]);
+        }
+      }
+      local_1e8 = (void *)param_2[4];
+      local_1e0 = (undefined4)param_2[5];
+      local_1d0 = hand::vftable;
+      local_1c8 = (int)local_160;
+      local_1c4 = local_160._4_4_;
+      local_1c0 = (undefined4)local_158;
+      local_1bc = local_158._4_4_;
+      local_1b8 = (undefined4)local_150;
+      (**(code **)(*plVar11 + 0x238))(plVar11,param_2[3],&local_1e8,&local_1d0);
+      (**(code **)(*plVar11 + 0x90))(plVar11,param_2[9]);
+      local_100 = 0xf;
+      local_108 = 0;
+      local_118 = (undefined ********)((ulonglong)local_118 & 0xffffffffffffff00);
+      thunk_FUN_140069d10(&local_118,"faction",7);
+      uVar23 = param_2[3];
+      lVar10 = (ulonglong)*(byte *)(uVar23 + 0x2b8) + 0x2b9 + uVar23;
+      local_238 = (ulonglong *)plVar26;
+      if (lVar10 != 0) {
+        local_238 = (ulonglong *)(lVar10 + 1);
+      }
+      ppppppppuVar20 = (undefined ********)&local_118;
+      if (0xf < local_100) {
+        ppppppppuVar20 = local_118;
+      }
+      ppppppppuVar4 = (undefined ********)&local_118;
+      if (0xf < local_100) {
+        ppppppppuVar4 = local_118;
+      }
+      for (; ppppppppuVar4 != (undefined ********)((longlong)ppppppppuVar20 + local_108);
+          ppppppppuVar4 = (undefined ********)((longlong)ppppppppuVar4 + 1)) {
+        plVar26 = (longlong *)
+                  ((ulonglong)plVar26 ^
+                  (longlong)*(char *)ppppppppuVar4 + (longlong)plVar26 * 0x40 +
+                  ((ulonglong)plVar26 >> 2) + 0x9e3779b9);
+      }
+      uVar12 = (longlong)plVar26 * 0x200000 + ~(ulonglong)plVar26;
+      uVar12 = (uVar12 >> 0x18 ^ uVar12) * 0x109;
+      uVar12 = (uVar12 >> 0xe ^ uVar12) * 0x15;
+      thunk_FUN_14006a590(uVar23 + 0x2b8,&local_1e8,(uVar12 >> 0x1c ^ uVar12) * 0x80000001,&local_118);
+      if (local_1e8 == (void *)0x0) {
+        puVar21 = &DAT_141f790a8;
+      }
+      else if (*(longlong *)((longlong)local_1e8 + 0x40) - *(longlong *)((longlong)local_1e8 + 0x38) >>
+               6 == 0) {
+        puVar21 = &DAT_141f790a8;
+      }
+      else {
+        if (*(longlong *)((longlong)local_1e8 + 0x40) - *(longlong *)((longlong)local_1e8 + 0x38) >> 6
+            == 0) {
+          std::_Xout_of_range("invalid vector<T> subscript");
+          pcVar2 = (code *)swi(3);
+          plVar26 = (longlong *)(*pcVar2)();
+          return plVar26;
+        }
+        puVar21 = (undefined8 *)(*(longlong *)((longlong)local_1e8 + 0x38) + 0x10);
+      }
+      lVar10 = thunk_FUN_1402e7a20(DAT_1421345b8,puVar21);
+      if (0xf < local_100) {
+        operator_delete(local_118);
+      }
+      local_100 = 0xf;
+      local_108 = 0;
+      local_118 = (undefined ********)((ulonglong)local_118 & 0xffffffffffffff00);
+      if (lVar10 == 0) {
+        local_128 = 0xf;
+        local_130 = 0;
+        local_140[0]._0_1_ = 0;
+        thunk_FUN_140069d10(local_140,"nofac",5);
+        lVar10 = *plVar11;
+        uVar13 = thunk_FUN_1402e7a20(DAT_1421345b8,local_140);
+        (**(code **)(lVar10 + 0xa0))(plVar11,uVar13,0);
+        if (0xf < local_128) {
+          operator_delete((void *)CONCAT71(local_140[0]._1_7_,local_140[0]._0_1_));
+        }
+        if (iVar8 != 8) {
+          uVar13 = (**(code **)(*plVar11 + 8))(plVar11,&local_c8);
+          uVar13 = thunk_FUN_1400a41c0(&local_190,uVar13," has no faction");
+          thunk_FUN_140785ed0(&DAT_142134110,uVar13);
+          if (0xf < local_178) {
+            operator_delete((void *)CONCAT71(uStack_18f,local_190));
+          }
+          local_178 = 0xf;
+          local_180 = 0;
+          local_190 = 0;
+          if (0xf < local_b0) {
+            operator_delete((void *)CONCAT71(uStack_c7,local_c8));
+          }
+        }
+      }
+      else {
+        (**(code **)(*plVar11 + 0xa0))(plVar11,lVar10,0);
+      }
+      if (plVar9 != (longlong *)0x0) {
+        (**(code **)(*plVar11 + 0x2b0))(plVar11,plVar9);
+      }
+      (**(code **)(*DAT_142134100 + 0x10))(DAT_142134100,plVar11);
+      return plVar11;
+    }
+    
+    
+
+File: C:\Tools\GhidraProjects\recon5_findings.txt

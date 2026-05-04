@@ -100,4 +100,21 @@ int GetGameDataOffsetInStruct();
 // Returns -1 if not yet detected.
 int GetPositionOffsetInStruct();
 
+// ── Live character set capture (Kenshi 1.0.68) ───────────────────────────
+//
+// Kenshi 1.0.68's GameWorld::addToUpdateListMain (RVA 0x787C70, identified
+// by Ghidra recon 2026-05-04) is the canonical "this character is now alive
+// in the world" funnel. EVERY character entering the active update set —
+// whether factory-spawned, deserialised from save, or recruited at runtime —
+// flows through this 51-byte passthrough that wraps the unordered_set::insert
+// into GameWorld::charUpdateListMain at +0x750.
+//
+// Hooking at this depth (instead of the factory functions) gives us
+// universal capture of every live character with no false positives.
+//
+// GetTotalAddToUpdateList()  — total times the hook has fired since DLL load
+// GetLastCharacterAdded()    — most recent Character* the hook saw (raw)
+int      GetTotalAddToUpdateList();
+uintptr_t GetLastCharacterAdded();
+
 } // namespace kmp::entity_hooks
