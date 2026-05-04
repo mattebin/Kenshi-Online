@@ -1801,12 +1801,22 @@ void Core::OnGameLoaded() {
     }
 
     // ═══ Verify spawn system readiness ═══
+    // Two paths feed the spawn pipeline on 1.0.68:
+    //   1. Legacy SpawnManager via factory hooks (CharacterCreate / FactoryCreate).
+    //      Only fires for DYNAMICALLY-created characters; misses save-loaded NPCs.
+    //   2. Universal capture via entity_hooks::AddToUpdateListMain (RVA 0x787C70).
+    //      Fires for EVERY character entering live state — factory-spawned and
+    //      save-deserialised. Validated by 110+ unique pointers in the
+    //      2026-05-04 session. This is the path that actually works on 1.0.68.
+    // Path 2 doesn't depend on path 1, so a "not ready" verdict from
+    // SpawnManager isn't blocking anymore — we just note it and move on.
     m_nativeHud.LogStep("GAME", "Verifying spawn system...");
     bool spawnReady = m_spawnManager.VerifyReadiness();
     if (spawnReady) {
-        m_nativeHud.LogStep("OK", "Spawn system ready");
+        m_nativeHud.LogStep("OK", "Spawn system ready (legacy factory path)");
     } else {
-        m_nativeHud.LogStep("WARN", "Spawn system NOT ready — remote characters may fail");
+        m_nativeHud.LogStep("INFO",
+            "Legacy factory path not ready — using AddToUpdateListMain capture");
     }
 
     // Early heap scan — try even without factory, as long as we have ANY data to bootstrap from
@@ -1856,8 +1866,9 @@ void Core::OnGameLoaded() {
         m_nativeHud.LogStep("HOOK", "CharacterCreate passthrough (post-load)");
     } else {
         HookManager::Get().Disable("CharacterCreate");
-        spdlog::warn("Core::OnGameLoaded — CharacterCreate fully bypassed; spawn system not ready");
-        m_nativeHud.LogStep("WARN", "CharacterCreate deferred (spawn not ready)");
+        spdlog::info("Core::OnGameLoaded — CharacterCreate disabled; "
+                     "AddToUpdateListMain (RVA 0x787C70) handles capture");
+        m_nativeHud.LogStep("HOOK", "Spawn capture via AddToUpdateListMain");
     }
 
     // ═══ DUMP ALL FUNCTIONS AND OFFSETS ═══
@@ -2484,9 +2495,23 @@ void Core::OnGameTick(float deltaTime) {
             } else if (s_entityScanRetries >= MAX_ENTITY_SCAN_RETRIES) {
                 m_initialEntityScanDone = true;
                 s_wasScanning = false; // Allow fresh retry on next connection
-                m_nativeHud.LogStep("WARN", "Entity scan: no squad characters found after " +
-                                    std::to_string(s_entityScanRetries) + " attempts");
-                spdlog::warn("Core: Entity scan exhausted {} retries — 0 characters found", s_entityScanRetries);
+                // The legacy faction-based scan can fail on 1.0.68 because it
+                // walks the wrong list (mainUpdateListRemovalQueue at +0x888).
+                // entity_hooks::AddToUpdateListMain captures every Character*
+                // entering the live world set independently — that's where the
+                // sync layer should look. So this exhaustion is informational
+                // rather than blocking now.
+                size_t captured =
+                    kmp::entity_hooks::GetUniqueCapturedCharacterCount();
+                m_nativeHud.LogStep("INFO",
+                    "Faction scan exhausted (" +
+                    std::to_string(s_entityScanRetries) +
+                    "); using AddToUpdateListMain capture (" +
+                    std::to_string(captured) + " chars)");
+                spdlog::info("Core: Entity scan exhausted {} retries — "
+                             "0 chars from legacy path; AddToUpdateListMain "
+                             "captured {} unique chars",
+                             s_entityScanRetries, captured);
             } else if (s_entityScanRetries <= 3 || s_entityScanRetries % 10 == 0) {
                 spdlog::info("Core: Entity scan attempt {} found 0 chars — will retry", s_entityScanRetries);
             }

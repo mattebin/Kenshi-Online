@@ -406,11 +406,17 @@ void PipelineOrchestrator::RunAnomalyDetection() {
         }
     }
 
-    // Hook not firing
-    if (local.uptimeSeconds > 30 && local.totalCreates == 0) {
+    // Hook not firing.
+    // CharacterCreate often shows 0 calls on 1.0.68 because save-loaded NPCs
+    // bypass the factory. AddToUpdateListMain (RVA 0x787C70) captures all
+    // characters universally — if it has fired, sync is healthy regardless
+    // of CharacterCreate. Treat AddToUpdateListMain firing as resolution too.
+    int addCalls = kmp::entity_hooks::GetTotalAddToUpdateList();
+    if (local.uptimeSeconds > 30 && local.totalCreates == 0 && addCalls == 0) {
         RaiseAnomaly(AnomalyType::HookNotFiring, m_localPlayerId,
-            "CharacterCreate: 0 calls after " + std::to_string(local.uptimeSeconds) + "s");
-    } else if (local.totalCreates > 0) {
+            "CharacterCreate: 0 calls after " + std::to_string(local.uptimeSeconds) +
+            "s (and AddToUpdateListMain: 0 too — spawn capture truly stalled)");
+    } else if (local.totalCreates > 0 || addCalls > 0) {
         ResolveAnomaly(AnomalyType::HookNotFiring, m_localPlayerId);
     }
 
