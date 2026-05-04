@@ -10,6 +10,8 @@ namespace kmp::input_hooks {
 
 // Forward decl — defined below.
 static bool IsModalUiActive();
+static bool InstallGetKeyboardStateIatHook();
+static void UninstallGetKeyboardStateIatHook();
 
 // WndProc handles our UI text input and visible keybinds, but Kenshi also
 // consumes keyboard events through OIS. Hook Kenshi's InputHandler so modal
@@ -125,17 +127,18 @@ bool Install() {
         "InputKeyUp", keyUpTarget,
         &Hook_InputKeyUp, &s_origKeyUp);
 
-    // Layer 3 (KenshiHotkey @ 0x82B370) DISABLED — Recon7 confirmed
-    // that address is engine-init/title-screen logic ("kenshi_fonts.xml",
-    // "Starting Title Screen", MyGUI ResourceManager::load), NOT the
-    // hotkey dispatcher. Hooking and skipping it broke cursor visibility
-    // and put the game in a mid-run state. Real hotkey dispatcher
-    // location TBD — RE_Kenshi's reference may be RVA 0x22B370 (without
-    // the leading 8) per their commit text. Recon8 will verify.
+    // Layer 4: IAT-hook USER32!GetKeyboardState. Kenshi's hotkey dispatcher
+    // (location unknown post-Recon7+8) calls this Win32 API to read keyboard
+    // state. By masking specific VK slots in the returned buffer when our
+    // modal UI is active, the engine's hotkey poll sees those keys as not-
+    // pressed and skips the corresponding actions. Layer 3 (Kenshi-function
+    // hook) is left disabled — wrong target on 1.0.68.
+    bool iatOk = InstallGetKeyboardStateIatHook();
 
     s_installed = true;
-    spdlog::info("input_hooks: Installed (WndProc + OIS gate keyDown={} keyUp={})",
-                 keyDownOk, keyUpOk);
+    spdlog::info("input_hooks: Installed (WndProc + OIS gate keyDown={} "
+                 "keyUp={}, IAT-GetKeyboardState={})",
+                 keyDownOk, keyUpOk, iatOk);
     return keyDownOk && keyUpOk;
 }
 
@@ -206,6 +209,142 @@ static bool Hook_MyGui_InjectKeyRelease(void* inputMgr, std::uint32_t keyCode) {
     return s_origInjectKeyRelease
         ? s_origInjectKeyRelease(inputMgr, keyCode)
         : false;
+}
+
+// ── IAT hook on USER32!GetKeyboardState ────────────────────────────────────
+//
+// Layer 4 of the input gate (joins WndProc + OIS + MyGUI). Different from
+// the others: we hook a Windows API import in kenshi_x64.exe's IAT rather
+// than a Kenshi function. When the engine's per-frame hotkey poll calls
+// GetKeyboardState, our hook fills the buffer normally, then masks
+// specific VK slots if our chat/menu is modal — Kenshi sees those keys
+// as not-pressed and skips the corresponding hotkey. Outside modal UI
+// the hook is a passthrough.
+//
+// Why this and not a Kenshi-function hook: Recon7+8 ruled out the two
+// candidate dispatcher RVAs (0x82B370 was engine init, 0x22B370 was
+// physics joints). The actual Kenshi hotkey poll is somewhere we can't
+// easily classify by static analysis. Hooking the Win32 API itself
+// sidesteps the search entirely — works on any Kenshi version, requires
+// no signature scan.
+
+using GetKeyboardStateFn = BOOL(WINAPI*)(PBYTE);
+static GetKeyboardStateFn s_origGetKeyboardState = nullptr;
+static void**             s_iatSlot              = nullptr;
+static std::atomic<int>   s_iatHookCalls{0};
+static std::atomic<int>   s_iatHookMasked{0};
+
+static BOOL WINAPI Hook_GetKeyboardState(PBYTE lpKeyState) {
+    s_iatHookCalls.fetch_add(1, std::memory_order_relaxed);
+    BOOL r = s_origGetKeyboardState ? s_origGetKeyboardState(lpKeyState) : 0;
+    if (!r || !lpKeyState) return r;
+    if (!IsModalUiActive()) return r;
+
+    s_iatHookMasked.fetch_add(1, std::memory_order_relaxed);
+    // Targeted whitelist of VKs to clear while modal. Keep BACK / RETURN /
+    // ESC / arrows so chat editing works; mask everything else that could
+    // fire a game hotkey. WM_CHAR for typed text comes through WndProc on
+    // a separate path and is unaffected by this mask.
+    auto clear = [&](int vk) { lpKeyState[vk] = 0; };
+    // Letter keys (A..Z = 0x41..0x5A) — covers M=map, Y=craft, I=inv, etc.
+    for (int vk = 0x41; vk <= 0x5A; ++vk) clear(vk);
+    // Top-row digits (0..9 = 0x30..0x39) — Kenshi's 1×/2×/3× speed keys.
+    for (int vk = 0x30; vk <= 0x39; ++vk) clear(vk);
+    // Function keys (F1..F12 = 0x70..0x7B) — vanilla help menu, etc.
+    for (int vk = 0x70; vk <= 0x7B; ++vk) clear(vk);
+    // Space (pause), Tab (auto-pilot), Insert/Delete/Home/End/PgUp/PgDn —
+    // all common game hotkeys.
+    clear(VK_SPACE);
+    clear(VK_TAB);
+    clear(VK_INSERT);
+    clear(VK_DELETE);
+    clear(VK_HOME);
+    clear(VK_END);
+    clear(VK_PRIOR);  // PgUp
+    clear(VK_NEXT);   // PgDn
+    return r;
+}
+
+static bool InstallGetKeyboardStateIatHook() {
+    if (s_iatSlot) return true; // idempotent
+
+    HMODULE exe = GetModuleHandleA(nullptr);
+    if (!exe) {
+        spdlog::warn("input_hooks: IAT hook: GetModuleHandle failed");
+        return false;
+    }
+    auto base = reinterpret_cast<uintptr_t>(exe);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(exe);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+
+    auto& importDir =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir.Size == 0) return false;
+
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+        base + importDir.VirtualAddress);
+    for (; desc->Name; ++desc) {
+        const char* dllName = reinterpret_cast<const char*>(base + desc->Name);
+        if (_stricmp(dllName, "USER32.dll") != 0
+            && _stricmp(dllName, "USER32") != 0) {
+            continue;
+        }
+
+        // Walk the thunks. OriginalFirstThunk is the name table (read-only),
+        // FirstThunk is the IAT (writable, what we patch).
+        auto* nameThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
+            base + desc->OriginalFirstThunk);
+        auto* iatThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
+            base + desc->FirstThunk);
+
+        for (; nameThunk->u1.AddressOfData; ++nameThunk, ++iatThunk) {
+            if (IMAGE_SNAP_BY_ORDINAL(nameThunk->u1.Ordinal)) continue;
+            auto* impName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                base + nameThunk->u1.AddressOfData);
+            if (strcmp(impName->Name, "GetKeyboardState") != 0) continue;
+
+            // Found it. Patch the IAT slot.
+            void** slot =
+                reinterpret_cast<void**>(&iatThunk->u1.Function);
+            DWORD oldProt = 0;
+            if (!VirtualProtect(slot, sizeof(void*),
+                                PAGE_READWRITE, &oldProt)) {
+                spdlog::error("input_hooks: IAT VirtualProtect RW failed");
+                return false;
+            }
+            s_origGetKeyboardState =
+                reinterpret_cast<GetKeyboardStateFn>(*slot);
+            *slot = reinterpret_cast<void*>(&Hook_GetKeyboardState);
+            VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+            s_iatSlot = slot;
+            spdlog::info("input_hooks: GetKeyboardState IAT hook INSTALLED "
+                         "(orig=0x{:X}, slot=0x{:X})",
+                         reinterpret_cast<uintptr_t>(s_origGetKeyboardState),
+                         reinterpret_cast<uintptr_t>(slot));
+            return true;
+        }
+        break; // found USER32, no need to keep walking other DLLs
+    }
+    spdlog::warn("input_hooks: IAT hook: GetKeyboardState import not found");
+    return false;
+}
+
+static void UninstallGetKeyboardStateIatHook() {
+    if (!s_iatSlot || !s_origGetKeyboardState) return;
+    DWORD oldProt = 0;
+    if (VirtualProtect(s_iatSlot, sizeof(void*),
+                       PAGE_READWRITE, &oldProt)) {
+        *s_iatSlot = reinterpret_cast<void*>(s_origGetKeyboardState);
+        VirtualProtect(s_iatSlot, sizeof(void*), oldProt, &oldProt);
+    }
+    spdlog::info("input_hooks: GetKeyboardState IAT hook removed "
+                 "(calls={}, masked={})",
+                 s_iatHookCalls.load(std::memory_order_relaxed),
+                 s_iatHookMasked.load(std::memory_order_relaxed));
+    s_iatSlot = nullptr;
+    s_origGetKeyboardState = nullptr;
 }
 
 // ── Kenshi hotkey dispatcher hook ──────────────────────────────────────────
@@ -356,6 +495,8 @@ void Uninstall() {
                      s_kenshiHotkeyForwarded.load(std::memory_order_relaxed));
         s_origKenshiHotkey = nullptr;
     }
+    // Always try to undo the IAT hook; safe no-op when not installed.
+    UninstallGetKeyboardStateIatHook();
     s_installed = false;
 }
 
