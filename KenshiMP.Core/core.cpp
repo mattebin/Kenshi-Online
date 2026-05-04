@@ -2163,11 +2163,49 @@ void Core::DrainCapturedCharactersToServer() {
     size_t n = entity_hooks::SnapshotCapturedCharacters(batch, kMaxBatch);
     if (n == 0) return;
 
-    // Need a faction to filter against. If we don't have one yet, the
-    // existing RevalidateFaction loop will discover it; defer until then.
+    // Need a faction to filter against.
+    //
+    // 1. Fast path — already-resolved pointer.
+    // 2. Fallback — entity_hooks::GetEarlyPlayerFaction (multi-source vote
+    //    from the legacy CharacterCreate path).
+    // 3. NEW: walk the captured set and pick the first character whose
+    //    Faction's name matches our LobbyManager-assigned faction string
+    //    (e.g. "10-kenshi-online.mod"). On 1.0.68 the legacy paths don't
+    //    always populate, but we DO know our assigned faction name from
+    //    the C2S handshake response, and FactionAccessor::GetName works
+    //    universally. Cache the discovered pointer so we only do this
+    //    walk once.
     uintptr_t playerFaction = m_playerController.GetLocalFactionPtr();
     if (playerFaction == 0) {
         playerFaction = entity_hooks::GetEarlyPlayerFaction();
+    }
+    if (playerFaction == 0) {
+        static uintptr_t s_discoveredFaction = 0;
+        if (s_discoveredFaction != 0) {
+            playerFaction = s_discoveredFaction;
+        } else {
+            const std::string& wanted =
+                m_lobbyManager.GetFactionString();
+            if (!wanted.empty()) {
+                for (size_t i = 0; i < n; ++i) {
+                    uintptr_t cp = batch[i];
+                    if (!cp) continue;
+                    game::CharacterAccessor ch(reinterpret_cast<void*>(cp));
+                    uintptr_t fp = ch.GetFactionPtr();
+                    if (!fp) continue;
+                    game::FactionAccessor fa(reinterpret_cast<void*>(fp));
+                    if (!fa.IsValid()) continue;
+                    if (fa.GetName() == wanted) {
+                        s_discoveredFaction = fp;
+                        playerFaction = fp;
+                        spdlog::info("Core: DrainCapturedCharactersToServer "
+                                     "discovered faction by name '{}' -> 0x{:X}",
+                                     wanted, fp);
+                        break;
+                    }
+                }
+            }
+        }
     }
     if (playerFaction == 0) return;
 
