@@ -3586,24 +3586,46 @@ void Core::HandleSpawnQueue() {
         s_shownTimeoutMsg = false;
     }
 
-    // Periodic status updates while waiting
+    // Periodic status updates while waiting.
+    // These warnings fire when the LEGACY spawn queue (factory-driven)
+    // doesn't drain within an expected window. On 1.0.68 the legacy
+    // factory path doesn't fire for save-loaded NPCs (see
+    // docs/reverse-engineering/REPORT.md), so the queue may sit pending
+    // forever even though sync is healthy via the AddToUpdateListMain
+    // capture path. Suppress these messages once we've successfully
+    // captured + sent characters via the new path; they only mean
+    // anything if NEITHER path has produced output.
     if (pending > 0 && s_hasPendingTimer) {
         auto pendingDuration = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - s_firstPendingTime);
 
-        // At 10s, show helpful message (direct spawn should work by 2s)
+        bool addToUpdateActive =
+            kmp::entity_hooks::GetTotalAddToUpdateList() > 0;
+
+        // At 10s, show helpful message (direct spawn should work by 2s).
         if (pendingDuration.count() >= 10 && !s_shownWaitingMsg) {
             s_shownWaitingMsg = true;
-            m_nativeHud.AddSystemMessage("Spawning taking longer than expected...");
-            m_nativeHud.LogStep("GAME", "Spawn delayed 10s+");
+            if (!addToUpdateActive) {
+                m_nativeHud.AddSystemMessage("Spawning taking longer than expected...");
+                m_nativeHud.LogStep("GAME", "Spawn delayed 10s+ (legacy path)");
+            }
         }
 
-        // At 30s, show timeout warning
+        // At 30s, show timeout warning ONLY if AddToUpdateListMain hasn't
+        // captured anything either. With it active, the legacy queue
+        // sitting around is just stale state, not a real problem.
         if (pendingDuration.count() >= 30 && !s_shownTimeoutMsg) {
             s_shownTimeoutMsg = true;
-            spdlog::warn("Core: Spawn queue waiting 30s+ — check kenshi-online.mod is in load order.");
-            m_nativeHud.AddSystemMessage("Spawn timeout! Ensure kenshi-online.mod is loaded.");
-            m_nativeHud.LogStep("WARN", "Spawn timeout (30s) — check mod load order");
+            if (!addToUpdateActive) {
+                spdlog::warn("Core: Spawn queue waiting 30s+ AND AddToUpdateListMain "
+                             "never fired — check kenshi-online.mod load order.");
+                m_nativeHud.AddSystemMessage("Spawn timeout! Ensure kenshi-online.mod is loaded.");
+                m_nativeHud.LogStep("WARN", "Spawn timeout (30s) — check mod load order");
+            } else {
+                spdlog::debug("Core: Legacy spawn queue 30s+ but AddToUpdateListMain "
+                              "is active ({} captures) — suppressing timeout warning.",
+                              kmp::entity_hooks::GetTotalAddToUpdateList());
+            }
         }
     }
 
@@ -3733,11 +3755,16 @@ void Core::HandleSpawnQueue() {
             }
         } else if (!hasFactory) {
             // Factory not captured yet — try re-enabling CharacterCreate hook.
+            // Suppress the HUD line if AddToUpdateListMain is already feeding
+            // us characters, since the factory hook isn't on the critical path
+            // any more.
             if (!s_retriedHookEnable && pendingDuration.count() >= 5) {
                 s_retriedHookEnable = true;
-                spdlog::warn("Core: Factory not captured after 5s — re-enabling CharacterCreate hook");
+                spdlog::info("Core: Factory not captured after 5s — re-enabling CharacterCreate hook");
                 entity_hooks::ResumeForNetwork();
-                m_nativeHud.LogStep("SPAWN", "Re-enabling CharacterCreate hook...");
+                if (kmp::entity_hooks::GetTotalAddToUpdateList() == 0) {
+                    m_nativeHud.LogStep("SPAWN", "Re-enabling CharacterCreate hook...");
+                }
             }
             if (pendingDuration.count() / 5 != s_lastNotReadyLog) {
                 s_lastNotReadyLog = pendingDuration.count() / 5;
