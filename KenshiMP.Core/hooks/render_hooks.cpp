@@ -3,6 +3,7 @@
 #include "entity_hooks.h"
 #include "input_hooks.h"
 #include "../sys/speed_probe.h"
+#include "../game/game_world_iter.h"
 #include "../ui/mygui_bridge.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
@@ -491,6 +492,19 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
         SEH_OverlayUpdate();
         // NativeHud handles all display
         SEH_NativeHudUpdate();
+    }
+
+    // ── game_world_iter sample (every ~5s, always-on while in-game) ──
+    // Logs the live count of GameWorld::charUpdateListMain (+0x750).
+    // Drives independently of Connected state so we get a reading just
+    // from launching Kenshi and loading a save, no server needed.
+    {
+        static int s_charPollCounter = 0;
+        if (++s_charPollCounter % 300 == 0) { // ~5s at 60fps
+            size_t n = kmp::game_world_iter::Count();
+            spdlog::info("game_world_iter: charUpdateListMain count = {} "
+                         "(poll #{}/300frames)", n, s_charPollCounter);
+        }
     }
 
     // ── Read-only speed/time layout probe (env-gated, one-shot) ──
