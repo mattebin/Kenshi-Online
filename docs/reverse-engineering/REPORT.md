@@ -183,7 +183,16 @@ script is self-contained and committed to this folder.
 
 ## Next session — concrete plan
 
-1. **ReClass.NET pass on the live GameWorld pointer** (~30 min):
+1. **`KenshiOnlineRecon5.py` — narrow down `addToUpdateListMain`** (~15 min):
+   Static analysis still has one targeted use left before going dynamic.
+   Decompile `FUN_140581770` (CharacterSpawn, 6410 bytes) in full and
+   look at the tail of the function — wherever it calls a small helper
+   that writes to a `+0x7??` offset of a GameWorld pointer, that helper
+   IS `addToUpdateListMain`. Cross-check against any function whose body
+   is ~80-150 bytes and ends with an MSVC `std::unordered_set::_Insert_*`
+   call. Should give us the exact RVA on 1.0.68.
+
+2. **ReClass.NET pass on the live GameWorld pointer** (~30 min):
    - Launch Kenshi, load a save in a populated zone (NPCs visible).
    - Resolve GameWorld pointer using our existing function-disasm
      fallback path (the slot RVA we already log on every run).
@@ -192,19 +201,20 @@ script is self-contained and committed to this folder.
      GameWorld address, walk to `+0x750`.
    - Right-click each 8-byte slot → identify type (pointer / size_t /
      vtable). The MSVC `std::unordered_set` layout will be obvious
-     after 5-6 fields are typed.
-   - Save the layout as JSON. Same trick for
-     `frameSpeedMult` at `+0x700`.
+     after 5-6 fields are typed. v5's findings tell us where in the
+     struct to focus.
+   - Save the layout as JSON. Same trick for `frameSpeedMult` at
+     `+0x700`.
 
-2. **Update `KenshiMP.Core/game/game_world_iter.cpp`** with the verified
+3. **Update `KenshiMP.Core/game/game_world_iter.cpp`** with the verified
    MSVC layout offsets — single-file change, build, drop DLL into
    Kenshi folder, retest. The `Count()` log line should jump from 0 to
    the same number Kenshi's HUD shows.
 
-3. **Add a periodic snapshot+diff** of the set in `core.cpp`
+4. **Add a periodic snapshot+diff** of the set in `core.cpp`
    (~50 lines). New characters since last tick → broadcast spawn to
    other players. Removed → broadcast despawn.
 
-4. Re-run the two-player test. Remote characters should now render.
+5. Re-run the two-player test. Remote characters should now render.
 
-Steps 1-3 are realistic for one focused evening. Step 4 confirms.
+Steps 1-4 are realistic for one focused evening. Step 5 confirms.

@@ -40,15 +40,26 @@ it writes to (`charUpdateListMain`) probably still starts at
 what `game_world_iter.cpp` codes for, which is why that walker
 returns 0 even when characters are present.
 
-**Next concrete step (one focused evening):** run **ReClass.NET** at
-runtime — point it at the live GameWorld instance (we know how to
-resolve the pointer via the function-disasm fallback the orchestrator
-already uses), navigate to `+0x750`, and identify the actual MSVC
-unordered_set field types one click at a time. Same for `+0x700`
-(frameSpeedMult). Update `game_world_iter.cpp` and the speed offsets
-with the verified layout — single-file changes — and the existing
-infrastructure should immediately start producing correct counts +
-sane speed reads.
+**Next concrete step (one focused evening), in order:**
+
+1. **`KenshiOnlineRecon5.py`** — one more targeted Ghidra pass.
+   Decompile `FUN_140581770` (CharacterSpawn) in full and find the
+   helper it calls near the end that writes into the `+0x7??` region
+   of a GameWorld pointer — that's `addToUpdateListMain` on 1.0.68.
+   ~15 min. Tells us the RVA + the exact write offset, narrowing
+   ReClass.NET's job.
+
+2. **ReClass.NET** at runtime — point it at the live GameWorld
+   instance (we know how to resolve the pointer via the function-disasm
+   fallback the orchestrator already uses), navigate to `+0x750`, and
+   identify the actual MSVC unordered_set field types one click at a
+   time. Same for `+0x700` (frameSpeedMult). With v5's narrowed target,
+   this is ~30 min.
+
+3. Update `game_world_iter.cpp` and the speed offsets with the
+   verified layout — single-file changes — and the existing
+   infrastructure should immediately start producing correct counts +
+   sane speed reads.
 
 What we know from session logs:
 
