@@ -493,6 +493,24 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
         SEH_NativeHudUpdate();
     }
 
+    // ── Live captured-character count (sanity check vs Kenshi's HUD) ──
+    // entity_hooks::AddToUpdateListMain captures every Character* the
+    // engine adds to GameWorld::charUpdateListMain. Unique-set size
+    // should track Kenshi's own "number of characters in this zone" —
+    // good ground-truth for verifying the hook is comprehensive.
+    {
+        static int s_uniqPollCounter = 0;
+        if (++s_uniqPollCounter % 300 == 0) { // ~5s at 60 fps
+            size_t total  = static_cast<size_t>(
+                kmp::entity_hooks::GetTotalAddToUpdateList());
+            size_t unique = kmp::entity_hooks::GetUniqueCapturedCharacterCount();
+            uintptr_t gw  = kmp::entity_hooks::GetGameWorldFromHook();
+            spdlog::info(
+                "entity_hooks: captured chars unique={} total_calls={} "
+                "gw=0x{:X}", unique, total, gw);
+        }
+    }
+
     // ── Read-only speed/time layout probe (env-gated, one-shot) ──
     // Fires once when GameWorld resolves; no-op forever after. Off unless
     // KMP_SPEED_PROBE=1 is set. Driven from here instead of OnGameTick so

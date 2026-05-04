@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 // Declared in core.cpp — updated here so VEH crash handler shows which create# crashed
@@ -50,6 +51,15 @@ static constexpr uintptr_t RVA_ADD_TO_UPDATE_LIST_MAIN = 0x787C70;
 static AddToUpdateListMainFn s_origAddToUpdateListMain = nullptr;
 static std::atomic<int>      s_totalAddToUpdateList{0};
 static std::atomic<uintptr_t> s_lastCharacterAdded{0};
+
+// Live captured-set of unique Character* values seen by the hook. The
+// engine can call addToUpdateListMain for the same Character pointer
+// more than once across a session (zone re-streaming), so we dedup
+// here. Used by the sync layer in a future commit to drive
+// S2C_RemoteCharacterSpawn broadcasts.
+static std::mutex                  s_capturedCharsMutex;
+static std::unordered_set<uintptr_t> s_capturedChars;
+static std::atomic<uintptr_t>       s_lastGameWorldFromHook{0};
 
 // s_rawTrampoline: MinHook's raw trampoline (starts with `mov rax, rsp`).
 // Used for REENTRANT calls to avoid corrupting the MovRaxRsp wrapper's global
@@ -1109,25 +1119,43 @@ static void* BuildDirectCallStub(void* rawTrampoline) {
 // streams in 50+ NPCs at once. The s_lastCharacterAdded slot lets the sync
 // layer poll for "what was the last character added" without holding a
 // container of pointers (those need their own GC story).
+// SEH-only helper. Kept out of Hook_AddToUpdateListMain because std::lock_guard
+// in that function brings object-unwinding into scope, which MSVC won't allow
+// in the same function as __try (C2712). Helper has no destructible locals.
+static void CallOrigAddToUpdateListMainSafe(void* gw, void* ch) {
+    if (!s_origAddToUpdateListMain) return;
+    __try {
+        s_origAddToUpdateListMain(gw, ch);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Use OutputDebugString here — even spdlog::error has unwinding; the
+        // helper deliberately keeps the SEH frame minimal.
+        OutputDebugStringA("KMP: AddToUpdateListMain trampoline crashed\n");
+    }
+}
+
 static void __fastcall Hook_AddToUpdateListMain(void* gameWorld, void* character) {
     int n = s_totalAddToUpdateList.fetch_add(1, std::memory_order_relaxed);
-    s_lastCharacterAdded.store(reinterpret_cast<uintptr_t>(character),
-                               std::memory_order_relaxed);
-    if (n < 5 || (n % 32) == 0) {
-        spdlog::info(
-            "entity_hooks: AddToUpdateListMain #{} gw=0x{:X} char=0x{:X}",
-            n, reinterpret_cast<uintptr_t>(gameWorld),
-            reinterpret_cast<uintptr_t>(character));
+    auto charPtr = reinterpret_cast<uintptr_t>(character);
+    auto gwPtr   = reinterpret_cast<uintptr_t>(gameWorld);
+    s_lastCharacterAdded.store(charPtr, std::memory_order_relaxed);
+    s_lastGameWorldFromHook.store(gwPtr, std::memory_order_relaxed);
+
+    bool   isNew  = false;
+    size_t unique = 0;
+    if (charPtr) {
+        std::lock_guard lock(s_capturedCharsMutex);
+        isNew  = s_capturedChars.insert(charPtr).second;
+        unique = s_capturedChars.size();
     }
 
-    if (s_origAddToUpdateListMain) {
-        __try {
-            s_origAddToUpdateListMain(gameWorld, character);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            spdlog::error(
-                "entity_hooks: AddToUpdateListMain trampoline crashed");
-        }
+    if (n < 5 || (n % 32) == 0) {
+        spdlog::info(
+            "entity_hooks: AddToUpdateListMain #{} gw=0x{:X} char=0x{:X} "
+            "{} unique={}",
+            n, gwPtr, charPtr, isNew ? "NEW" : "dup", unique);
     }
+
+    CallOrigAddToUpdateListMainSafe(gameWorld, character);
 }
 
 int GetTotalAddToUpdateList() {
@@ -1136,6 +1164,26 @@ int GetTotalAddToUpdateList() {
 
 uintptr_t GetLastCharacterAdded() {
     return s_lastCharacterAdded.load(std::memory_order_relaxed);
+}
+
+size_t GetUniqueCapturedCharacterCount() {
+    std::lock_guard lock(s_capturedCharsMutex);
+    return s_capturedChars.size();
+}
+
+uintptr_t GetGameWorldFromHook() {
+    return s_lastGameWorldFromHook.load(std::memory_order_relaxed);
+}
+
+size_t SnapshotCapturedCharacters(uintptr_t* outBuf, size_t maxCount) {
+    if (!outBuf || maxCount == 0) return 0;
+    std::lock_guard lock(s_capturedCharsMutex);
+    size_t i = 0;
+    for (auto p : s_capturedChars) {
+        if (i >= maxCount) break;
+        outBuf[i++] = p;
+    }
+    return i;
 }
 
 // ── Install/Uninstall ──

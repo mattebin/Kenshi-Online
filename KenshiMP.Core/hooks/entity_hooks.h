@@ -114,7 +114,23 @@ int GetPositionOffsetInStruct();
 //
 // GetTotalAddToUpdateList()  — total times the hook has fired since DLL load
 // GetLastCharacterAdded()    — most recent Character* the hook saw (raw)
-int      GetTotalAddToUpdateList();
+int       GetTotalAddToUpdateList();
 uintptr_t GetLastCharacterAdded();
+
+// Number of UNIQUE Character* pointers captured (deduplicated). Engine
+// re-adds during zone re-streaming are counted once.
+size_t    GetUniqueCapturedCharacterCount();
+
+// The live GameWorld* the hook last saw. This is the actual struct
+// instance, not a slot — useful for direct field reads at +0x???.
+// Returns 0 if the hook hasn't fired yet.
+uintptr_t GetGameWorldFromHook();
+
+// Copy up to maxCount unique Character* pointers into outBuf (in
+// arbitrary iteration order — we use unordered_set under the hood).
+// Returns how many were written. Caller-provided buffer; nothing is
+// allocated. Iteration is mutex-protected; callers should not hold
+// the result longer than they care about freshness.
+size_t    SnapshotCapturedCharacters(uintptr_t* outBuf, size_t maxCount);
 
 } // namespace kmp::entity_hooks
