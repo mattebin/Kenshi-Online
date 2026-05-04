@@ -38,9 +38,11 @@ Run `KenshiMP.Server.exe` from the Kenshi folder (the installer drops it there).
 
 > Don't trust online port checkers like yougetsignal for UDP — they false-negative on ENet because the server only replies to a valid handshake, not random probes. Use the workflow or have someone actually connect.
 
-### Known limit on 1.0.68
+### Known limits on 1.0.68
 
-Game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md) for the technical write-up of why and the path to fix.
+Game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. Remote players' characters may not render in your world even though chat / presence / position sync work — both gated on the same 1.0.68 binary-layout problem.
+
+Why and how to fix: [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md), [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) (P0 backlog + reverse-engineering tools).
 
 For the technical details and what changed vs. upstream, keep reading.
 
