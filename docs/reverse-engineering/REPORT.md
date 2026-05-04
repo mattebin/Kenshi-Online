@@ -13,6 +13,70 @@ ever appear** in either player's world. We wanted a ground-truth answer
 for "what function does Kenshi 1.0.68 call when a character spawns" so
 we could hook it.
 
+## Update 2026-05-04 (Recon5) — milestone
+
+**Universal character-add capture is working on Kenshi 1.0.68.**
+
+Recon5 (`KenshiOnlineRecon5.py`, full decompile of `FUN_140581770`
+CharacterSpawn + scoring of its 69 callees) identified the right hook:
+
+```c
+void FUN_140787c70(longlong param_1, undefined8 param_2) {     // RVA 0x787C70
+    // 51-byte passthrough wrapping unordered_set::insert
+    undefined8 *local_res8;
+    undefined8 local_res10[3];
+    undefined1 local_18[24];
+    local_res8 = local_res10;
+    local_res10[0] = param_2;
+    thunk_FUN_1405e8130(param_1 + 0x750,    // <-- charUpdateListMain
+                        local_18, local_res10, &local_res8);
+    return;
+}
+```
+
+Confirmed at runtime over a single 2-minute test session in a populated
+zone:
+
+```
+entity_hooks: AddToUpdateListMain hook INSTALLED at 0x7FF6798E7C70 (RVA 0x787C70)
+entity_hooks: AddToUpdateListMain #0    gw=0x7FF67B294110 char=0xF86CF0C0 NEW unique=1
+... (initial save-load: 32 NPCs deserialised) ...
+entity_hooks: AddToUpdateListMain #32   gw=0x7FF67B294110 char=0x13F8D6F40 NEW unique=33
+... (zone stream: +43 chars in one tick) ...
+entity_hooks: AddToUpdateListMain #128  gw=0x7FF67B294110 char=0x1A92683C0 NEW unique=108
+... (final state: 110 unique / 131 total fires, 21 dups from engine re-adds)
+```
+
+This nails three open questions at once:
+
+  * `addToUpdateListMain` RVA on 1.0.68 = **`0x787C70`** (51-byte
+    passthrough — perfect hook target).
+  * `charUpdateListMain` offset in GameWorld = **`+0x750`** (same as
+    KenshiLib's 1.0.51 reference — the struct didn't move; the
+    function did).
+  * **Live GameWorld pointer** `= 0x7FF67B294110` in the test session.
+    Captured automatically on every hook fire (and exposed via
+    `entity_hooks::GetGameWorldFromHook()`).
+
+Critical property: the hook fires for **save-loaded NPCs** (deserialised,
+not factory-created) — that was the "[Pipeline] CharacterCreate: 0
+calls after 31s" symptom from the earlier two-machine session. The
+factory hook only fires for dynamic creation; this one fires for
+everything.
+
+**What this unblocks:** the spawn-sync feature that's been parked all
+along. We now have a validated source of every Character* entering the
+live world. The next commits build on this:
+1. Filter player-owned characters from generic NPCs (faction-based,
+   reuses logic from the existing CharacterCreate path).
+2. Broadcast spawn events for owned characters via the existing
+   ENet protocol.
+3. On the receiving side, proxy-spawn the remote characters.
+
+Speed sync also unblocks now — with the live GameWorld pointer in
+hand we can read `+0x700` directly. ReClass.NET still useful for
+mapping the float layout but no longer blocking.
+
 ## TL;DR
 
 - `RootObjectFactory::createRandomSquad` is at RVA `0x583A10` on

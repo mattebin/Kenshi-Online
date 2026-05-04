@@ -40,26 +40,40 @@ it writes to (`charUpdateListMain`) probably still starts at
 what `game_world_iter.cpp` codes for, which is why that walker
 returns 0 even when characters are present.
 
-**Next concrete step (one focused evening), in order:**
+**Status update 2026-05-04 (Recon5 + hook validation):** This P0 is
+substantially unblocked. Recon5 found `addToUpdateListMain` at RVA
+`0x787C70` on 1.0.68 (a 51-byte passthrough — `docs/reverse-engineering/`
+has the full trail). Hooked it; runtime test captured **110 unique
+Character* values** across a 2-minute populated-zone session — covering
+both save-deserialised NPCs and dynamically-streamed ones. The live
+GameWorld pointer is also now in hand (`0x7FF67B294110` last session,
+exposed via `entity_hooks::GetGameWorldFromHook()` for downstream code).
 
-1. **`KenshiOnlineRecon5.py`** — one more targeted Ghidra pass.
-   Decompile `FUN_140581770` (CharacterSpawn) in full and find the
-   helper it calls near the end that writes into the `+0x7??` region
-   of a GameWorld pointer — that's `addToUpdateListMain` on 1.0.68.
-   ~15 min. Tells us the RVA + the exact write offset, narrowing
-   ReClass.NET's job.
+**Remaining work (now genuinely tractable):**
 
-2. **ReClass.NET** at runtime — point it at the live GameWorld
-   instance (we know how to resolve the pointer via the function-disasm
-   fallback the orchestrator already uses), navigate to `+0x750`, and
-   identify the actual MSVC unordered_set field types one click at a
-   time. Same for `+0x700` (frameSpeedMult). With v5's narrowed target,
-   this is ~30 min.
+1. **Filter player vs NPC** in the captured set. The existing
+   CharacterCreate path has faction-pointer-based ownership logic
+   (`FORK_CHANGES.md` commit `23c8ef8`); reuse that on each newly-
+   captured Character* to decide "broadcast this one" vs "skip
+   (it's a generic NPC)."
 
-3. Update `game_world_iter.cpp` and the speed offsets with the
-   verified layout — single-file changes — and the existing
-   infrastructure should immediately start producing correct counts +
-   sane speed reads.
+2. **Broadcast S2C_RemoteCharacterSpawn** for owned characters via
+   the existing ENet protocol. The protocol message types are
+   defined in `KenshiMP.Common/include/kmp/messages.h`.
+
+3. **Receive side** — proxy-spawn remote characters using the
+   existing factory-direct call path (`CallFactoryDirect` in
+   `entity_hooks.cpp`). That path already works for dynamic spawns;
+   we just feed it different inputs.
+
+4. **Speed sync** — with live GameWorld* known, dereference
+   `+0x700` directly. ReClass.NET helpful for confirming the float
+   slot but no longer required to start. Would close out the other
+   half of the parked SPEED_SYNC_LEAD.md.
+
+ReClass.NET still useful for the optional v6 work (full struct map of
+GameWorld for diagnostic completeness) but not on the critical path
+anymore.
 
 What we know from session logs:
 
