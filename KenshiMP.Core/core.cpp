@@ -2138,6 +2138,118 @@ void Core::SendExistingEntitiesToServer() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Captured-set drain — pump newly-discovered characters into the same
+//  spawn-broadcast pipeline that SendExistingEntitiesToServer uses.
+//
+//  entity_hooks::AddToUpdateListMain hook (RVA 0x787C70 on 1.0.68) captures
+//  every Character* the engine adds to the live update set. This includes
+//  save-loaded NPCs that the legacy CharacterIterator path misses on 1.0.68
+//  (it's reading +0x888 mainUpdateListRemovalQueue, not the live set at
+//  +0x750). For each captured Character* we haven't sent to the server yet,
+//  do the same per-character broadcast logic — faction filter, position
+//  read, packet build, send.
+//
+//  Called from OnGameTick (Connected-only by definition). Throttled to once
+//  every 30 ticks (~0.5 s) since the captured set itself only changes when
+//  the engine actually adds a character — usually on zone-stream bursts.
+// ═══════════════════════════════════════════════════════════════════════════
+void Core::DrainCapturedCharactersToServer() {
+    if (!IsConnected() || !IsGameLoaded()) return;
+
+    // Snapshot the captured-set. Buffer is stack-allocated and bounded —
+    // 256 chars covers any realistic zone load with margin.
+    constexpr size_t kMaxBatch = 256;
+    uintptr_t batch[kMaxBatch];
+    size_t n = entity_hooks::SnapshotCapturedCharacters(batch, kMaxBatch);
+    if (n == 0) return;
+
+    // Need a faction to filter against. If we don't have one yet, the
+    // existing RevalidateFaction loop will discover it; defer until then.
+    uintptr_t playerFaction = m_playerController.GetLocalFactionPtr();
+    if (playerFaction == 0) {
+        playerFaction = entity_hooks::GetEarlyPlayerFaction();
+    }
+    if (playerFaction == 0) return;
+
+    int sent = 0;
+    int skippedFaction = 0;
+    int skippedAlready = 0;
+    int skippedInvalid = 0;
+
+    for (size_t i = 0; i < n; ++i) {
+        uintptr_t charPtr = batch[i];
+        if (!charPtr) { ++skippedInvalid; continue; }
+
+        // Already registered? Skip.
+        void* gameObj = reinterpret_cast<void*>(charPtr);
+        if (m_entityRegistry.GetNetId(gameObj) != INVALID_ENTITY) {
+            ++skippedAlready;
+            continue;
+        }
+
+        game::CharacterAccessor character(gameObj);
+        if (!character.IsValid()) { ++skippedInvalid; continue; }
+
+        // Faction filter — only OUR characters get broadcast.
+        uintptr_t charFaction = character.GetFactionPtr();
+        if (charFaction != playerFaction) { ++skippedFaction; continue; }
+
+        // Position must be live.
+        Vec3 pos = character.GetPosition();
+        if (pos.x == 0.f && pos.y == 0.f && pos.z == 0.f) {
+            ++skippedInvalid;
+            continue;
+        }
+
+        // Register + send. Mirror SendExistingEntitiesToServer.
+        EntityID netId = m_entityRegistry.Register(
+            gameObj, EntityType::NPC, m_localPlayerId);
+        m_entityRegistry.UpdatePosition(netId, pos);
+        Quat rot = character.GetRotation();
+        m_entityRegistry.UpdateRotation(netId, rot);
+
+        uint32_t factionId = 0;
+        const int fIdOff = game::GetOffsets().faction.id;
+        if (charFaction != 0 && fIdOff >= 0)
+            Memory::Read(charFaction + fIdOff, factionId);
+
+        std::string charName = character.GetName();
+
+        PacketWriter writer;
+        writer.WriteHeader(MessageType::C2S_EntitySpawnReq);
+        writer.WriteU32(netId);
+        writer.WriteU8(static_cast<uint8_t>(EntityType::NPC));
+        writer.WriteU32(m_localPlayerId);
+        writer.WriteU32(0);
+        writer.WriteF32(pos.x);
+        writer.WriteF32(pos.y);
+        writer.WriteF32(pos.z);
+        writer.WriteU32(rot.Compress());
+        writer.WriteU32(factionId);
+        uint16_t nameLen = static_cast<uint16_t>(
+            std::min<size_t>(charName.size(), 255));
+        writer.WriteU16(nameLen);
+        if (nameLen > 0) writer.WriteRaw(charName.data(), nameLen);
+
+        writer.WriteU8(1); // hasExtendedState flag
+        for (int bp = 0; bp < 7; bp++) {
+            writer.WriteF32(
+                character.GetHealth(static_cast<BodyPart>(bp)));
+        }
+        writer.WriteU8(character.IsAlive() ? 1 : 0);
+
+        m_client.SendReliable(writer.Data(), writer.Size());
+        ++sent;
+    }
+
+    if (sent > 0) {
+        spdlog::info("Core: DrainCapturedCharactersToServer sent {} new "
+                     "(skipped {} faction-mismatch, {} already-known, {} invalid)",
+                     sent, skippedFaction, skippedAlready, skippedInvalid);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  MOD CHARACTER CLAIMING
 //  After game load, the kenshi-online.mod's "Player 1" through "Player 16"
 //  characters already exist in the world. Instead of calling FactoryCreate
@@ -2317,6 +2429,17 @@ void Core::OnGameTick(float deltaTime) {
     // (host_game_speed is now driven from render_hooks::HookPresent so it
     // can read the live frameSpeedMult even while not yet connected to a
     // server — see render_hooks.cpp.)
+
+    // Drain newly-captured characters into the spawn-broadcast pipeline.
+    // Throttled to ~2 Hz — captures only change on engine zone-stream
+    // bursts so polling more often is wasted work. Internally short-
+    // circuits when there's nothing new.
+    {
+        static int s_drainCounter = 0;
+        if (++s_drainCounter % 30 == 0) {  // ~30 ticks at the OnGameTick rate
+            DrainCapturedCharactersToServer();
+        }
+    }
 
     // Periodic character-update-list sample (only fires while connected
     // to a server, per OnGameTick's Connected-only entry condition).

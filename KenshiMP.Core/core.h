@@ -199,6 +199,13 @@ public:
     // Called after handshake: scan existing local characters and send them to server
     void SendExistingEntitiesToServer();
 
+    // Drain entity_hooks::AddToUpdateListMain captures into the same
+    // C2S_EntitySpawnReq pipeline. Picks up save-loaded NPCs that the
+    // legacy CharacterIterator path misses on 1.0.68. Idempotent —
+    // skips characters already in the entity registry. Filters by
+    // faction so we only broadcast our own squad.
+    void DrainCapturedCharactersToServer();
+
     // Scan for mod characters ("Player 1" through "Player 16") by name and claim them.
     // Local player's slot → local entity. Other slots → available for remote players.
     void FindAndClaimModCharacters();
