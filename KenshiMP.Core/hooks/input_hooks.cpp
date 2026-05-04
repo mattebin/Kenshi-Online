@@ -85,6 +85,25 @@ static void __fastcall Hook_InputKeyUp(void* inputHandler, int key) {
     }
 }
 
+// Walk to the .pdata-reported real function start when the candidate RVA
+// lands mid-function. .pdata is authoritative — same table Windows uses
+// for SEH unwinding. Same recovery pattern used in entity_hooks.cpp for
+// the factory functions; surfaced by the 2026-05-04 two-player session
+// where Kenny's slightly-different 1.0.68 exe had the OIS keyUpEvent
+// RVA 0x3608F0 mid-instruction.
+static uintptr_t RecoverFunctionStart(uintptr_t addr, const char* name) {
+    DWORD64 imageBase = 0;
+    auto* rtFunc = RtlLookupFunctionEntry(
+        static_cast<DWORD64>(addr), &imageBase, nullptr);
+    if (!rtFunc) return addr;
+    uintptr_t funcStart = static_cast<uintptr_t>(imageBase) + rtFunc->BeginAddress;
+    if (funcStart == addr) return addr;
+    spdlog::warn("input_hooks: {} at 0x{:X} is MID-FUNCTION "
+                 "(real start 0x{:X}, offset +0x{:X}) — RECOVERING to real start",
+                 name, addr, funcStart, addr - funcStart);
+    return funcStart;
+}
+
 bool Install() {
     auto& scanner = Core::Get().GetScanner();
     const uintptr_t base = scanner.GetBase();
@@ -94,11 +113,16 @@ bool Install() {
     }
 
     auto& hookMgr = HookManager::Get();
+    const uintptr_t keyDownTarget = RecoverFunctionStart(
+        base + RVA_INPUT_KEY_DOWN, "InputKeyDown");
+    const uintptr_t keyUpTarget = RecoverFunctionStart(
+        base + RVA_INPUT_KEY_UP, "InputKeyUp");
+
     const bool keyDownOk = hookMgr.InstallAt(
-        "InputKeyDown", base + RVA_INPUT_KEY_DOWN,
+        "InputKeyDown", keyDownTarget,
         &Hook_InputKeyDown, &s_origKeyDown);
     const bool keyUpOk = hookMgr.InstallAt(
-        "InputKeyUp", base + RVA_INPUT_KEY_UP,
+        "InputKeyUp", keyUpTarget,
         &Hook_InputKeyUp, &s_origKeyUp);
 
     s_installed = true;
