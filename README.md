@@ -10,22 +10,37 @@ Kenshi-Online adds seamless multiplayer to Kenshi using native MyGUI integration
 
 Latest stable build for **Kenshi 1.0.68 (Steam, Newland)**:
 
-> **[Download the latest release](https://github.com/mattebin/Kenshi-Online/releases/latest)** → grab `KenshiMP-stability-1.0.68.zip`.
+> **[Download the latest release](https://github.com/mattebin/Kenshi-Online/releases/latest)** → grab **`KenshiMP-Setup-*.exe`** (one-click installer, recommended) or `KenshiMP-stability-1.0.68.zip` (manual extract).
+
+### Recommended: installer (.exe)
 
 1. Make sure Kenshi isn't running (Steam can stay open).
-2. Locate your Kenshi install folder (right-click Kenshi in Steam → Manage → Browse local files).
-3. Extract the zip into that folder. It adds `KenshiMP.Core.dll`, `KenshiMP.Server.exe`, `KenshiMP.Injector.exe`, the Multiplayer UI layouts under `data\gui\layout\`, and a `server.json` template.
-4. Launch Kenshi normally from Steam.
-5. **Joining a friend**: in the main menu, click the new "Multiplayer" button. Enter the host's IP and port (default `27800`), pick a player name, hit Connect.
-6. **Hosting locally**: run `KenshiMP.Server.exe` once. It listens on `0.0.0.0:27800`.
-   - **Same network (LAN)**: friends connect to your local IP (run `ipconfig` in cmd → `IPv4 Address`, usually `192.168.x.x`) on port `27800`. No router config needed.
-   - **Over the internet**: forward **UDP `27800`** on your router to your PC (KenshiMP uses ENet over UDP — TCP forwarding isn't needed). Friends connect to your public IP (Google "what is my ip") on port `27800`. Pin your PC's local IP via DHCP reservation so the rule doesn't break on reboot.
+2. Run **`KenshiMP-Setup-*.exe`**. It auto-detects your Kenshi folder via Steam's library list, takes backups of `Plugins_x64.cfg` / `__mods.list` / `Kenshi_MainMenu.layout` into `<KenshiDir>\KenshiMP_backup\`, copies the DLL + server + Injector + GUI layouts + mod files into the right places, and adds `Plugin=KenshiMP.Core` to `Plugins_x64.cfg`.
+3. Launch Kenshi normally from Steam.
 
-> Don't trust online port checkers like yougetsignal for UDP — they false-negative on ENet because the server only replies to a valid handshake, not random probes. The only reliable test is a friend actually trying to connect.
+To remove cleanly: Windows Settings → Apps → Kenshi-Online → Uninstall. The uninstaller restores the original files from the backups it took.
 
-**Known limit on 1.0.68:** game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See the release README for full troubleshooting.
+### Alternative: zip (manual)
 
-> **First time playing with someone?** Read [`docs/PLAYING_TOGETHER.md`](docs/PLAYING_TOGETHER.md) — step-by-step recipe for the join order (connect first, load save second), picking the same starting zone, and warming up the spawn pipeline so other players' characters render.
+1. Right-click Kenshi in Steam → Manage → Browse local files. Extract the zip there. Then run `install.bat` once. Same end-state as the installer.
+
+### 👉 First time playing with someone? Read this.
+
+> **[`docs/PLAYING_TOGETHER.md`](docs/PLAYING_TOGETHER.md)** — step-by-step recipe for the join order (connect first, load save second), picking the same starting zone, and warming up the spawn pipeline so other players' characters render.
+
+### Hosting
+
+Run `KenshiMP.Server.exe` from the Kenshi folder (the installer drops it there). Default port is **`27800` UDP**.
+
+- **Same network (LAN):** friends connect to your local IP (run `ipconfig` → `IPv4 Address`, usually `192.168.x.x`) on `27800`. No router config needed.
+- **Over the internet:** forward **UDP `27800`** on your router to your PC (KenshiMP uses ENet over UDP — TCP forwarding isn't needed). Friends connect to your public IP on `27800`. Pin your PC's local IP via DHCP reservation so the rule doesn't break on reboot.
+- **Verify reachability:** the repo's Actions tab has a `Port Forward Test` workflow — runs an ENet handshake from a GitHub-hosted runner against your IP. Click "Run workflow", pass your public IP, get a definitive yes/no in ~30 seconds.
+
+> Don't trust online port checkers like yougetsignal for UDP — they false-negative on ENet because the server only replies to a valid handshake, not random probes. Use the workflow or have someone actually connect.
+
+### Known limit on 1.0.68
+
+Game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. See [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md) for the technical write-up of why and the path to fix.
 
 For the technical details and what changed vs. upstream, keep reading.
 
