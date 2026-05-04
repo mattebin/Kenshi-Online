@@ -2431,12 +2431,15 @@ void Core::OnGameTick(float deltaTime) {
     // server — see render_hooks.cpp.)
 
     // Drain newly-captured characters into the spawn-broadcast pipeline.
-    // Throttled to ~2 Hz — captures only change on engine zone-stream
-    // bursts so polling more often is wasted work. Internally short-
-    // circuits when there's nothing new.
+    // Throttled to 2 Hz wall-clock (independent of OnGameTick rate, which
+    // is render-frame-rate-driven via HookPresent and varies). Server's
+    // own broadcast rate is KMP_TICK_RATE (20 Hz) but spawns are bursty
+    // events on the client side — every 0.5 s is plenty.
     {
-        static int s_drainCounter = 0;
-        if (++s_drainCounter % 30 == 0) {  // ~30 ticks at the OnGameTick rate
+        static float s_drainAccumSec = 0.0f;
+        s_drainAccumSec += deltaTime;
+        if (s_drainAccumSec >= 0.5f) {
+            s_drainAccumSec = 0.0f;
             DrainCapturedCharactersToServer();
         }
     }
