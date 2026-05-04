@@ -59,6 +59,13 @@ public:
     // Get the Gui singleton
     void* GetGui();
 
+    // Tell MyGUI which widget should currently have keyboard focus.
+    // Pass null to clear focus. Used to make Kenshi's hotkey-gating
+    // logic see "user is editing text" while our chat is open — same
+    // effect typing in vanilla Kenshi UI fields has on hotkeys.
+    // Idempotent if already set to the same widget.
+    void SetKeyFocusWidget(void* widget);
+
 private:
     MyGuiBridge() = default;
 
@@ -140,6 +147,11 @@ private:
     FnSetAlpha        m_fnSetAlpha = nullptr;
     FnGuiCreateWidgetReal       m_fnGuiCreateWidgetReal = nullptr;
     FnWidgetCreateWidgetReal    m_fnWidgetCreateWidgetReal = nullptr;
+
+    // InputManager static getter + setKeyFocusWidget(Widget*)
+    using FnSetKeyFocus = void (__fastcall*)(void* inputMgr, void* widget);
+    FnGetInstance               m_fnInputManagerInstance = nullptr;
+    FnSetKeyFocus               m_fnSetKeyFocus = nullptr;
 
     mutable std::mutex m_mutex;
     std::map<std::string, std::vector<void*>> m_loadedLayouts;

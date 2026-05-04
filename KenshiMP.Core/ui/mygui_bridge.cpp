@@ -232,6 +232,16 @@ bool MyGuiBridge::Init() {
             reinterpret_cast<void**>(&m_fnWidgetCreateWidgetReal),
             "Widget::createWidgetRealT"
         },
+        {
+            "?getInstance@?$Singleton@VInputManager@MyGUI@@@MyGUI@@SAAEAVInputManager@2@XZ",
+            reinterpret_cast<void**>(&m_fnInputManagerInstance),
+            "InputManager::getInstance"
+        },
+        {
+            "?setKeyFocusWidget@InputManager@MyGUI@@QEAAXPEAVWidget@2@@Z",
+            reinterpret_cast<void**>(&m_fnSetKeyFocus),
+            "InputManager::setKeyFocusWidget"
+        },
     };
 
     int resolved = 0;
@@ -290,6 +300,18 @@ void* MyGuiBridge::GetLayoutManager() {
 void* MyGuiBridge::GetGui() {
     if (!m_fnGuiInstance) return nullptr;
     return SEH_Call0(reinterpret_cast<void*>(m_fnGuiInstance));
+}
+
+void MyGuiBridge::SetKeyFocusWidget(void* widget) {
+    if (!m_fnInputManagerInstance || !m_fnSetKeyFocus) return;
+    void* inputMgr = SEH_Call0(reinterpret_cast<void*>(m_fnInputManagerInstance));
+    if (!inputMgr) return;
+    __try {
+        m_fnSetKeyFocus(inputMgr, widget);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        spdlog::error("MyGuiBridge::SetKeyFocusWidget crashed (widget=0x{:X})",
+                      reinterpret_cast<uintptr_t>(widget));
+    }
 }
 
 bool MyGuiBridge::LoadLayout(const std::string& layoutFile, const std::string& prefix) {

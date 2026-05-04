@@ -527,21 +527,31 @@ void NativeHud::AddSystemMessage(const std::string& message) {
 void NativeHud::OpenChatInput() {
     m_chatInputActive = true;
     m_chatInputText.clear();
+    auto& bridge = MyGuiBridge::Get();
     if (m_chatInput) {
-        auto& bridge = MyGuiBridge::Get();
         bridge.SetVisible(m_chatInput, true);
         bridge.SetCaption(m_chatInput, "> _");
     }
+    // Tell MyGUI we have keyboard focus on our chat widget. Kenshi's
+    // hotkey path is gated on "is a MyGUI widget capturing input"
+    // (the same gate that suppresses hotkeys when the user types in
+    // an inventory search field, etc). With focus set here, F1 / M /
+    // Y / digit speed keys etc. don't fire while chat is open —
+    // sidesteps the GetKeyboardState/GetAsyncKeyState IAT path
+    // entirely on builds where Kenshi doesn't use those APIs.
+    if (m_chatInput) bridge.SetKeyFocusWidget(m_chatInput);
 }
 
 void NativeHud::CloseChatInput() {
     m_chatInputActive = false;
     m_chatInputText.clear();
+    auto& bridge = MyGuiBridge::Get();
     if (m_chatInput) {
-        auto& bridge = MyGuiBridge::Get();
         bridge.SetVisible(m_chatInput, false);
         bridge.SetCaption(m_chatInput, "");
     }
+    // Release keyboard focus so Kenshi's normal input flow resumes.
+    bridge.SetKeyFocusWidget(nullptr);
 }
 
 void NativeHud::OnChatChar(wchar_t ch) {
