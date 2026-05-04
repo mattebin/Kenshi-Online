@@ -2308,11 +2308,21 @@ void Core::OnGameTick(float deltaTime) {
     // send packets until a live source is proven.
     kmp::host_game_speed::Tick(deltaTime);
 
-    // (game_world_iter sample is now driven from render_hooks::HookPresent
-    // so it fires even before/without a multiplayer connection — see
-    // render_hooks.cpp.)
-    // (speed_probe is also driven from render_hooks::HookPresent — see
-    // speed_probe.h.)
+    // Periodic character-update-list sample (only fires while connected
+    // to a server, per OnGameTick's Connected-only entry condition).
+    // Logs GameWorld::charUpdateListMain count (+0x750) so we can see
+    // whether 1.0.68's unordered_set layout matches the libstdc++ shape
+    // we coded for.
+    {
+        static int s_charPollCounter = 0;
+        if (++s_charPollCounter % 300 == 0) { // ~5s at 60fps connected
+            size_t n = kmp::game_world_iter::Count();
+            spdlog::info("game_world_iter: charUpdateListMain count = {} "
+                         "(poll #{}/300frames, connected)", n, s_charPollCounter);
+        }
+    }
+
+    // (speed_probe is driven from render_hooks::HookPresent — see speed_probe.h.)
 
     // Deferred install of GameWorld dtor hook — needs the singleton instance
     // to exist (only valid after the user loads a save). Polls every ~120
