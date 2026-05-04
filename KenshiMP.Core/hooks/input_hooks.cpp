@@ -228,51 +228,72 @@ static bool Hook_MyGui_InjectKeyRelease(void* inputMgr, std::uint32_t keyCode) {
 // sidesteps the search entirely — works on any Kenshi version, requires
 // no signature scan.
 
-using GetKeyboardStateFn = BOOL(WINAPI*)(PBYTE);
+using GetKeyboardStateFn  = BOOL(WINAPI*)(PBYTE);
+using GetAsyncKeyStateFn  = SHORT(WINAPI*)(int);
 static GetKeyboardStateFn s_origGetKeyboardState = nullptr;
 static void**             s_iatSlot              = nullptr;
+static GetAsyncKeyStateFn s_origGetAsyncKeyState = nullptr;
+static void**             s_iatSlotAsync         = nullptr;
 static std::atomic<int>   s_iatHookCalls{0};
 static std::atomic<int>   s_iatHookMasked{0};
+static std::atomic<int>   s_iatAsyncCalls{0};
+static std::atomic<int>   s_iatAsyncMasked{0};
+
+static bool ShouldMaskVk(int vk) {
+    // Letters A-Z
+    if (vk >= 0x41 && vk <= 0x5A) return true;
+    // Top-row digits 0-9
+    if (vk >= 0x30 && vk <= 0x39) return true;
+    // F1-F12 (covers Kenshi's F2/F3/F4 speed keys + F1 vanilla help)
+    if (vk >= 0x70 && vk <= 0x7B) return true;
+    switch (vk) {
+        case VK_SPACE: case VK_TAB:
+        case VK_INSERT: case VK_DELETE:
+        case VK_HOME: case VK_END:
+        case VK_PRIOR: case VK_NEXT:
+            return true;
+    }
+    return false;
+}
 
 static BOOL WINAPI Hook_GetKeyboardState(PBYTE lpKeyState) {
-    s_iatHookCalls.fetch_add(1, std::memory_order_relaxed);
+    int n = s_iatHookCalls.fetch_add(1, std::memory_order_relaxed);
+    if (n == 0) {
+        spdlog::info("input_hooks: Hook_GetKeyboardState fired first time "
+                     "(modal={})", IsModalUiActive() ? "yes" : "no");
+    }
     BOOL r = s_origGetKeyboardState ? s_origGetKeyboardState(lpKeyState) : 0;
     if (!r || !lpKeyState) return r;
     if (!IsModalUiActive()) return r;
 
     s_iatHookMasked.fetch_add(1, std::memory_order_relaxed);
-    // Targeted whitelist of VKs to clear while modal. Keep BACK / RETURN /
-    // ESC / arrows so chat editing works; mask everything else that could
-    // fire a game hotkey. WM_CHAR for typed text comes through WndProc on
-    // a separate path and is unaffected by this mask.
-    auto clear = [&](int vk) { lpKeyState[vk] = 0; };
-    // Letter keys (A..Z = 0x41..0x5A) — covers M=map, Y=craft, I=inv, etc.
-    for (int vk = 0x41; vk <= 0x5A; ++vk) clear(vk);
-    // Top-row digits (0..9 = 0x30..0x39) — Kenshi's 1×/2×/3× speed keys.
-    for (int vk = 0x30; vk <= 0x39; ++vk) clear(vk);
-    // Function keys (F1..F12 = 0x70..0x7B) — vanilla help menu, etc.
-    for (int vk = 0x70; vk <= 0x7B; ++vk) clear(vk);
-    // Space (pause), Tab (auto-pilot), Insert/Delete/Home/End/PgUp/PgDn —
-    // all common game hotkeys.
-    clear(VK_SPACE);
-    clear(VK_TAB);
-    clear(VK_INSERT);
-    clear(VK_DELETE);
-    clear(VK_HOME);
-    clear(VK_END);
-    clear(VK_PRIOR);  // PgUp
-    clear(VK_NEXT);   // PgDn
+    for (int vk = 0; vk < 256; ++vk) {
+        if (ShouldMaskVk(vk)) lpKeyState[vk] = 0;
+    }
     return r;
 }
 
-static bool InstallGetKeyboardStateIatHook() {
-    if (s_iatSlot) return true; // idempotent
-
-    HMODULE exe = GetModuleHandleA(nullptr);
-    if (!exe) {
-        spdlog::warn("input_hooks: IAT hook: GetModuleHandle failed");
-        return false;
+static SHORT WINAPI Hook_GetAsyncKeyState(int vKey) {
+    int n = s_iatAsyncCalls.fetch_add(1, std::memory_order_relaxed);
+    if (n == 0) {
+        spdlog::info("input_hooks: Hook_GetAsyncKeyState fired first time "
+                     "(vk=0x{:X}, modal={})", vKey,
+                     IsModalUiActive() ? "yes" : "no");
     }
+    SHORT r = s_origGetAsyncKeyState ? s_origGetAsyncKeyState(vKey) : 0;
+    if (!IsModalUiActive()) return r;
+    if (!ShouldMaskVk(vKey)) return r;
+    s_iatAsyncMasked.fetch_add(1, std::memory_order_relaxed);
+    return 0;  // not pressed, no transition
+}
+
+// Patch one IAT entry in USER32.DLL. Returns the original target via
+// `outOrig` and the slot address via `outSlot`. Both can be passed null
+// to ignore. Returns true if patched.
+static bool PatchUser32Iat(const char* importName, void* hookFn,
+                           void** outSlot, void** outOrig) {
+    HMODULE exe = GetModuleHandleA(nullptr);
+    if (!exe) return false;
     auto base = reinterpret_cast<uintptr_t>(exe);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(exe);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
@@ -291,60 +312,89 @@ static bool InstallGetKeyboardStateIatHook() {
             && _stricmp(dllName, "USER32") != 0) {
             continue;
         }
-
-        // Walk the thunks. OriginalFirstThunk is the name table (read-only),
-        // FirstThunk is the IAT (writable, what we patch).
         auto* nameThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
             base + desc->OriginalFirstThunk);
         auto* iatThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
             base + desc->FirstThunk);
-
         for (; nameThunk->u1.AddressOfData; ++nameThunk, ++iatThunk) {
             if (IMAGE_SNAP_BY_ORDINAL(nameThunk->u1.Ordinal)) continue;
             auto* impName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
                 base + nameThunk->u1.AddressOfData);
-            if (strcmp(impName->Name, "GetKeyboardState") != 0) continue;
+            if (strcmp(impName->Name, importName) != 0) continue;
 
-            // Found it. Patch the IAT slot.
             void** slot =
                 reinterpret_cast<void**>(&iatThunk->u1.Function);
             DWORD oldProt = 0;
             if (!VirtualProtect(slot, sizeof(void*),
                                 PAGE_READWRITE, &oldProt)) {
-                spdlog::error("input_hooks: IAT VirtualProtect RW failed");
                 return false;
             }
-            s_origGetKeyboardState =
-                reinterpret_cast<GetKeyboardStateFn>(*slot);
-            *slot = reinterpret_cast<void*>(&Hook_GetKeyboardState);
+            void* origPtr = *slot;
+            *slot = hookFn;
             VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
-            s_iatSlot = slot;
-            spdlog::info("input_hooks: GetKeyboardState IAT hook INSTALLED "
+            if (outSlot) *outSlot = slot;
+            if (outOrig) *outOrig = origPtr;
+            spdlog::info("input_hooks: IAT hook '{}' INSTALLED "
                          "(orig=0x{:X}, slot=0x{:X})",
-                         reinterpret_cast<uintptr_t>(s_origGetKeyboardState),
+                         importName,
+                         reinterpret_cast<uintptr_t>(origPtr),
                          reinterpret_cast<uintptr_t>(slot));
             return true;
         }
-        break; // found USER32, no need to keep walking other DLLs
+        break;
     }
-    spdlog::warn("input_hooks: IAT hook: GetKeyboardState import not found");
+    spdlog::warn("input_hooks: IAT hook '{}' import NOT FOUND", importName);
     return false;
 }
 
+static bool InstallGetKeyboardStateIatHook() {
+    bool a = false, b = false;
+    if (!s_iatSlot) {
+        void* orig = nullptr;
+        a = PatchUser32Iat("GetKeyboardState",
+                           reinterpret_cast<void*>(&Hook_GetKeyboardState),
+                           reinterpret_cast<void**>(&s_iatSlot), &orig);
+        if (a) s_origGetKeyboardState =
+            reinterpret_cast<GetKeyboardStateFn>(orig);
+    } else { a = true; }
+    if (!s_iatSlotAsync) {
+        void* orig = nullptr;
+        b = PatchUser32Iat("GetAsyncKeyState",
+                           reinterpret_cast<void*>(&Hook_GetAsyncKeyState),
+                           reinterpret_cast<void**>(&s_iatSlotAsync), &orig);
+        if (b) s_origGetAsyncKeyState =
+            reinterpret_cast<GetAsyncKeyStateFn>(orig);
+    } else { b = true; }
+    return a || b;
+}
+
 static void UninstallGetKeyboardStateIatHook() {
-    if (!s_iatSlot || !s_origGetKeyboardState) return;
-    DWORD oldProt = 0;
-    if (VirtualProtect(s_iatSlot, sizeof(void*),
-                       PAGE_READWRITE, &oldProt)) {
-        *s_iatSlot = reinterpret_cast<void*>(s_origGetKeyboardState);
-        VirtualProtect(s_iatSlot, sizeof(void*), oldProt, &oldProt);
+    if (s_iatSlot && s_origGetKeyboardState) {
+        DWORD oldProt = 0;
+        if (VirtualProtect(s_iatSlot, sizeof(void*),
+                           PAGE_READWRITE, &oldProt)) {
+            *s_iatSlot = reinterpret_cast<void*>(s_origGetKeyboardState);
+            VirtualProtect(s_iatSlot, sizeof(void*), oldProt, &oldProt);
+        }
+        s_iatSlot = nullptr;
+        s_origGetKeyboardState = nullptr;
     }
-    spdlog::info("input_hooks: GetKeyboardState IAT hook removed "
-                 "(calls={}, masked={})",
+    if (s_iatSlotAsync && s_origGetAsyncKeyState) {
+        DWORD oldProt = 0;
+        if (VirtualProtect(s_iatSlotAsync, sizeof(void*),
+                           PAGE_READWRITE, &oldProt)) {
+            *s_iatSlotAsync = reinterpret_cast<void*>(s_origGetAsyncKeyState);
+            VirtualProtect(s_iatSlotAsync, sizeof(void*), oldProt, &oldProt);
+        }
+        s_iatSlotAsync = nullptr;
+        s_origGetAsyncKeyState = nullptr;
+    }
+    spdlog::info("input_hooks: IAT hooks removed "
+                 "(KB calls={} masked={}, Async calls={} masked={})",
                  s_iatHookCalls.load(std::memory_order_relaxed),
-                 s_iatHookMasked.load(std::memory_order_relaxed));
-    s_iatSlot = nullptr;
-    s_origGetKeyboardState = nullptr;
+                 s_iatHookMasked.load(std::memory_order_relaxed),
+                 s_iatAsyncCalls.load(std::memory_order_relaxed),
+                 s_iatAsyncMasked.load(std::memory_order_relaxed));
 }
 
 // ── Kenshi hotkey dispatcher hook ──────────────────────────────────────────
