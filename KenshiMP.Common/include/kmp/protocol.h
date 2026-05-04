@@ -117,9 +117,13 @@ enum class MessageType : uint8_t {
     C2S_EntityAck         = 0x15,  // Client confirms receipt (optional)
 
     // ── Host game-speed propagation ──
-    // Client-side sending is disabled on Kenshi v1.0.68 until a live host
-    // time/speed source is proven.
+    // Re-enabled for 1.0.68 in 2026-05-04 commit set after Recon5 +
+    // AddToUpdateListMain runtime validation gave us a live GameWorld
+    // pointer. C2S sends the host's reading of GameWorld+0x700 (float
+    // 1.0/2.0/5.0 etc); the server echoes to all OTHER clients as S2C
+    // so they can write the value to their own GameWorld+0x700.
     C2S_HostGameSpeed     = 0x16,  // Host reports new game-speed multiplier
+    S2C_HostGameSpeed     = 0x17,  // Server forwards host speed to non-host clients
 
     // ── Lobby ──
     S2C_FactionAssignment = 0xF0,  // Server assigns faction string to client

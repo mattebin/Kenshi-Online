@@ -513,6 +513,20 @@ void GameServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t size, 
         // Push out a fresh TimeSync immediately so other clients pick up the
         // new speed without waiting for the next periodic broadcast.
         BroadcastTimeSync();
+        // Also forward the FLOAT-precision speed so non-host clients can
+        // write GameWorld+0x700 directly. TimeSync's uint8_t gameSpeed
+        // can't carry fractional speeds (e.g. 0.5 slow-mo) without
+        // breaking the wire format; S2C_HostGameSpeed has the float.
+        {
+            PacketWriter fwd;
+            fwd.WriteHeader(MessageType::S2C_HostGameSpeed);
+            MsgHostGameSpeed body{};
+            body.speed = clamped;
+            fwd.WriteRaw(&body, sizeof(body));
+            BroadcastExcept(player->id, fwd.Data(), fwd.Size(),
+                            KMP_CHANNEL_RELIABLE_ORDERED,
+                            ENET_PACKET_FLAG_RELIABLE);
+        }
         break;
     }
     case MessageType::C2S_Keepalive: {

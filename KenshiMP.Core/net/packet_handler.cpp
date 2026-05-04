@@ -178,6 +178,9 @@ public:
         case MessageType::S2C_TimeSync:
             HandleTimeSync(reader);
             break;
+        case MessageType::S2C_HostGameSpeed:
+            HandleHostGameSpeed(reader);
+            break;
         case MessageType::S2C_WorldSnapshot:
             HandleWorldSnapshot(reader);
             break;
@@ -992,6 +995,45 @@ private:
 
         // Apply time sync via the time hooks system
         time_hooks::SetServerTime(msg.timeOfDay, static_cast<float>(msg.gameSpeed));
+    }
+
+    // ── Host game-speed (forwarded by server from another client's C2S) ──
+    static void HandleHostGameSpeed(PacketReader& reader) {
+        MsgHostGameSpeed msg;
+        if (!reader.ReadRaw(&msg, sizeof(msg))) return;
+
+        // Sanity range
+        if (!(msg.speed > 0.04f && msg.speed < 10.0f)) {
+            spdlog::warn("PacketHandler: HostGameSpeed dropped — value {:.4f} out of range",
+                         msg.speed);
+            return;
+        }
+
+        // Don't apply if we're the host — we generated it. (Server may still
+        // forward our own packet back depending on broadcast policy; future
+        // hardening can sender-tag this.)
+        if (Core::Get().IsHost()) {
+            return;
+        }
+
+        // Apply to local frameSpeedMult at GameWorld+0x700.
+        uintptr_t gw = entity_hooks::GetGameWorldFromHook();
+        if (gw == 0) {
+            // No live GameWorld yet (we haven't loaded a save). Stash for
+            // later; the host_game_speed module's apply-on-next-tick will
+            // pick it up once a save loads.
+            time_hooks::SetServerTime(0.5f, msg.speed);
+            return;
+        }
+
+        constexpr std::ptrdiff_t kOffsetFrameSpeedMult = 0x700;
+        __try {
+            *reinterpret_cast<volatile float*>(gw + kOffsetFrameSpeedMult) = msg.speed;
+            spdlog::info("PacketHandler: HostGameSpeed applied {:.4f}× -> "
+                         "GameWorld+0x700", msg.speed);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            spdlog::error("PacketHandler: HostGameSpeed write fault at gw=0x{:X}", gw);
+        }
     }
 
     // ── Entity Heartbeat ──
