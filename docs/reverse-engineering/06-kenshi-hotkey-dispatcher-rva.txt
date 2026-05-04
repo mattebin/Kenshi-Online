@@ -1,0 +1,88 @@
+kenshi_x64.exe imageBase=0x140000000
+
+==============================================================================
+=== 1. Locate GetKeyboardState (Win32 import) by name
+==============================================================================
+FOUND symbol 'USER32.DLL::GetKeyboardState' at 0x463 (RVA 0x-13FFFFB9D)
+FOUND symbol 'USER32.DLL::GetKeyboardState::lpKeyState' at 0x1 (RVA 0x-13FFFFFFF)
+
+==============================================================================
+=== 2. Functions that call GetKeyboardState
+==============================================================================
+Direct callers found: 1
+  caller RVA 0x82A3A0  (FUN_14082a3a0)  body 376 bytes
+
+==============================================================================
+=== 3. Decompile each direct caller (first 60 lines each)
+==============================================================================
+
+--- caller RVA 0x82A3A0 (FUN_14082a3a0, body 376 bytes) ---
+    
+    /* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+    
+    uint FUN_14082a3a0(undefined8 param_1,UINT param_2)
+    
+    {
+      BOOL BVar1;
+      UINT wVirtKey;
+      int iVar2;
+      HKL dwhkl;
+      uint uVar3;
+      undefined1 auStackY_178 [32];
+      uint local_138;
+      undefined2 local_134;
+      WCHAR local_130;
+      WCHAR local_12e;
+      undefined2 local_12c;
+      WCHAR local_128 [8];
+      BYTE local_118 [256];
+      ulonglong local_18;
+    
+      local_18 = DAT_1421173c8 ^ (ulonglong)auStackY_178;
+      dwhkl = GetKeyboardLayout(0);
+      BVar1 = GetKeyboardState(local_118);
+      if ((BVar1 != 0) && (wVirtKey = MapVirtualKeyExW(param_2,3,dwhkl), wVirtKey != 0)) {
+        local_138 = 0;
+        local_134 = 0;
+        iVar2 = ToUnicodeEx(wVirtKey,param_2,local_118,(LPWSTR)&local_138,3,0,dwhkl);
+        local_12e = DAT_14213362c;
+        if (iVar2 == 1) {
+          DAT_14213362c = L'\0';
+          if (local_12e == L'\0') {
+            DAT_14213362c = 0;
+            return local_138 & 0xffff;
+          }
+          local_130 = (WCHAR)local_138;
+          local_12c = 0;
+          iVar2 = FoldStringW(0x20,&local_130,3,local_128,3);
+          if (iVar2 != 0) {
+            return (uint)(ushort)local_128[0];
+          }
+        }
+        else if (iVar2 == 2) {
+          uVar3 = local_138 & 0xffff;
+          if (uVar3 == 0x5e) {
+            DAT_14213362c = L'̂';
+          }
+          else if (uVar3 == 0x60) {
+            DAT_14213362c = L'̀';
+          }
+          else if (uVar3 == 0xa8) {
+            DAT_14213362c = L'̈';
+          }
+          else if (uVar3 == 0xb4) {
+            DAT_14213362c = L'́';
+          }
+          else if (uVar3 == 0xb8) {
+            DAT_14213362c = L'̧';
+          }
+          else {
+
+==============================================================================
+=== 4. Sanity check: what's at the RE_Kenshi 1.0.51 RVA 0x82B370?
+==============================================================================
+Function found at RVA 0x82B370: FUN_14082b370 (body 699 bytes)
+Bytes at RVA 0x82B370:
+  40 57 48 83 EC 60 48 C7 44 24 28 FE FF FF FF 48
+
+File: C:\Tools\GhidraProjects\recon6_findings.txt

@@ -14,4 +14,11 @@ void Uninstall();
 // reports IsReady().
 bool InstallMyGuiSwallow();
 
+// Hook Kenshi's per-frame hotkey dispatcher (RVA 0x82B370 — same on
+// 1.0.51 and 1.0.68, confirmed by Recon6). When chat or our native
+// menu is modal, the hook returns early and skips the entire vanilla
+// hotkey poll — F1 help menu, M map, etc. don't fire under our UI.
+// Idempotent. Safe to call repeatedly. Call once during Install().
+bool InstallKenshiHotkey();
+
 } // namespace kmp::input_hooks

@@ -125,9 +125,16 @@ bool Install() {
         "InputKeyUp", keyUpTarget,
         &Hook_InputKeyUp, &s_origKeyUp);
 
+    // Layer 3: Kenshi's per-frame hotkey dispatcher. Without this, F1
+    // pops the vanilla help menu and M opens the map even while our
+    // chat input is active. Independent of OIS/MyGUI/WndProc — runs
+    // off GetKeyboardState directly.
+    bool hotkeyOk = InstallKenshiHotkey();
+
     s_installed = true;
-    spdlog::info("input_hooks: Installed (WndProc + OIS gate, keyDown={}, keyUp={})",
-                 keyDownOk, keyUpOk);
+    spdlog::info("input_hooks: Installed (WndProc + OIS gate keyDown={} keyUp={}, "
+                 "hotkey={})",
+                 keyDownOk, keyUpOk, hotkeyOk);
     return keyDownOk && keyUpOk;
 }
 
@@ -200,6 +207,78 @@ static bool Hook_MyGui_InjectKeyRelease(void* inputMgr, std::uint32_t keyCode) {
         : false;
 }
 
+// ── Kenshi hotkey dispatcher hook ──────────────────────────────────────────
+//
+// Kenshi reads keyboard state via three paths:
+//   1. WndProc            — gated by render_hooks's modal logic
+//   2. MyGUI inputManager — gated by InstallMyGuiSwallow above
+//   3. Per-frame hotkey poll inside FUN_14082B370 — this hook
+//
+// Path 3 is what triggers the vanilla F1 help menu and similar global
+// shortcuts. It pre-dates input dispatch and reads keyboard state via
+// GetKeyboardState directly. Skip the entire function call when our chat
+// or native menu is modal so no Kenshi hotkey fires while the user types.
+//
+// 2026-05-04 Recon6 confirmed RVA 0x82B370 is the same function on 1.0.68
+// as on 1.0.51 — same prologue (40 57 48 83 EC 60 = push rdi; sub rsp,0x60),
+// same body size class. RE_Kenshi's reference value was right; we just
+// hadn't tried it yet.
+
+using KenshiHotkeyFn = void (*)(void* self);
+static constexpr uintptr_t RVA_KENSHI_HOTKEY = 0x82B370;
+static KenshiHotkeyFn s_origKenshiHotkey = nullptr;
+static std::atomic<int> s_kenshiHotkeySwallowed{0};
+static std::atomic<int> s_kenshiHotkeyForwarded{0};
+
+static void Hook_KenshiHotkey(void* self) {
+    if (IsModalUiActive()) {
+        s_kenshiHotkeySwallowed.fetch_add(1, std::memory_order_relaxed);
+        return; // skip entire dispatcher — no hotkey fires
+    }
+    s_kenshiHotkeyForwarded.fetch_add(1, std::memory_order_relaxed);
+    if (s_origKenshiHotkey) {
+        __try {
+            s_origKenshiHotkey(self);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // intentionally minimal — same SEH-isolation pattern as
+            // CallOrigAddToUpdateListMainSafe (no destructible locals)
+            OutputDebugStringA("KMP: KenshiHotkey trampoline crashed\n");
+        }
+    }
+}
+
+bool InstallKenshiHotkey() {
+    if (s_origKenshiHotkey) return true;
+    HMODULE exe = GetModuleHandleA(nullptr);
+    if (!exe) return false;
+    auto target = reinterpret_cast<uintptr_t>(exe) + RVA_KENSHI_HOTKEY;
+
+    // .pdata sanity — refuse if we're mid-function on this build.
+    DWORD64 imageBase = 0;
+    auto* rt = RtlLookupFunctionEntry(static_cast<DWORD64>(target),
+                                      &imageBase, nullptr);
+    if (rt) {
+        uintptr_t funcStart = static_cast<uintptr_t>(imageBase) + rt->BeginAddress;
+        if (funcStart != target) {
+            spdlog::warn("input_hooks: KenshiHotkey RVA 0x{:X} is MID-FUNCTION "
+                         "(real start at 0x{:X}) — refusing to install",
+                         RVA_KENSHI_HOTKEY, funcStart);
+            return false;
+        }
+    }
+
+    auto& hookMgr = HookManager::Get();
+    if (!hookMgr.InstallAt("KenshiHotkey", target,
+                           &Hook_KenshiHotkey, &s_origKenshiHotkey)) {
+        spdlog::warn("input_hooks: KenshiHotkey install FAILED at 0x{:X}", target);
+        return false;
+    }
+    spdlog::info("input_hooks: KenshiHotkey hook INSTALLED at 0x{:X} "
+                 "(RVA 0x{:X}) — F1/hotkeys skip while modal UI active",
+                 target, RVA_KENSHI_HOTKEY);
+    return true;
+}
+
 bool InstallMyGuiSwallow() {
     if (s_myguiInstalled) return true;
 
@@ -267,6 +346,14 @@ void Uninstall() {
                      "(swallowedPress={}, swallowedRelease={})",
                      s_swallowedMyGuiPress.load(std::memory_order_relaxed),
                      s_swallowedMyGuiRelease.load(std::memory_order_relaxed));
+    }
+    if (s_origKenshiHotkey) {
+        hookMgr.Remove("KenshiHotkey");
+        spdlog::info("input_hooks: Uninstalled KenshiHotkey "
+                     "(swallowed={}, forwarded={})",
+                     s_kenshiHotkeySwallowed.load(std::memory_order_relaxed),
+                     s_kenshiHotkeyForwarded.load(std::memory_order_relaxed));
+        s_origKenshiHotkey = nullptr;
     }
     s_installed = false;
 }
