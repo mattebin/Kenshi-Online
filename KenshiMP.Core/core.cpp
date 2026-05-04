@@ -18,6 +18,7 @@
 #include "hooks/squad_spawn_hooks.h"
 #include "hooks/char_tracker_hooks.h"
 #include "game/game_types.h"
+#include "game/game_world_iter.h"
 #include "game/game_offset_prober.h"
 #include "game/asset_facilitator.h"
 #include "game/shared_save_sync.h"
@@ -2306,6 +2307,30 @@ void Core::OnGameTick(float deltaTime) {
     // host_game_speed::Tick is a one-shot disabled-warning; it does not
     // send packets until a live source is proven.
     kmp::host_game_speed::Tick(deltaTime);
+
+    // Periodic character-update-list sample. We have a working SEH-safe
+    // walker for GameWorld::charUpdateListMain (+0x750) — the canonical
+    // unordered_set<Character*> the engine uses to track every live
+    // character in the world. The previous CharacterIterator path read
+    // GameWorld + 0x888 (mainUpdateListRemovalQueue) which is the
+    // *pending removals* lektor — that's why the host log showed
+    // "1 characters" while Kenny's HUD showed 59.
+    //
+    // Surfaced via the 2026-05-04 two-player session: Kenny's screenshot
+    // had the engine tracking 46→59 NPCs while our PipelineOrchestrator
+    // logged "CharacterCreate: 0 calls after 31s". The factory hook we'd
+    // been chasing isn't on 1.0.68's spawn path; the unordered_set IS
+    // populated correctly. Wiring the existing iterator in lets us see
+    // whether 1.0.68's set layout matches the libstdc++ shape we coded
+    // for, and is the prerequisite for diff-based spawn sync.
+    {
+        static int s_charPollCounter = 0;
+        if (++s_charPollCounter % 300 == 0) { // ~5s at 60fps
+            size_t n = kmp::game_world_iter::Count();
+            spdlog::info("game_world_iter: charUpdateListMain count = {} "
+                         "(poll #{}/300frames)", n, s_charPollCounter);
+        }
+    }
 
     // (speed_probe is now driven from render_hooks::HookPresent so it can
     // fire even when the user hasn't connected yet — see speed_probe.h.)
