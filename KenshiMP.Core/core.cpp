@@ -2303,10 +2303,9 @@ void Core::OnGameTick(float deltaTime) {
     // every 5 minutes by default — cheap unless the interval has elapsed).
     kmp::leak_watch::Tick();
 
-    // Host game-speed propagation is currently quarantined for v1.0.68.
-    // host_game_speed::Tick is a one-shot disabled-warning; it does not
-    // send packets until a live source is proven.
-    kmp::host_game_speed::Tick(deltaTime);
+    // (host_game_speed is now driven from render_hooks::HookPresent so it
+    // can read the live frameSpeedMult even while not yet connected to a
+    // server — see render_hooks.cpp.)
 
     // Periodic character-update-list sample (only fires while connected
     // to a server, per OnGameTick's Connected-only entry condition).

@@ -3,6 +3,7 @@
 #include "entity_hooks.h"
 #include "input_hooks.h"
 #include "../sys/speed_probe.h"
+#include "../sys/host_game_speed.h"
 #include "../ui/mygui_bridge.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
@@ -492,6 +493,12 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
         // NativeHud handles all display
         SEH_NativeHudUpdate();
     }
+
+    // ── Host game-speed read (independent of multiplayer) ──
+    // Runs every frame; internally throttles + only broadcasts when
+    // connected as host. Reads frameSpeedMult at GameWorld+0x700 from
+    // the live pointer captured by entity_hooks::AddToUpdateListMain.
+    kmp::host_game_speed::Tick(0.0f);
 
     // ── Live captured-character count (sanity check vs Kenshi's HUD) ──
     // entity_hooks::AddToUpdateListMain captures every Character* the
