@@ -125,16 +125,17 @@ bool Install() {
         "InputKeyUp", keyUpTarget,
         &Hook_InputKeyUp, &s_origKeyUp);
 
-    // Layer 3: Kenshi's per-frame hotkey dispatcher. Without this, F1
-    // pops the vanilla help menu and M opens the map even while our
-    // chat input is active. Independent of OIS/MyGUI/WndProc — runs
-    // off GetKeyboardState directly.
-    bool hotkeyOk = InstallKenshiHotkey();
+    // Layer 3 (KenshiHotkey @ 0x82B370) DISABLED — Recon7 confirmed
+    // that address is engine-init/title-screen logic ("kenshi_fonts.xml",
+    // "Starting Title Screen", MyGUI ResourceManager::load), NOT the
+    // hotkey dispatcher. Hooking and skipping it broke cursor visibility
+    // and put the game in a mid-run state. Real hotkey dispatcher
+    // location TBD — RE_Kenshi's reference may be RVA 0x22B370 (without
+    // the leading 8) per their commit text. Recon8 will verify.
 
     s_installed = true;
-    spdlog::info("input_hooks: Installed (WndProc + OIS gate keyDown={} keyUp={}, "
-                 "hotkey={})",
-                 keyDownOk, keyUpOk, hotkeyOk);
+    spdlog::info("input_hooks: Installed (WndProc + OIS gate keyDown={} keyUp={})",
+                 keyDownOk, keyUpOk);
     return keyDownOk && keyUpOk;
 }
 
