@@ -42,7 +42,7 @@ Run `KenshiMP.Server.exe` from the Kenshi folder (the installer drops it there).
 
 Game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. Remote players' characters may not render in your world even though chat / presence / position sync work — both gated on the same 1.0.68 binary-layout problem.
 
-Why and how to fix: [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md), [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) (P0 backlog + reverse-engineering tools).
+Why and how to fix: [`docs/reverse-engineering/REPORT.md`](docs/reverse-engineering/REPORT.md) (Ghidra recon, what 1.0.68's spawn path actually does, why our hook misses it), [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md) (speed/time offsets), [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) (P0 backlog + RE tools).
 
 For the technical details and what changed vs. upstream, keep reading.
 

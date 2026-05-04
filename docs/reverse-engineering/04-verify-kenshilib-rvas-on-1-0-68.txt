@@ -1,0 +1,352 @@
+kenshi_x64.exe imageBase=0x140000000
+
+==============================================================================
+=== 1. addToUpdateListMain @ KenshiLib RVA 0x786A60 (expected to write +0x750)
+==============================================================================
+RVA 0x786A60 (addToUpdateListMain): no function defined here
+    nearest function offset -128: RVA 0x7869E0 (FUN_1407869e0)
+
+>>> addToUpdateListMain: RVA 0x7869E0 (FUN_1407869e0, 89 bytes) <<<
+    param_1 (this) offsets accessed: 0x768, 0x770, 0x788
+    !!! Expected offset 0x750 NOT present. Closest: 0x768 (delta +24)
+    --- decompile (first 20 of 20 lines) ---
+    
+    void FUN_1407869e0(longlong param_1)
+    
+    {
+      undefined8 *local_res8;
+    
+      if (*(longlong *)(param_1 + 0x770) == 0) {
+        local_res8 = (undefined8 *)0x0;
+      }
+      else {
+        local_res8 = *(undefined8 **)
+                      (*(longlong *)(param_1 + 0x788) + *(longlong *)(param_1 + 0x768) * 8);
+      }
+      for (; local_res8 != (undefined8 *)0x0; local_res8 = (undefined8 *)*local_res8) {
+        thunk_FUN_1405c7bf0(local_res8[2]);
+      }
+      return;
+    }
+    
+    
+
+==============================================================================
+=== 2. removeFromUpdateListMain @ KenshiLib RVA 0x7862D0 (expected +0x750)
+==============================================================================
+RVA 0x7862D0 (removeFromUpdateListMain): no function defined here
+    nearest function offset -96: RVA 0x786270 (FUN_140786270)
+
+>>> removeFromUpdateListMain: RVA 0x786270 (FUN_140786270, 93 bytes) <<<
+    param_1 (this) offsets accessed: 0x18
+    !!! Expected offset 0x750 NOT present. Closest: 0x18 (delta -1848)
+    --- decompile (first 20 of 20 lines) ---
+    
+    void FUN_140786270(longlong param_1,undefined4 *param_2,undefined4 param_3)
+    
+    {
+      longlong *plVar1;
+      undefined4 local_18;
+      undefined4 local_14;
+      undefined4 local_10;
+      undefined4 local_c;
+    
+      local_18 = *param_2;
+      local_14 = param_2[1];
+      local_10 = param_2[2];
+      plVar1 = *(longlong **)(*(longlong *)(param_1 + 0x18) + 0xe8);
+      local_c = param_3;
+      (**(code **)(*plVar1 + 0x3d8))(plVar1,&local_18,1,0x7f9e00,0);
+      return;
+    }
+    
+    
+
+==============================================================================
+=== 3. getCharacterUpdateList @ KenshiLib RVA 0x663BE0 (expected reads +0x750)
+==============================================================================
+RVA 0x663BE0 (getCharacterUpdateList): no function defined here
+
+==============================================================================
+=== 4. setFrameSpeedMultiplier @ KenshiLib RVA 0x786AA0 (expected writes +0x700)
+==============================================================================
+RVA 0x786AA0 (setFrameSpeedMultiplier): no function defined here
+    nearest function offset -96: RVA 0x786A40 (FUN_140786a40)
+
+>>> setFrameSpeedMultiplier: RVA 0x786A40 (FUN_140786a40, 994 bytes) <<<
+    param_1 (this) offsets accessed: 0x720, 0x728, 0x740
+    !!! Expected offset 0x700 NOT present. Closest: 0x720 (delta +32)
+    --- decompile (first 166 of 166 lines) ---
+    
+    /* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+    
+    void FUN_140786a40(longlong param_1)
+    
+    {
+      undefined8 uVar1;
+      longlong *plVar2;
+      longlong lVar3;
+      char cVar4;
+      __uint64 _Var5;
+      void *pvVar6;
+      uint uVar7;
+      ulonglong uVar8;
+      ulonglong uVar9;
+      int iVar10;
+      uint uVar11;
+      ulonglong uVar12;
+      int iVar13;
+      undefined8 *local_res8;
+    
+      uVar9 = 0;
+      if ((DAT_142132ec4 & 1) == 0) {
+        DAT_142132ec4 = DAT_142132ec4 | 1;
+        _DAT_142132ea8 = lektor<class_Character*___ptr64>::vftable;
+        DAT_142132eb0 = 0;
+        DAT_142132eb4 = 10;
+        DAT_142132eb8 = (void *)0x0;
+        _Var5 = SUB168(ZEXT816(8) * ZEXT416(10),0);
+        if (SUB168(ZEXT816(8) * ZEXT416(10),8) != 0) {
+          _Var5 = 0xffffffffffffffff;
+        }
+        DAT_142132eb8 = operator_new__(_Var5);
+        atexit(FUN_1416647a0);
+      }
+      DAT_142132eb0 = 0;
+      uVar7 = *(uint *)(param_1 + 0x728);
+      if (*(uint *)(param_1 + 0x728) == 0) {
+        uVar7 = 10;
+      }
+      uVar8 = uVar9;
+      if (DAT_142132eb4 < uVar7) {
+        _Var5 = SUB168(ZEXT816(8) * ZEXT416(uVar7),0);
+        if (SUB168(ZEXT816(8) * ZEXT416(uVar7),8) != 0) {
+          _Var5 = 0xffffffffffffffff;
+        }
+        pvVar6 = operator_new__(_Var5);
+        uVar12 = uVar9;
+        if (DAT_142132eb0 != 0) {
+          do {
+            *(undefined8 *)(uVar8 + (longlong)pvVar6) = *(undefined8 *)(uVar8 + (longlong)DAT_142132eb8)
+            ;
+            uVar11 = (int)uVar12 + 1;
+            uVar8 = uVar8 + 8;
+            uVar12 = (ulonglong)uVar11;
+          } while (uVar11 < DAT_142132eb0);
+        }
+        operator_delete__(DAT_142132eb8);
+        uVar8 = (ulonglong)DAT_142132eb0;
+        DAT_142132eb4 = uVar7;
+        DAT_142132eb8 = pvVar6;
+      }
+      uVar7 = (uint)uVar8;
+      if (*(longlong *)(param_1 + 0x728) == 0) {
+        local_res8 = (undefined8 *)0x0;
+      }
+      else {
+        local_res8 = *(undefined8 **)
+                      (*(longlong *)(param_1 + 0x740) + *(longlong *)(param_1 + 0x720) * 8);
+      }
+      for (; local_res8 != (undefined8 *)0x0; local_res8 = (undefined8 *)*local_res8) {
+        uVar1 = local_res8[6];
+        if (DAT_142132eb4 <= (uint)uVar8) {
+          uVar7 = DAT_142132eb4 * 2;
+          if (DAT_142132eb4 * 2 == 0) {
+            uVar7 = 10;
+          }
+          if (DAT_142132eb4 < uVar7) {
+            _Var5 = SUB168(ZEXT816(8) * ZEXT416(uVar7),0);
+            if (SUB168(ZEXT816(8) * ZEXT416(uVar7),8) != 0) {
+              _Var5 = 0xffffffffffffffff;
+            }
+            pvVar6 = operator_new__(_Var5);
+            uVar8 = uVar9;
+            uVar12 = uVar9;
+            if (DAT_142132eb0 != 0) {
+              do {
+                *(undefined8 *)(uVar8 + (longlong)pvVar6) =
+                     *(undefined8 *)(uVar8 + (longlong)DAT_142132eb8);
+                uVar11 = (int)uVar12 + 1;
+                uVar8 = uVar8 + 8;
+                uVar12 = (ulonglong)uVar11;
+              } while (uVar11 < DAT_142132eb0);
+            }
+            operator_delete__(DAT_142132eb8);
+            uVar8 = (ulonglong)DAT_142132eb0;
+            DAT_142132eb4 = uVar7;
+            DAT_142132eb8 = pvVar6;
+          }
+        }
+        *(undefined8 *)((longlong)DAT_142132eb8 + uVar8 * 8) = uVar1;
+        uVar7 = DAT_142132eb0 + 1;
+        uVar8 = (ulonglong)uVar7;
+        DAT_142132eb0 = uVar7;
+      }
+      uVar8 = uVar9;
+      uVar12 = uVar9;
+      if (uVar7 != 0) {
+        do {
+          plVar2 = *(longlong **)((longlong)DAT_142132eb8 + uVar9);
+          thunk_FUN_1405c7ae0(plVar2);
+          iVar10 = (int)uVar8;
+          if (((*(char *)((longlong)plVar2 + 0x1a9) != '\0') ||
+              (*(char *)((longlong)plVar2 + 0x3d4) != '\0')) &&
+             (cVar4 = thunk_FUN_140795140(&DAT_142134110,plVar2), cVar4 == '\0')) {
+            iVar13 = (int)uVar12;
+            if ((iVar13 < 1) &&
+               ((DAT_142132ea0 < iVar10 || (iVar13 < (int)((DAT_142132ea0 - DAT_142132eb0) + 2))))) {
+              uVar12 = (ulonglong)(iVar13 + 1U);
+              if (iVar13 + 1U == 1) {
+                DAT_142132ea0 = iVar10;
+              }
+              thunk_FUN_1405cfd90(plVar2);
+              (**(code **)(*plVar2 + 0xe0))(plVar2);
+              (**(code **)(*plVar2 + 0xe8))(plVar2);
+              (**(code **)(*plVar2 + 0x268))(plVar2);
+              lVar3 = DAT_1421348a0;
+              if (*(uint *)(DAT_1421348a0 + 0x1dc) <= *(uint *)(DAT_1421348a0 + 0x1d8)) {
+                thunk_FUN_1405ab5c0(DAT_1421348a0 + 0x1d0,*(uint *)(DAT_1421348a0 + 0x1dc) * 2);
+              }
+              *(longlong **)(*(longlong *)(lVar3 + 0x1e0) + (ulonglong)*(uint *)(lVar3 + 0x1d8) * 8) =
+                   plVar2;
+              *(int *)(lVar3 + 0x1d8) = *(int *)(lVar3 + 0x1d8) + 1;
+              lVar3 = DAT_1421348a0;
+              if (*(uint *)(DAT_1421348a0 + 0x1c4) <= *(uint *)(DAT_1421348a0 + 0x1c0)) {
+                thunk_FUN_1405ab5c0(DAT_1421348a0 + 0x1b8,*(uint *)(DAT_1421348a0 + 0x1c4) * 2);
+              }
+              *(longlong **)(*(longlong *)(lVar3 + 0x1c8) + (ulonglong)*(uint *)(lVar3 + 0x1c0) * 8) =
+                   plVar2;
+              *(int *)(lVar3 + 0x1c0) = *(int *)(lVar3 + 0x1c0) + 1;
+              lVar3 = DAT_1421348a0;
+              if (*(uint *)(DAT_1421348a0 + 0x1ac) <= *(uint *)(DAT_1421348a0 + 0x1a8)) {
+                thunk_FUN_1405ab5c0(DAT_1421348a0 + 0x1a0,*(uint *)(DAT_1421348a0 + 0x1ac) * 2);
+              }
+              *(longlong **)(*(longlong *)(lVar3 + 0x1b0) + (ulonglong)*(uint *)(lVar3 + 0x1a8) * 8) =
+                   plVar2;
+              *(int *)(lVar3 + 0x1a8) = *(int *)(lVar3 + 0x1a8) + 1;
+            }
+            else if (*(char *)(*(longlong *)((longlong)DAT_142132eb8 + uVar9) + 0x3d4) != '\0') {
+              thunk_FUN_1405cfd90(plVar2);
+              (**(code **)(*plVar2 + 0xe0))(plVar2);
+              (**(code **)(*plVar2 + 0x268))(plVar2);
+            }
+          }
+          uVar9 = uVar9 + 8;
+          uVar8 = (ulonglong)(iVar10 + 1U);
+        } while (iVar10 + 1U < DAT_142132eb0);
+        if ((int)uVar12 != 0) {
+          return;
+        }
+      }
+      DAT_142132ea0 = 0xffffffff;
+      return;
+    }
+    
+    
+
+==============================================================================
+=== 5. getFrameSpeedMultiplier @ KenshiLib RVA 0x66BFE0 (expected reads +0x700)
+==============================================================================
+RVA 0x66BFE0 (getFrameSpeedMultiplier): no function defined here
+    nearest function offset +16: RVA 0x66BFF0 (FUN_14066bff0)
+
+>>> getFrameSpeedMultiplier: RVA 0x66BFF0 (FUN_14066bff0, 156 bytes) <<<
+    param_1 (this) offsets accessed: 0x10, 0x18, 0x20
+    !!! Expected offset 0x700 NOT present. Closest: 0x20 (delta -1760)
+    --- decompile (first 29 of 29 lines) ---
+    
+    longlong FUN_14066bff0(longlong param_1,undefined8 param_2,undefined8 *param_3)
+    
+    {
+      void *pvVar1;
+    
+      *(undefined ***)(param_1 + 0x18) =
+           Ogre::
+           STLAllocator<struct_std::_Tree_nod<class_std::_Tmap_traits<class_std::basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>,class_GameData::ObjectInstance,struct_std::less<class_std::basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>_>,class_Ogre::STLAllocator<struct_std::pair<class_std::basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>_const_,class_GameData::ObjectInstance>,class_Ogre::CategorisedAllocPolicy<0>_>,0>_>::_Node,class_Ogre::CategorisedAllocPolicy<0>_>
+           ::vftable;
+      *(undefined ***)(param_1 + 0x20) =
+           Ogre::
+           STLAllocator<struct_std::pair<class_std::basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>_const_,class_GameData::ObjectInstance>,class_Ogre::CategorisedAllocPolicy<0>_>
+           ::vftable;
+      *(undefined8 *)(param_1 + 0x10) = 0;
+      pvVar1 = Ogre::NedPoolingPolicy::allocateBytes(0xb0,(char *)0x0,0,(char *)0x0);
+      *(void **)(param_1 + 8) = pvVar1;
+      *(void **)pvVar1 = pvVar1;
+      *(longlong *)(*(longlong *)(param_1 + 8) + 8) = *(longlong *)(param_1 + 8);
+      *(longlong *)(*(longlong *)(param_1 + 8) + 0x10) = *(longlong *)(param_1 + 8);
+      *(undefined1 *)(*(longlong *)(param_1 + 8) + 0xa8) = 1;
+      *(undefined1 *)(*(longlong *)(param_1 + 8) + 0xa9) = 1;
+      *param_3 = Ogre::
+                 STLAllocator<struct_std::pair<class_std::basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_>_const_,class_GameData::ObjectInstance>,class_Ogre::CategorisedAllocPolicy<0>_>
+                 ::vftable;
+      return param_1;
+    }
+    
+    
+
+==============================================================================
+=== 6. CharacterSpawn @ RVA 0x581770 — first 60 lines (factory field check)
+==============================================================================
+CharacterSpawn body 6410 bytes
+    
+    /* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+    /* WARNING: Type propagation algorithm not settling */
+    
+    longlong * FUN_140581770(undefined8 param_1,ulonglong *param_2)
+    
+    {
+      int iVar1;
+      code *pcVar2;
+      bool bVar3;
+      undefined ********ppppppppuVar4;
+      void *pvVar5;
+      char cVar6;
+      uint uVar7;
+      int iVar8;
+      longlong *plVar9;
+      longlong lVar10;
+      longlong *plVar11;
+      ulonglong uVar12;
+      undefined8 uVar13;
+      Vector3 *pVVar14;
+      longlong *plVar15;
+      longlong lVar16;
+      basic_string<char,struct_std::char_traits<char>,class_std::allocator<char>_> *pbVar17;
+      LogManager *this;
+      longlong lVar18;
+      int *piVar19;
+      undefined ********ppppppppuVar20;
+      undefined8 *puVar21;
+      undefined1 uVar22;
+      ulonglong uVar23;
+      undefined **ppuVar24;
+      undefined **ppuVar25;
+      longlong *plVar26;
+      undefined4 uVar27;
+      undefined4 uVar28;
+      float fVar29;
+      float fVar30;
+      undefined1 auStack_258 [32];
+      ulonglong *local_238;
+      undefined8 local_230;
+      longlong *local_228;
+      undefined8 local_220;
+      undefined8 local_218;
+      char local_208;
+      undefined4 local_200 [2];
+      char local_1f8;
+      void *local_1e8;
+      undefined4 local_1e0;
+      ulonglong local_1d8;
+      undefined **local_1d0;
+      undefined4 local_1c8;
+      undefined4 local_1c4;
+      undefined4 local_1c0;
+      undefined4 local_1bc;
+      undefined4 local_1b8;
+      undefined4 local_1b0 [2];
+      undefined4 local_1a8;
+      undefined4 local_1a4;
+      undefined4 local_1a0;
+
+File: C:\Tools\GhidraProjects\recon4_findings.txt

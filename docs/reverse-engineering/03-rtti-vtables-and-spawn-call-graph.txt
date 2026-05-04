@@ -1,0 +1,322 @@
+kenshi_x64.exe imageBase=0x140000000
+
+==============================================================================
+=== 1. Vtable / RTTI symbol search (all naming patterns)
+==============================================================================
+Scanned 429706 defined symbols
+
+Class=Character pattern='RTTI' — 492 match(es)
+    CharacterInventoryLayout::RTTI_Type_Descriptor  at 0x141C36E60  RVA 0x1C36E60
+    Ogre::STLAllocator<struct_FormationCharacter,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x141C61A80  RVA 0x1C61A80
+    Ogre::STLAllocatorBase<struct_FormationCharacter>::RTTI_Type_Descriptor  at 0x141C61B00  RVA 0x1C61B00
+    Ogre::STLAllocator<struct_std::pair<class_Character*___ptr64_const,class_std::vector<class_Character*___ptr64,class_Ogre::STLAllocator<class_Character*___ptr64,class_Ogre::CategorisedAllocPolicy<0>_>_>_>,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x141C61B60  RVA 0x1C61B60
+    Ogre::STLAllocatorBase<struct_std::pair<class_Character*___ptr64_const,class_std::vector<class_Character*___ptr64,class_Ogre::STLAllocator<class_Character*___ptr64,class_Ogre::CategorisedAllocPolicy<0>_>_>_>_>::RTTI_Type_Descriptor  at 0x141C61C70  RVA 0x1C61C70
+Class=NavMesh pattern='RTTI' — 325 match(es)
+    Ogre::STLAllocator<struct_NavMesh::BuildingInfo,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x141D20D50  RVA 0x1D20D50
+    Ogre::STLAllocatorBase<struct_NavMesh::BuildingInfo>::RTTI_Type_Descriptor  at 0x141D20DD0  RVA 0x1D20DD0
+    NavMeshSector::RTTI_Type_Descriptor  at 0x141D211A8  RVA 0x1D211A8
+    lektor<struct_NavMesh::BuildingInfo>::RTTI_Type_Descriptor  at 0x141D211D8  RVA 0x1D211D8
+    NavMeshGenerator::RTTI_Type_Descriptor  at 0x141D396F0  RVA 0x1D396F0
+Class=PhysicsInterface pattern='RTTI' — 5 match(es)
+    PhysicsInterface::RTTI_Type_Descriptor  at 0x141F95E60  RVA 0x1F95E60
+    PhysicsInterface::RTTI_Complete_Object_Locator  at 0x1418532D8  RVA 0x18532D8
+    PhysicsInterface::RTTI_Class_Hierarchy_Descriptor  at 0x141853308  RVA 0x1853308
+    PhysicsInterface::RTTI_Base_Class_Array  at 0x141853320  RVA 0x1853320
+    PhysicsInterface::RTTI_Base_Class_Descriptor_at_(0,-1,0,64)  at 0x141853348  RVA 0x1853348
+Class=PlayerInterface pattern='RTTI' — 5 match(es)
+    PlayerInterface::RTTI_Type_Descriptor  at 0x141FB06E8  RVA 0x1FB06E8
+    PlayerInterface::RTTI_Complete_Object_Locator  at 0x141855A90  RVA 0x1855A90
+    PlayerInterface::RTTI_Class_Hierarchy_Descriptor  at 0x141855AC0  RVA 0x1855AC0
+    PlayerInterface::RTTI_Base_Class_Array  at 0x141855AD8  RVA 0x1855AD8
+    PlayerInterface::RTTI_Base_Class_Descriptor_at_(0,-1,0,64)  at 0x141855B00  RVA 0x1855B00
+Class=GameWorld pattern='RTTI' — 25 match(es)
+    Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x142006360  RVA 0x2006360
+    Ogre::STLAllocatorBase<class_GameWorld::SysMessage>::RTTI_Type_Descriptor  at 0x1420063E0  RVA 0x20063E0
+    Ogre::STLAllocator<struct_std::_List_nod<class_GameWorld::SysMessage,class_Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>_>::_Node,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x142006440  RVA 0x2006440
+    Ogre::STLAllocatorBase<struct_std::_List_nod<class_GameWorld::SysMessage,class_Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>_>::_Node>::RTTI_Type_Descriptor  at 0x142006540  RVA 0x2006540
+    GameWorld::RTTI_Type_Descriptor  at 0x142007FD0  RVA 0x2007FD0
+Class=ZoneManager pattern='RTTI' — 30 match(es)
+    ZoneManagerInterfaceT::RTTI_Type_Descriptor  at 0x1420EF9F0  RVA 0x20EF9F0
+    Ogre::STLAllocator<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x1420F0460  RVA 0x20F0460
+    Ogre::STLAllocatorBase<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>_>::RTTI_Type_Descriptor  at 0x1420F0500  RVA 0x20F0500
+    Ogre::STLAllocator<struct_boost::unordered::detail::ptr_node<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>_>,class_Ogre::CategorisedAllocPolicy<0>_>::RTTI_Type_Descriptor  at 0x1420F0580  RVA 0x20F0580
+    Ogre::STLAllocatorBase<struct_boost::unordered::detail::ptr_node<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>_>_>::RTTI_Type_Descriptor  at 0x1420F0650  RVA 0x20F0650
+Class=Character pattern='vftable' — 146 match(es)
+    CharacterInventoryLayout::vftable  at 0x141694E10  RVA 0x1694E10
+    CharacterInventoryLayout::vftable_meta_ptr  at 0x141694E08  RVA 0x1694E08
+    Ogre::STLAllocator<struct_FormationCharacter,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x1416AC5E8  RVA 0x16AC5E8
+    Ogre::STLAllocator<struct_FormationCharacter,class_Ogre::CategorisedAllocPolicy<0>_>::vftable_meta_ptr  at 0x1416AC5E0  RVA 0x16AC5E0
+    Ogre::STLAllocator<struct_std::pair<class_Character*___ptr64_const,class_std::vector<class_Character*___ptr64,class_Ogre::STLAllocator<class_Character*___ptr64,class_Ogre::CategorisedAllocPolicy<0>_>_>_>,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x1416AC600  RVA 0x16AC600
+Class=NavMesh pattern='vftable' — 166 match(es)
+    Ogre::STLAllocator<struct_NavMesh::BuildingInfo,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x1416CA048  RVA 0x16CA048
+    Ogre::STLAllocator<struct_NavMesh::BuildingInfo,class_Ogre::CategorisedAllocPolicy<0>_>::vftable_meta_ptr  at 0x1416CA040  RVA 0x16CA040
+    NavMeshSector::vftable  at 0x1416CA4F8  RVA 0x16CA4F8
+    NavMeshSector::vftable_meta_ptr  at 0x1416CA4F0  RVA 0x16CA4F0
+    lektor<struct_NavMesh::BuildingInfo>::vftable  at 0x1416CA668  RVA 0x16CA668
+Class=PhysicsInterface pattern='vftable' — 2 match(es)
+    PhysicsInterface::vftable  at 0x141717308  RVA 0x1717308
+    PhysicsInterface::vftable_meta_ptr  at 0x141717300  RVA 0x1717300
+Class=PlayerInterface pattern='vftable' — 2 match(es)
+    PlayerInterface::vftable  at 0x14171A2B8  RVA 0x171A2B8
+    PlayerInterface::vftable_meta_ptr  at 0x14171A2B0  RVA 0x171A2B0
+Class=GameWorld pattern='vftable' — 6 match(es)
+    Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x1417204C0  RVA 0x17204C0
+    Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>::vftable_meta_ptr  at 0x1417204B8  RVA 0x17204B8
+    Ogre::STLAllocator<struct_std::_List_nod<class_GameWorld::SysMessage,class_Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>_>::_Node,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x1417204D8  RVA 0x17204D8
+    Ogre::STLAllocator<struct_std::_List_nod<class_GameWorld::SysMessage,class_Ogre::STLAllocator<class_GameWorld::SysMessage,class_Ogre::CategorisedAllocPolicy<0>_>_>::_Node,class_Ogre::CategorisedAllocPolicy<0>_>::vftable_meta_ptr  at 0x1417204D0  RVA 0x17204D0
+    GameWorld::vftable  at 0x141722608  RVA 0x1722608
+Class=ZoneManager pattern='vftable' — 8 match(es)
+    ZoneManagerInterfaceT::vftable  at 0x141748FF8  RVA 0x1748FF8
+    ZoneManagerInterfaceT::vftable_meta_ptr  at 0x141748FF0  RVA 0x1748FF0
+    Ogre::STLAllocator<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x141749190  RVA 0x1749190
+    Ogre::STLAllocator<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>,class_Ogre::CategorisedAllocPolicy<0>_>::vftable_meta_ptr  at 0x141749188  RVA 0x1749188
+    Ogre::STLAllocator<struct_boost::unordered::detail::ptr_node<struct_std::pair<int_const_,struct_ZoneManager::BiomeGroundEffects>_>,class_Ogre::CategorisedAllocPolicy<0>_>::vftable  at 0x1417491A8  RVA 0x17491A8
+
+==============================================================================
+=== 2. Functions that call CharacterSpawn (RVA 0x581770)
+==============================================================================
+CharacterSpawn = FUN_140581770 @ 0x140581770  (body 6410 bytes)
+Direct callers: 0 function(s)
+
+==============================================================================
+=== 3. Decompile FUN_140583A10 (suspected 1.0.68 spawn entry)
+==============================================================================
+Function FUN_140583a10 body 10989 bytes
+First 80 lines:
+    
+    /* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+    /* WARNING: Type propagation algorithm not settling */
+    
+    longlong *
+    FUN_140583a10(undefined8 param_1,ulonglong param_2,Vector3 *param_3,Vector3 *param_4,
+                 undefined4 param_5,longlong *param_6,undefined ********param_7,undefined8 param_8,
+                 longlong *param_9,longlong *param_10,undefined1 param_11,ulonglong param_12,
+                 undefined8 param_13,undefined8 param_14,undefined4 param_15)
+    
+    {
+      byte *pbVar1;
+      float fVar2;
+      int iVar3;
+      code *pcVar4;
+      bool bVar5;
+      bool bVar6;
+      bool bVar7;
+      bool bVar8;
+      bool bVar9;
+      bool bVar10;
+      char cVar11;
+      uint uVar12;
+      int iVar13;
+      Vector3 *pVVar14;
+      undefined ********ppppppppuVar15;
+      undefined8 uVar16;
+      longlong lVar17;
+      longlong *plVar18;
+      Vector3 *pVVar19;
+      undefined8 uVar20;
+      undefined ********ppppppppuVar21;
+      undefined ********ppppppppuVar22;
+      longlong *plVar23;
+      longlong lVar24;
+      undefined4 *puVar25;
+      undefined *******pppppppuVar26;
+      ulonglong uVar27;
+      uint uVar28;
+      undefined ******ppppppuVar29;
+      longlong lVar30;
+      uint uVar31;
+      int iVar32;
+      char *pcVar33;
+      undefined *puVar34;
+      ulonglong uVar35;
+      ulonglong uVar36;
+      float fVar37;
+      float fVar38;
+      undefined1 auStack_308 [32];
+      undefined ********local_2e8;
+      longlong *local_2e0;
+      ulonglong local_2d8;
+      undefined8 local_2d0;
+      undefined8 local_2c8;
+      undefined *******local_2c0;
+      undefined1 local_2b8;
+      undefined ********local_2b0;
+      undefined8 local_2a8;
+      undefined4 local_2a0;
+      undefined4 local_298;
+      undefined1 local_290;
+      uint local_288;
+      char local_284;
+      undefined1 local_283;
+      undefined ********local_280;
+      undefined *******local_268;
+      undefined4 local_260;
+      undefined4 local_258;
+      undefined4 local_254;
+      undefined4 local_250;
+      longlong *local_248;
+      undefined4 local_240;
+      Vector3 *local_238;
+      float local_230;
+      undefined4 local_22c;
+      float local_228;
+      ulonglong local_220;
+      undefined8 local_218;
+      longlong *local_210;
+
+(All lines containing 'thunk_FUN_' or string DAT_ refs:)
+      local_a8 = DAT_1421173c8 ^ (ulonglong)auStack_308;
+      thunk_FUN_140069d10(&local_120,"leader",6);
+      thunk_FUN_14006a590(param_7,&local_268,(uVar35 >> 0x1c ^ uVar35) * 0x80000001,pcVar33);
+        thunk_FUN_140069d10(&local_f8,"squad",5);
+        thunk_FUN_140069d10(&local_170,"squad2",6);
+        thunk_FUN_140069d10(&local_1c0,"animals",7);
+        cVar11 = thunk_FUN_1400a93f0(local_280,&local_1c0);
+        thunk_FUN_140069d10(&local_198,"animals2",8);
+        cVar11 = thunk_FUN_1400a93f0(ppppppppuVar22,&local_198);
+        thunk_FUN_140069d10(&local_148,"choosefrom list",0xf);
+        cVar11 = thunk_FUN_1400a93f0(ppppppppuVar22,&local_148);
+          cVar11 = thunk_FUN_140959640(local_210,local_280);
+          if ((cVar11 != '\0') || (cVar11 = thunk_FUN_140953440(ppppppppuVar22), cVar11 != '\0')) {
+            uVar16 = thunk_FUN_1404fe890();
+            thunk_FUN_14095b210(uVar16,plVar23,ppppppppuVar22,0);
+        param_10 = (longlong *)thunk_FUN_1407f4420(local_220,local_280,local_283,local_238);
+      thunk_FUN_140069d10(&local_1c0,"roaming military",0x10);
+      lVar17 = thunk_FUN_14006c7c0(local_280 + 0x1f,&local_1c0);
+      thunk_FUN_1409c44b0(param_10,param_15);
+      thunk_FUN_1407ec8d0(uVar16,local_208,param_15);
+      thunk_FUN_1407ecbc0(param_10);
+      thunk_FUN_1407ecdc0(param_10,local_248);
+        uVar16 = thunk_FUN_1409f9100(&DAT_142133f90,param_12,ZERO_exref);
+      fVar38 = DAT_1421334dc;
+      thunk_FUN_140069d10(&local_1c0,"dont multiply",0xd);
+      lVar17 = thunk_FUN_14006c7c0(ppppppppuVar22 + 0x1f,&local_1c0);
+      plVar18 = (longlong *)thunk_FUN_14038c2f0(DAT_1421345c8,1,ZERO_exref,plVar23);
+        plVar18 = (longlong *)thunk_FUN_14038c2f0(DAT_1421345c8,0,ZERO_exref,plVar23);
+      uVar16 = thunk_FUN_1400f6c20(local_210);
+      thunk_FUN_1407ec8d0(uVar20,uVar16,param_15);
+      thunk_FUN_1407ec9e0(uVar16,local_210 + 0xb,param_15);
+      thunk_FUN_140553210(plVar23,param_10);
+      thunk_FUN_140069d10(&local_1c0,"leader",6);
+      lVar17 = thunk_FUN_14006dc80(local_280 + 0x57,&local_1c0);
+        pcVar33 = &DAT_142134130;
+             (undefined ********)thunk_FUN_1400b64b0(ppppppppuVar22,&local_1c0,0,&DAT_142134130);
+          uVar16 = thunk_FUN_1400a40c0(&local_198,
+          uVar16 = thunk_FUN_1400a41c0(&local_1c0,uVar16,&DAT_141683d98);
+          thunk_FUN_14017f6c0(uVar16,4);
+          lVar17 = thunk_FUN_1405836e0(local_218,local_220,&local_268,pcVar33);
+            cVar11 = thunk_FUN_140506960(lVar17);
+            thunk_FUN_1406215c0(lVar17,2);
+      thunk_FUN_140069d10(&local_1c0,"num random chars max",0x14);
+      lVar17 = thunk_FUN_14006cf30(local_280 + 0x2f,&local_1c0);
+      thunk_FUN_140069d10(&local_1c0,"num random chars",0x10);
+      lVar17 = thunk_FUN_14006cf30(ppppppppuVar22 + 0x2f,&local_1c0);
+        uVar12 = thunk_FUN_1409b3b40(uVar12,iVar32);
+          thunk_FUN_140069d10(&local_170,"choosefrom list",0xf);
+          thunk_FUN_14006a590(local_280 + 0x57,&local_268,(uVar36 >> 0x1c ^ uVar36) * 0x80000001,pcVar33
+            lVar17 = thunk_FUN_14057fd40(local_218,local_280,&local_170,1);
+              ppppppppuVar22 = (undefined ********)thunk_FUN_1406bee10(lVar17,&DAT_142134130);
+            lVar17 = thunk_FUN_1405836e0(local_218,local_220,&local_248,pcVar33);
+                thunk_FUN_1406215c0(lVar17,0);
+      thunk_FUN_140069d10(&local_1c0,"squad",5);
+            iVar13 = thunk_FUN_1409b3b40();
+          thunk_FUN_140069d10(&local_198,"squad",5);
+               (undefined ********)thunk_FUN_1400b64b0(ppppppppuVar22,&local_198,iVar32,&DAT_142134130);
+            uVar16 = thunk_FUN_1400a4700(&local_170,
+            uVar16 = thunk_FUN_1400a41c0(&local_120,uVar16,") for squad \'");
+            uVar16 = thunk_FUN_1400a4530(&local_148,uVar16,local_280 + 5);
+            uVar16 = thunk_FUN_1400a41c0(&local_198,uVar16,&DAT_141683b88);
+                lVar17 = thunk_FUN_1405836e0(local_218,local_220,&local_258,param_10[0x3b]);
+      thunk_FUN_140069d10(&local_1c0,"squad2",6);
+      lVar17 = thunk_FUN_14006dc80(ppppppppuVar22 + 0x57,&local_1c0);
+          thunk_FUN_140069d10(&local_198,"squad2",6);
+                  thunk_FUN_1406215c0(lVar17,1);
+        thunk_FUN_140069d10(&local_198,"animal age random",0x11);
+        lVar24 = thunk_FUN_1400b0ab0(ppppppppuVar22 + 0x37,&local_198);
+            thunk_FUN_140069d10(&local_198,"animals",7);
+                 thunk_FUN_1400b64b0(ppppppppuVar22,&local_198,iVar32,&DAT_142134130);
+                  fVar37 = (float)thunk_FUN_1409b1c10();
+      thunk_FUN_140069d10(&local_1c0,"animals2",8);
+      thunk_FUN_140271620(lVar17,lVar24);
+      thunk_FUN_140069d10(&local_1c0,"slaves",6);
+      lVar17 = thunk_FUN_14006dc80(local_280 + 0x57);
+          thunk_FUN_140069d10(&local_198,"slaves",6);
+          puVar34 = &DAT_142134130;
+          uVar35 = thunk_FUN_1400b64b0(local_280,&local_198,iVar32,&DAT_142134130);
+            thunk_FUN_14017f6c0(uVar16);
+            thunk_FUN_140069d10(&local_148,"faction",7);
+            uVar16 = thunk_FUN_1400a9300(uVar35,&local_148,0);
+            lVar17 = thunk_FUN_1402e7a20(DAT_1421345b8,uVar16);
+            pppppppuVar26 = (undefined *******)thunk_FUN_1407f4420(lVar17,uVar35,local_283,local_238);
+            thunk_FUN_140583a10(local_218,lVar17,&local_258,local_208);
+                thunk_FUN_1406215c0(plVar23,4);
+                thunk_FUN_1405b24a0(uVar16,1);
+                uVar16 = thunk_FUN_14079aea0(param_10);
+                thunk_FUN_1407925c0(&local_170,uVar16);
+                thunk_FUN_14032e430(plVar23,&local_170);
+                thunk_FUN_14032e590(plVar23,1,&local_170);
+      thunk_FUN_140069d10(&local_1c0,"prisoners");
+        DAT_142038e60 = 0;
+        uVar16 = thunk_FUN_1400f6c20(plVar23);
+        thunk_FUN_1409fc540(&local_200,uVar16);
+            uVar36 = thunk_FUN_1406bee10(lVar24 + uVar27 * 0x40,&DAT_142134130);
+              thunk_FUN_140069d10(&local_198,"faction",7);
+              uVar16 = thunk_FUN_1400a9300(uVar36,&local_198,0);
+              pppppppuVar26 = (undefined *******)thunk_FUN_1407f4420(lVar17,uVar36,local_283,local_238);
+              local_2e8 = (undefined ********)CONCAT44(local_2e8._4_4_,DAT_142038e60);
+              thunk_FUN_140501e70(&local_f8,pppppppuVar26[0x3b] + 10);
+                  if (DAT_142038e60 == 0) {
+                    thunk_FUN_140799af0(&DAT_142134110,lVar17,0,"createRandomSquad");
+                  if (DAT_142038e60 == 1) {
+                    uVar12 = thunk_FUN_1409b3b40(0,DAT_142038e60 - 1);
+                    if (DAT_142038e60 <= uVar12) {
+                      uVar12 = DAT_142038e60 - 1;
+                  pppppppuVar26 = DAT_142038e68[(int)uVar12];
+                  pcVar33 = (char *)DAT_142038e68;
+                  if (uVar12 < DAT_142038e60) {
+                        *(undefined8 *)(lVar30 + -8 + (longlong)DAT_142038e68) =
+                             *(undefined8 *)(lVar30 + (longlong)DAT_142038e68);
+                      } while (uVar12 < DAT_142038e60);
+                    DAT_142038e60 = DAT_142038e60 - 1;
+                  thunk_FUN_140330600(lVar17,1);
+                  lVar17 = thunk_FUN_140791b10(lVar17);
+         ((cVar11 = thunk_FUN_140959420(param_10[0x3b]), cVar11 != '\0' ||
+          (cVar11 = thunk_FUN_140953f60(param_10[0x3b]), cVar11 != '\0')))) {
+          thunk_FUN_1404ff5e0(param_10[0x3b],1);
+          thunk_FUN_14095b210(uVar16,plVar23,local_280,0);
+
+==============================================================================
+=== 4. Strings referenced from inside FUN_140583A10
+==============================================================================
+Found 24 unique strings referenced in FUN_140583A10:
+    ') for squad ''
+    '[RootObjectFactory::createRandomSquad] Missing squad animals dat'
+    '[RootObjectFactory::createRandomSquad] Missing squad animals2 da'
+    '[RootObjectFactory::createRandomSquad] Missing squad leader data'
+    '[RootObjectFactory::createRandomSquad] Missing squad prisoners d'
+    '[RootObjectFactory::createRandomSquad] Missing squad slaves data'
+    '[RootObjectFactory::createRandomSquad] Missing squad squad data '
+    '[RootObjectFactory::createRandomSquad] Missing squad squad2 data'
+    'animal age random'
+    'animals'
+    'animals2'
+    'choosefrom list'
+    'createRandomSquad'
+    'dont multiply'
+    'faction'
+    'invalid vector<T> subscript'
+    'leader'
+    'num random chars'
+    'num random chars max'
+    'prisoners'
+    'roaming military'
+    'slaves'
+    'squad'
+    'squad2'
+
+==============================================================================
+=== 5. Callers of FUN_140583A10
+==============================================================================
+Direct callers: 0 function(s)
+
+File: C:\Tools\GhidraProjects\recon3_findings.txt

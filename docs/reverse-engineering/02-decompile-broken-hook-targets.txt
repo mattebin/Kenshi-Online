@@ -1,0 +1,611 @@
+kenshi_x64.exe imageBase=0x140000000
+
+==============================================================================
+=== 1. RTTI vtable discovery for key classes
+==============================================================================
+
+==============================================================================
+=== 2. Vtable contents (each entry = a virtual method RVA)
+==============================================================================
+
+==============================================================================
+=== 3. Speed-setter candidates — functions writing float 5.0 to arg0+N
+==============================================================================
+Candidate functions reading 5.0f: 86
+
+--- candidate (body 9 bytes): FUN_1403a0050 @ RVA 0x3A0050 ---
+    
+    undefined8 FUN_1403a0050(void)
+    
+    {
+      return 0x40a00000;
+    }
+    
+    
+
+--- candidate (body 55 bytes): FUN_1409849e0 @ RVA 0x9849E0 ---
+    
+    undefined8 FUN_1409849e0(longlong param_1)
+    
+    {
+      float fVar1;
+    
+      if (*(char *)(param_1 + 0x3c) == '\0') {
+        *(undefined1 *)(param_1 + 0x3c) = DAT_142133462;
+        return 0;
+      }
+      fVar1 = DAT_142133790 + *(float *)(param_1 + 0x38);
+      *(float *)(param_1 + 0x38) = fVar1;
+      if (5.0 <= fVar1) {
+        return 1;
+      }
+      return 0;
+    }
+    
+    
+
+--- candidate (body 69 bytes): FUN_1403b57e0 @ RVA 0x3B57E0 ---
+    
+    float * FUN_1403b57e0(longlong param_1,float *param_2,longlong param_3)
+    
+    {
+      int iVar1;
+      float fVar2;
+      float fVar3;
+      float fVar4;
+      float fVar5;
+      float fVar6;
+      float fVar7;
+      undefined8 uVar8;
+    
+      iVar1 = **(int **)(*(longlong *)(param_3 + 0x10) + 0x70);
+      if (iVar1 == 3) {
+        fVar2 = *(float *)(param_3 + 0x34);
+        fVar3 = *(float *)(param_3 + 0x38);
+        fVar4 = *(float *)(param_3 + 0x3c);
+        fVar5 = *(float *)(param_1 + 0x24);
+        fVar6 = *(float *)(param_1 + 0x28);
+        fVar7 = *(float *)(param_1 + 0x2c);
+        *param_2 = *(float *)(param_3 + 0x30) * *(float *)(param_1 + 0x20);
+        param_2[1] = fVar2 * fVar5;
+        param_2[2] = fVar3 * fVar6;
+        param_2[3] = fVar4 * fVar7;
+
+--- candidate (body 78 bytes): FUN_140441760 @ RVA 0x441760 ---
+    
+    float FUN_140441760(float param_1,float param_2,float param_3)
+    
+    {
+      float fVar1;
+    
+      fVar1 = expf(-(((param_1 / param_2) * 2.0 - 1.0) * 5.0 * param_3));
+      return 1.0 / (fVar1 + 1.0);
+    }
+    
+    
+
+--- candidate (body 121 bytes): FUN_14051d100 @ RVA 0x51D100 ---
+    
+    ulonglong FUN_14051d100(longlong param_1,longlong param_2,float param_3)
+    
+    {
+      float fVar1;
+      ulonglong uVar2;
+    
+      uVar2 = thunk_FUN_14051cd10(*(undefined4 *)(param_2 + 0x90),param_3 * *(float *)(param_1 + 0x70),
+                                  param_3 * *(float *)(param_1 + 0x6c),
+                                  param_3 * *(float *)(param_1 + 0x68));
+      if (0.0 < (float)uVar2) {
+        fVar1 = expf(-(((float)uVar2 * 2.0 - 1.0) * 5.0 * 2.0));
+        uVar2 = (ulonglong)(uint)(1.0 / (fVar1 + 1.0));
+      }
+      return uVar2;
+    }
+    
+    
+
+--- candidate (body 172 bytes): FUN_1403e7490 @ RVA 0x3E7490 ---
+    
+    void FUN_1403e7490(void)
+    
+    {
+      if (DAT_142133320 == 0) {
+        thunk_FUN_1406ae960(DAT_142133310);
+        if (DAT_142135c48 != 0) {
+          (**(code **)(**(longlong **)(DAT_142135c48 + 8) + 0x108))
+                    (*(longlong **)(DAT_142135c48 + 8),DAT_1421334a8 * 10.0 * DAT_142133534);
+        }
+        Terrain::setDetailThreshold
+                  (DAT_142133318,(1.0 - DAT_1421334ac) * 30.0 + 5.0,(1.0 - DAT_1421334b0) * 30.0 + 5.0,
+                   DAT_1421334b4 * 10.0);
+      }
+      return;
+    }
+    
+    
+
+--- candidate (body 179 bytes): FUN_1408c6660 @ RVA 0x8C6660 ---
+    
+    /* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+    
+    void FUN_1408c6660(longlong param_1,undefined4 param_2,undefined4 param_3)
+    
+    {
+      int iVar1;
+      longlong lVar2;
+      undefined8 uVar3;
+      undefined4 extraout_XMM0_Da;
+      float fVar4;
+      undefined4 uVar5;
+      undefined4 uVar6;
+    
+      lVar2 = (**(code **)(**(longlong **)(param_1 + 0x10) + 0x58))();
+      if (*(longlong *)(lVar2 + 0x250) != 0) {
+        iVar1 = thunk_FUN_1405c7fd0(*(undefined8 *)(param_1 + 0x10));
+        if (iVar1 == 3) {
+          uVar6 = 0x40a00000;
+          if (*(char *)(*(longlong *)(param_1 + 0x10) + 0x348) != '\0') {
+            uVar6 = 0x41200000;
+          }
+          uVar3 = 0x17;
+          uVar5 = extraout_XMM0_Da;
+        }
+
+--- candidate (body 198 bytes): FUN_1402970b0 @ RVA 0x2970B0 ---
+    
+    Vector3 * FUN_1402970b0(longlong *param_1,float param_2)
+    
+    {
+      Quaternion *this;
+      Vector3 *pVVar1;
+      Vector3 *in_RDX;
+      undefined4 uVar2;
+      undefined1 local_20 [24];
+    
+      (**(code **)(*param_1 + 0x470))(param_1,in_RDX,ZERO_exref);
+      this = (Quaternion *)(**(code **)(*param_1 + 0xc0))(param_1,local_20);
+      pVVar1 = (Vector3 *)Ogre::Quaternion::xAxis(this);
+      pVVar1 = (Vector3 *)Ogre::Vector3::operator*(pVVar1,param_2);
+      Ogre::Vector3::operator+=(in_RDX,pVVar1);
+      uVar2 = thunk_FUN_1409b32f0(*(undefined4 *)in_RDX,*(undefined4 *)(in_RDX + 8),0);
+      *(undefined4 *)(in_RDX + 4) = uVar2;
+      thunk_FUN_1409b2140(&DAT_142135b70,in_RDX,UNIT_Y_exref,param_1,0x3f800000,0x40a00000,0xff0000);
+      return in_RDX;
+    }
+    
+    
+
+==============================================================================
+=== 4. Decompile what we've been hooking + suspicious neighbours
+==============================================================================
+
+>>> FactoryCreate-target @ RVA 0x583400 (730 bytes) <<<
+    
+    /* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+    
+    undefined8
+    FUN_140583400(undefined8 param_1,longlong param_2,Vector3 *param_3,undefined1 param_4,
+                 undefined4 *param_5,undefined8 *param_6,undefined4 *param_7,longlong *param_8,
+                 longlong *param_9,undefined1 param_10,undefined8 param_11,undefined4 param_12)
+    
+    {
+      char cVar1;
+      bool bVar2;
+      longlong lVar3;
+      undefined8 uVar4;
+      longlong *plVar5;
+      undefined1 auStack_198 [32];
+      undefined4 *local_178;
+      undefined4 *local_170;
+      undefined4 *local_168;
+      longlong *local_160;
+      undefined1 *local_158;
+      longlong *local_150;
+      undefined8 local_148;
+      undefined1 local_140;
+      undefined1 local_138;
+      undefined1 local_130;
+      undefined4 local_128;
+      undefined1 local_120;
+      undefined4 *local_118;
+      undefined4 local_110;
+      undefined4 local_108;
+      undefined4 uStack_104;
+      undefined4 uStack_100;
+      undefined4 uStack_fc;
+      undefined8 *local_f8;
+      longlong *local_e8;
+      undefined8 local_e0;
+      undefined4 *local_d8;
+      longlong local_d0;
+      undefined4 local_c8;
+      undefined4 local_c4;
+      undefined4 local_c0;
+      undefined1 local_bc;
+      undefined8 local_b8;
+      undefined8 uStack_b0;
+      undefined4 *local_a8;
+      longlong *local_a0;
+      undefined4 local_98;
+      undefined4 local_88;
+      undefined4 uStack_84;
+      undefined4 uStack_80;
+      undefined4 uStack_7c;
+      undefined8 local_78;
+      undefined1 local_70;
+      undefined7 uStack_6f;
+      undefined8 local_60;
+      ulonglong local_58;
+      ulonglong local_48;
+    
+      local_78 = 0xfffffffffffffffe;
+      local_48 = DAT_1421173c8 ^ (ulonglong)auStack_198;
+      local_f8 = param_6;
+      local_118 = param_7;
+      if ((param_2 != 0) || (param_2 = *param_9, param_2 != 0)) {
+        if (*(int *)(param_2 + 0x50) != 0) {
+          local_e8 = param_8;
+          local_e0 = param_11;
+          local_d8 = param_5;
+          local_c8 = *(undefined4 *)param_3;
+          local_c4 = *(undefined4 *)(param_3 + 4);
+          local_c0 = *(undefined4 *)(param_3 + 8);
+          local_b8 = *param_6;
+          uStack_b0 = param_6[1];
+          local_a8 = param_7;
+          local_a0 = param_9;
+          local_98 = param_12;
+          local_d0 = param_2;
+          local_bc = param_4;
+          uVar4 = thunk_FUN_140581770(param_1,&local_e8);
+          return uVar4;
+        }
+        plVar5 = (longlong *)0x0;
+        if ((param_8 != (longlong *)0x0) && ((int)param_8[8] == 5)) {
+          plVar5 = param_8;
+        }
+        local_58 = 0xf;
+        local_60 = 0;
+        local_70 = 0;
+        thunk_FUN_140069d10(&local_70,"is node",7);
+        lVar3 = thunk_FUN_14006c7c0(param_2 + 0xf8,&local_70);
+        cVar1 = *(char *)(lVar3 + 0x28);
+        if (0xf < local_58) {
+          operator_delete((void *)CONCAT71(uStack_6f,local_70));
+        }
+        if (cVar1 == '\0') {
+          bVar2 = Ogre::Vector3::isNaN(param_3);
+          if (!bVar2) {
+            local_58 = 0xf;
+            local_60 = 0;
+            local_70 = 0;
+            thunk_FUN_140069d10(&local_70,"foliage",7);
+            local_88 = *(undefined4 *)local_f8;
+            uStack_84 = *(undefined4 *)((longlong)local_f8 + 4);
+            uStack_80 = *(undefined4 *)(local_f8 + 1);
+            uStack_7c = *(undefined4 *)((longlong)local_f8 + 0xc);
+            local_108 = *(undefined4 *)param_3;
+            uStack_104 = *(undefined4 *)(param_3 + 4);
+            uStack_100 = *(undefined4 *)(param_3 + 8);
+            lVar3 = thunk_FUN_14006c7c0(param_2 + 0xf8,&local_70);
+            local_120 = 0;
+            local_128 = 0xffffffff;
+            local_130 = *(undefined1 *)(lVar3 + 0x28);
+            local_138 = 0;
+            local_140 = param_10;
+            local_148 = 0;
+            local_150 = param_9;
+            local_158 = (undefined1 *)0x0;
+            local_168 = local_118;
+            local_170 = &local_88;
+            local_178 = param_5;
+            local_160 = plVar5;
+            uVar4 = thunk_FUN_14057cc70(param_1,param_2,&local_108,0);
+            goto LAB_140583575;
+          }
+        }
+        else if (plVar5 != (longlong *)0x0) {
+          local_58 = 0xf;
+          local_60 = 0;
+          local_70 = 0;
+          thunk_FUN_140069d10(&local_70,&DAT_14167c3c0,0);
+          local_108 = *(undefined4 *)local_f8;
+          uStack_104 = *(undefined4 *)((longlong)local_f8 + 4);
+          uStack_100 = *(undefined4 *)(local_f8 + 1);
+          uStack_fc = *(undefined4 *)((longlong)local_f8 + 0xc);
+          local_118 = *(undefined4 **)param_3;
+          local_110 = *(undefined4 *)(param_3 + 8);
+          local_158 = &local_70;
+          local_160 = param_9;
+          local_168 = &local_108;
+          local_170 = param_5;
+          local_178 = (undefined4 *)plVar5[0x12];
+          uVar4 = thunk_FUN_14057c860(param_1,1,param_2,&local_118);
+    LAB_140583575:
+          if (local_58 < 0x10) {
+            return uVar4;
+          }
+          operator_delete((void *)CONCAT71(uStack_6f,local_70));
+          return uVar4;
+        }
+      }
+      return 0;
+    }
+    
+    
+
+>>> CreateRandomChar-target @ RVA 0x5836E0 (805 bytes) <<<
+    
+    /* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+    
+    longlong *
+    FUN_1405836e0(undefined8 param_1,longlong param_2,longlong *param_3,undefined8 param_4,
+                 longlong param_5,undefined8 param_6,undefined4 param_7)
+    
+    {
+      bool bVar1;
+      char cVar2;
+      longlong lVar3;
+      undefined8 uVar4;
+      longlong *plVar5;
+      undefined1 auStack_178 [32];
+      longlong local_158;
+      undefined4 *local_150;
+      undefined8 local_148;
+      undefined8 local_140;
+      undefined8 local_138;
+      undefined1 local_130;
+      undefined8 local_128;
+      undefined4 local_120;
+      longlong local_118;
+      undefined4 local_110;
+      undefined8 local_108;
+      undefined4 local_f8;
+      undefined4 uStack_f4;
+      undefined4 uStack_f0;
+      undefined4 uStack_ec;
+      undefined8 local_e8;
+      undefined1 local_e0;
+      undefined7 uStack_df;
+      undefined8 local_d0;
+      ulonglong local_c8;
+      undefined1 local_b8;
+      undefined7 uStack_b7;
+      undefined8 local_a8;
+      ulonglong local_a0;
+      undefined1 local_90;
+      undefined7 uStack_8f;
+      undefined8 local_80;
+      ulonglong local_78;
+      ulonglong local_68;
+    
+      local_e8 = 0xfffffffffffffffe;
+      local_68 = DAT_1421173c8 ^ (ulonglong)auStack_178;
+      local_108 = param_6;
+      bVar1 = true;
+      if (param_5 == 0) {
+        local_a0 = 0xf;
+        local_a8 = 0;
+        local_b8 = 0;
+        thunk_FUN_140069d10(&local_b8,"random character base-copy",0x1a);
+        param_5 = thunk_FUN_1406bfda0(&DAT_142134130,&local_b8,1);
+        if (0xf < local_a0) {
+          operator_delete((void *)CONCAT71(uStack_b7,local_b8));
+        }
+        local_a0 = 0xf;
+        local_a8 = 0;
+        local_b8 = 0;
+        if (*(longlong *)(param_2 + 0x250) != 0) {
+          local_78 = 0xf;
+          local_80 = 0;
+          local_90 = 0;
+          thunk_FUN_140069d10(&local_90,"random character base",0x15);
+          param_5 = thunk_FUN_1406bfda0(&DAT_142134130,&local_90,1);
+          if (0xf < local_78) {
+            operator_delete((void *)CONCAT71(uStack_8f,local_90));
+          }
+          local_78 = 0xf;
+          local_80 = 0;
+          local_90 = 0;
+          bVar1 = false;
+        }
+      }
+      local_c8 = 0xf;
+      local_d0 = 0;
+      local_e0 = 0;
+      thunk_FUN_140069d10(&local_e0,"unique",6);
+      lVar3 = thunk_FUN_14006c7c0(param_5 + 0xf8,&local_e0);
+      cVar2 = *(char *)(lVar3 + 0x28);
+      if (0xf < local_c8) {
+        operator_delete((void *)CONCAT71(uStack_df,local_e0));
+      }
+      if (cVar2 != '\0') {
+        uVar4 = thunk_FUN_140354560();
+        cVar2 = thunk_FUN_1405921b0(uVar4,param_5);
+        if (cVar2 == '\0') {
+          local_c8 = 0xf;
+          local_d0 = 0;
+          local_e0 = 0;
+          thunk_FUN_140069d10(&local_e0,"unique replacement spawn",0x18);
+          uVar4 = thunk_FUN_1400a9300(param_5,&local_e0,0);
+          param_5 = thunk_FUN_1406bfe60(&DAT_142134130,uVar4,1);
+          if (0xf < local_c8) {
+            operator_delete((void *)CONCAT71(uStack_df,local_e0));
+          }
+          local_c8 = 0xf;
+          local_d0 = 0;
+          local_e0 = 0;
+          if (param_5 == 0) {
+            return (longlong *)0x0;
+          }
+        }
+        else {
+          local_118 = param_5;
+          uVar4 = thunk_FUN_140354560();
+          lVar3 = thunk_FUN_140349950(uVar4,&local_118);
+          *(longlong *)(lVar3 + 8) = param_5;
+          lVar3 = thunk_FUN_140349950(uVar4,&local_118);
+          *(undefined8 *)(lVar3 + 0x18) = 0xb;
+          *(undefined8 *)(lVar3 + 0x20) = 0;
+          *(undefined4 *)(lVar3 + 0x28) = 0;
+        }
+      }
+      local_f8 = *(undefined4 *)IDENTITY_exref;
+      uStack_f4 = *(undefined4 *)(IDENTITY_exref + 4);
+      uStack_f0 = *(undefined4 *)(IDENTITY_exref + 8);
+      uStack_ec = *(undefined4 *)(IDENTITY_exref + 0xc);
+      local_118 = *param_3;
+      local_110 = (undefined4)param_3[1];
+      local_120 = param_7;
+      local_128 = local_108;
+      local_130 = 0;
+      local_138 = 0;
+      local_148 = 0;
+      local_150 = &local_f8;
+      local_158 = param_2;
+      local_140 = param_4;
+      plVar5 = (longlong *)thunk_FUN_140583400(param_1,param_5,&local_118,0);
+      if (plVar5 != (longlong *)0x0) {
+        if (bVar1) {
+          (**(code **)(*plVar5 + 0x308))(plVar5,8,1);
+        }
+        if (*(longlong *)(param_2 + 0x250) != 0) {
+          (**(code **)(*plVar5 + 0x308))(plVar5,0,1);
+        }
+      }
+      return plVar5;
+    }
+    
+    
+
+>>> CreateRandomSquad-huge @ RVA 0x583A10 (10989 bytes) <<<
+(too large to dump in full — dumping first 60 lines of decompile)
+    
+    /* WARNING: Function: __security_check_cookie replaced with injection: security_check_cookie */
+    /* WARNING: Type propagation algorithm not settling */
+    
+    longlong *
+    FUN_140583a10(undefined8 param_1,ulonglong param_2,Vector3 *param_3,Vector3 *param_4,
+                 undefined4 param_5,longlong *param_6,undefined ********param_7,undefined8 param_8,
+                 longlong *param_9,longlong *param_10,undefined1 param_11,ulonglong param_12,
+                 undefined8 param_13,undefined8 param_14,undefined4 param_15)
+    
+    {
+      byte *pbVar1;
+      float fVar2;
+      int iVar3;
+      code *pcVar4;
+      bool bVar5;
+      bool bVar6;
+      bool bVar7;
+      bool bVar8;
+      bool bVar9;
+      bool bVar10;
+      char cVar11;
+      uint uVar12;
+      int iVar13;
+      Vector3 *pVVar14;
+      undefined ********ppppppppuVar15;
+      undefined8 uVar16;
+      longlong lVar17;
+      longlong *plVar18;
+      Vector3 *pVVar19;
+      undefined8 uVar20;
+      undefined ********ppppppppuVar21;
+      undefined ********ppppppppuVar22;
+      longlong *plVar23;
+      longlong lVar24;
+      undefined4 *puVar25;
+      undefined *******pppppppuVar26;
+      ulonglong uVar27;
+      uint uVar28;
+      undefined ******ppppppuVar29;
+      longlong lVar30;
+      uint uVar31;
+      int iVar32;
+      char *pcVar33;
+      undefined *puVar34;
+      ulonglong uVar35;
+      ulonglong uVar36;
+      float fVar37;
+      float fVar38;
+      undefined1 auStack_308 [32];
+      undefined ********local_2e8;
+      longlong *local_2e0;
+      ulonglong local_2d8;
+      undefined8 local_2d0;
+      undefined8 local_2c8;
+      undefined *******local_2c0;
+      undefined1 local_2b8;
+      undefined ********local_2b0;
+      undefined8 local_2a8;
+      undefined4 local_2a0;
+
+==============================================================================
+=== 5. Candidate GameWorld global pointers (.data slots holding obj-with-vtable)
+==============================================================================
+Writable initialized blocks: 4
+Object-with-vtable candidates: 201
+(format: slot_RVA -> object_addr -> vtable_RVA)
+    0x141BC9E50 (RVA 0x1BC9E50) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BC9E80 (RVA 0x1BC9E80) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BC9F00 (RVA 0x1BC9F00) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BC9F50 (RVA 0x1BC9F50) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BC9FD0 (RVA 0x1BC9FD0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA030 (RVA 0x1BCA030) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA0E0 (RVA 0x1BCA0E0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA160 (RVA 0x1BCA160) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA240 (RVA 0x1BCA240) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA2F0 (RVA 0x1BCA2F0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA370 (RVA 0x1BCA370) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA3C0 (RVA 0x1BCA3C0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA3F0 (RVA 0x1BCA3F0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA420 (RVA 0x1BCA420) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA4B0 (RVA 0x1BCA4B0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA518 (RVA 0x1BCA518) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA550 (RVA 0x1BCA550) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA598 (RVA 0x1BCA598) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA5D8 (RVA 0x1BCA5D8) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA608 (RVA 0x1BCA608) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA640 (RVA 0x1BCA640) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA710 (RVA 0x1BCA710) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA7B0 (RVA 0x1BCA7B0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA820 (RVA 0x1BCA820) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA870 (RVA 0x1BCA870) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA910 (RVA 0x1BCA910) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCA990 (RVA 0x1BCA990) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCAB10 (RVA 0x1BCAB10) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCAC60 (RVA 0x1BCAC60) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCAD40 (RVA 0x1BCAD40) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCAE00 (RVA 0x1BCAE00) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB030 (RVA 0x1BCB030) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB230 (RVA 0x1BCB230) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB270 (RVA 0x1BCB270) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB2F0 (RVA 0x1BCB2F0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB340 (RVA 0x1BCB340) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB420 (RVA 0x1BCB420) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB4D0 (RVA 0x1BCB4D0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB5E0 (RVA 0x1BCB5E0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB6C0 (RVA 0x1BCB6C0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB770 (RVA 0x1BCB770) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB7F0 (RVA 0x1BCB7F0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB8D0 (RVA 0x1BCB8D0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCB980 (RVA 0x1BCB980) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBA40 (RVA 0x1BCBA40) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBAD0 (RVA 0x1BCBAD0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBBB0 (RVA 0x1BCBBB0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBC70 (RVA 0x1BCBC70) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBD20 (RVA 0x1BCBD20) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBDA0 (RVA 0x1BCBDA0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCBF20 (RVA 0x1BCBF20) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC080 (RVA 0x1BCC080) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC0F0 (RVA 0x1BCC0F0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC140 (RVA 0x1BCC140) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC1E0 (RVA 0x1BCC1E0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC260 (RVA 0x1BCC260) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC330 (RVA 0x1BCC330) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC3E0 (RVA 0x1BCC3E0) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC490 (RVA 0x1BCC490) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+    0x141BCC520 (RVA 0x1BCC520) -> 0x1417C30F8 -> vtable RVA 0xED6A60
+
+File: C:\Tools\GhidraProjects\recon2_findings.txt

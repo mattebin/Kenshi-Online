@@ -24,6 +24,32 @@ other ambitious feature dead-ends at the same place: we don't have
 ground-truth offsets/types for 1.0.68, only KenshiLib's 1.0.51
 reference.
 
+**Status as of 2026-05-04 evening:** a four-pass Ghidra static
+analysis closed in on the answer but couldn't quite finish (see
+[`docs/reverse-engineering/REPORT.md`](reverse-engineering/REPORT.md)).
+Confirmed: `RootObjectFactory::createRandomSquad` is at RVA `0x583A10`
+on 1.0.68 (matches KenshiLib's 1.0.51 reference), and our existing
+hooks at `0x583400` / `0x5836E0` are on the **right functions** —
+they just only fire for dynamically-created characters, not for
+characters loaded from save (which is most of them). The right
+universal capture point is `addToUpdateListMain`, which fires for
+both factory- and save-loaded characters. KenshiLib's RVA for that
+(`0x786A60`) is wrong on 1.0.68 — function moved. The unordered_set
+it writes to (`charUpdateListMain`) probably still starts at
+`GameWorld + 0x750`, but its internal MSVC STL layout differs from
+what `game_world_iter.cpp` codes for, which is why that walker
+returns 0 even when characters are present.
+
+**Next concrete step (one focused evening):** run **ReClass.NET** at
+runtime — point it at the live GameWorld instance (we know how to
+resolve the pointer via the function-disasm fallback the orchestrator
+already uses), navigate to `+0x750`, and identify the actual MSVC
+unordered_set field types one click at a time. Same for `+0x700`
+(frameSpeedMult). Update `game_world_iter.cpp` and the speed offsets
+with the verified layout — single-file changes — and the existing
+infrastructure should immediately start producing correct counts +
+sane speed reads.
+
 What we know from session logs:
 
 | Path | Status on 1.0.68 |

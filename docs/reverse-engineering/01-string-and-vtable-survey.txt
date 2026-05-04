@@ -1,0 +1,168 @@
+kenshi_x64.exe imageBase=0x140000000  total executable bytes=23,533,056
+
+==============================================================================
+=== 1. Anchor string presence in .rdata / .data
+==============================================================================
+miss   'frameSpeedMult'
+miss   'FrameSpeedMult'
+miss   'dayTime'
+miss   'DayTime'
+miss   'charUpdateListMain'
+miss   'addToUpdateListMain'
+miss   'removeFromUpdateListMain'
+miss   'getCharacterUpdateList'
+miss   'kenshi-online.mod'
+miss   'Player 1'
+FOUND  'RootObjectFactory' at: 0x1416EE581 (RVA 0x16EE581), 0x1416EE5E1 (RVA 0x16EE5E1), 0x1416EEB11 (RVA 0x16EEB11), 0x1416EEC41 (RVA 0x16EEC41), 0x1416EECC1 (RVA 0x16EECC1), 0x1416EED31 (RVA 0x16EED31), 0x1416EEDA1 (RVA 0x16EEDA1), 0x1416EEE21 (RVA 0x16EEE21)
+FOUND  'GameWorld' at: 0x14200638F (RVA 0x200638F), 0x142006413 (RVA 0x2006413), 0x142006482 (RVA 0x2006482), 0x1420064A9 (RVA 0x20064A9), 0x142006586 (RVA 0x2006586), 0x1420065AD (RVA 0x20065AD), 0x142007FE4 (RVA 0x2007FE4)
+miss   'createCharacter'
+miss   'createRandomChar'
+miss   'theFactory'
+FOUND  'PlayerInterface' at: 0x141FB06FC (RVA 0x1FB06FC)
+
+==============================================================================
+=== 2. Functions referencing each anchor string (xref to data)
+==============================================================================
+
+==============================================================================
+=== 3. Exported symbol search for `ou` GameWorld global
+==============================================================================
+`ou` symbol not in symbol table — Kenshi 1.0.68 stripped the export.
+
+==============================================================================
+=== 4. Float constant pools — 5.0f, 2.0f, 1.0f, 0.5f
+==============================================================================
+Found 45 occurrences of float 5.0 in non-exec memory (label: speed3 candidate)
+Found 64 occurrences of float 2.0 in non-exec memory (label: speed2 candidate)
+Found 64 occurrences of float 1.0 in non-exec memory (label: speed1 candidate)
+Found 64 occurrences of float 0.5 in non-exec memory (label: slow-mo / half-speed candidate)
+
+Looking for functions that read the 5.0f constant (likely SetSpeed3):
+  5.0f at 0x141685340 read by func RVA 0x8580D0 (FUN_1408580d0)
+  5.0f at 0x141685340 read by func RVA 0x787FB0 (FUN_140787fb0)
+  5.0f at 0x141685340 read by func RVA 0x898E90 (FUN_140898e90)
+  5.0f at 0x141685340 read by func RVA 0x896E20 (FUN_140896e20)
+  5.0f at 0x141685340 read by func RVA 0x856F00 (FUN_140856f00)
+  5.0f at 0x141685340 read by func RVA 0x856F00 (FUN_140856f00)
+  5.0f at 0x141685340 read by func RVA 0xCD500 (FUN_1400cd500)
+  5.0f at 0x141685340 read by func RVA 0x3A6070 (FUN_1403a6070)
+  5.0f at 0x141685340 read by func RVA 0x6AFBF0 (FUN_1406afbf0)
+  5.0f at 0x141685340 read by func RVA 0x2A49E0 (FUN_1402a49e0)
+  5.0f at 0x141685340 read by func RVA 0x2A49E0 (FUN_1402a49e0)
+  5.0f at 0x141685340 read by func RVA 0x2A4DB0 (FUN_1402a4db0)
+  5.0f at 0x141685340 read by func RVA 0x2A4DB0 (FUN_1402a4db0)
+  5.0f at 0x141685340 read by func RVA 0x954C80 (FUN_140954c80)
+  5.0f at 0x141685340 read by func RVA 0x146250 (FUN_140146250)
+  5.0f at 0x141685340 read by func RVA 0x147FD0 (FUN_140147fd0)
+  5.0f at 0x141685340 read by func RVA 0x847BF0 (FUN_140847bf0)
+  5.0f at 0x141685340 read by func RVA 0x7F9E20 (FUN_1407f9e20)
+  5.0f at 0x141685340 read by func RVA 0x165180 (FUN_140165180)
+  5.0f at 0x141685340 read by func RVA 0x1F0A30 (FUN_1401f0a30)
+  5.0f at 0x141685340 read by func RVA 0x262500 (FUN_140262500)
+  5.0f at 0x141685340 read by func RVA 0x262830 (FUN_140262830)
+  5.0f at 0x141685340 read by func RVA 0x26DB30 (FUN_14026db30)
+  5.0f at 0x141685340 read by func RVA 0x26DB30 (FUN_14026db30)
+  5.0f at 0x141685340 read by func RVA 0x26DB30 (FUN_14026db30)
+  5.0f at 0x141685340 read by func RVA 0x286740 (FUN_140286740)
+  5.0f at 0x141685340 read by func RVA 0x2970B0 (FUN_1402970b0)
+  5.0f at 0x141685340 read by func RVA 0x298050 (FUN_140298050)
+  5.0f at 0x141685340 read by func RVA 0x298050 (FUN_140298050)
+  5.0f at 0x141685340 read by func RVA 0x64EDC0 (FUN_14064edc0)
+  5.0f at 0x141685340 read by func RVA 0x29CC90 (FUN_14029cc90)
+  5.0f at 0x141685340 read by func RVA 0x2A5F40 (FUN_1402a5f40)
+  5.0f at 0x141685340 read by func RVA 0x2AE320 (FUN_1402ae320)
+  5.0f at 0x141685340 read by func RVA 0x2B5900 (FUN_1402b5900)
+  5.0f at 0x141685340 read by func RVA 0x955210 (FUN_140955210)
+  5.0f at 0x141685340 read by func RVA 0x9CB310 (FUN_1409cb310)
+  5.0f at 0x141685340 read by func RVA 0x8F50D0 (FUN_1408f50d0)
+  5.0f at 0x141685340 read by func RVA 0x2EC920 (FUN_1402ec920)
+  5.0f at 0x141685340 read by func RVA 0x438C70 (FUN_140438c70)
+  5.0f at 0x141685340 read by func RVA 0x438C70 (FUN_140438c70)
+  5.0f at 0x141685340 read by func RVA 0x64D800 (FUN_14064d800)
+  5.0f at 0x141685340 read by func RVA 0x649D50 (FUN_140649d50)
+  5.0f at 0x141685340 read by func RVA 0x3567A0 (FUN_1403567a0)
+  5.0f at 0x141685340 read by func RVA 0x3A3B00 (FUN_1403a3b00)
+  5.0f at 0x141685340 read by func RVA 0x3C3260 (FUN_1403c3260)
+  5.0f at 0x141685340 read by func RVA 0x3C4520 (FUN_1403c4520)
+  5.0f at 0x141685340 read by func RVA 0x3E7490 (FUN_1403e7490)
+  5.0f at 0x141685340 read by func RVA 0x3E7490 (FUN_1403e7490)
+  5.0f at 0x141685340 read by func RVA 0x3E84F0 (FUN_1403e84f0)
+  5.0f at 0x141685340 read by func RVA 0x4D5420 (FUN_1404d5420)
+  5.0f at 0x141685340 read by func RVA 0x650370 (FUN_140650370)
+  5.0f at 0x141685340 read by func RVA 0x51D100 (FUN_14051d100)
+  5.0f at 0x141685340 read by func RVA 0x666780 (FUN_140666780)
+  5.0f at 0x141685340 read by func RVA 0x441760 (FUN_140441760)
+  5.0f at 0x141685340 read by func RVA 0x9D8C30 (FUN_1409d8c30)
+  5.0f at 0x141685340 read by func RVA 0x4D28A0 (FUN_1404d28a0)
+  5.0f at 0x141685340 read by func RVA 0x857B10 (FUN_140857b10)
+  5.0f at 0x141685340 read by func RVA 0x51DA80 (FUN_14051da80)
+  5.0f at 0x141685340 read by func RVA 0x52BC70 (FUN_14052bc70)
+  5.0f at 0x141685340 read by func RVA 0x557280 (FUN_140557280)
+  5.0f at 0x141685340 read by func RVA 0x5B24E0 (FUN_1405b24e0)
+  5.0f at 0x141685340 read by func RVA 0x7D2440 (FUN_1407d2440)
+  5.0f at 0x141685340 read by func RVA 0x7D1D20 (FUN_1407d1d20)
+  5.0f at 0x141685340 read by func RVA 0x6E9340 (FUN_1406e9340)
+  5.0f at 0x141685340 read by func RVA 0x5CDA20 (FUN_1405cda20)
+  5.0f at 0x141685340 read by func RVA 0x8C6660 (FUN_1408c6660)
+  5.0f at 0x141685340 read by func RVA 0x88A8F0 (FUN_14088a8f0)
+  5.0f at 0x141685340 read by func RVA 0x787E40 (FUN_140787e40)
+  5.0f at 0x141685340 read by func RVA 0x8862D0 (FUN_1408862d0)
+  5.0f at 0x141685340 read by func RVA 0x60A590 (FUN_14060a590)
+  5.0f at 0x141685340 read by func RVA 0x668000 (FUN_140668000)
+  5.0f at 0x141685340 read by func RVA 0x624B70 (FUN_140624b70)
+  5.0f at 0x141685340 read by func RVA 0x8F5AD0 (FUN_1408f5ad0)
+  5.0f at 0x141685340 read by func RVA 0x8F5AD0 (FUN_1408f5ad0)
+  5.0f at 0x141685340 read by func RVA 0x66F190 (FUN_14066f190)
+  5.0f at 0x141685340 read by func RVA 0x6AEB00 (FUN_1406aeb00)
+  5.0f at 0x141685340 read by func RVA 0x6D3740 (FUN_1406d3740)
+  5.0f at 0x141685340 read by func RVA 0x793770 (FUN_140793770)
+  5.0f at 0x141685340 read by func RVA 0x927600 (FUN_140927600)
+  5.0f at 0x141685340 read by func RVA 0x927600 (FUN_140927600)
+  5.0f at 0x141685340 read by func RVA 0x930120 (FUN_140930120)
+  5.0f at 0x141685340 read by func RVA 0x9353C0 (FUN_1409353c0)
+  5.0f at 0x141685340 read by func RVA 0x981B80 (FUN_140981b80)
+  5.0f at 0x141685340 read by func RVA 0x983D70 (FUN_140983d70)
+  5.0f at 0x141685340 read by func RVA 0x985940 (FUN_140985940)
+  5.0f at 0x141685340 read by func RVA 0x997550 (FUN_140997550)
+  5.0f at 0x141685340 read by func RVA 0xBBCFF0 (FUN_140bbcff0)
+  5.0f at 0x141685340 read by func RVA 0xBE2580 (FUN_140be2580)
+  5.0f at 0x141685340 read by func RVA 0x6B2D20 (FUN_1406b2d20)
+  5.0f at 0x141685340 read by func RVA 0x788100 (FUN_140788100)
+  5.0f at 0x141685340 read by func RVA 0x3A0050 (FUN_1403a0050)
+  5.0f at 0x141685340 read by func RVA 0x9849E0 (FUN_1409849e0)
+  5.0f at 0x1416C5020 read by func RVA 0x38CDF0 (FUN_14038cdf0)
+  5.0f at 0x1416C5020 read by func RVA 0x389AF0 (FUN_140389af0)
+  5.0f at 0x1416C5020 read by func RVA 0x4D99B0 (FUN_1404d99b0)
+  5.0f at 0x1416C8F80 read by func RVA 0x3B57E0 (FUN_1403b57e0)
+
+==============================================================================
+=== 5. RootObjectFactory candidates — small dispatchers near 0x583400
+==============================================================================
+Inspecting functions near RVA 0x583400 (target_addr=0x140583400):
+  RVA 0x583400 is INSIDE function FUN_140583400 (entry RVA 0x583400)
+    func RVA 0x583400  name=FUN_140583400  body_size_bytes=730
+    func RVA 0x583400  name=FUN_140583400  body_size_bytes=730
+    func RVA 0x5836E0  name=FUN_1405836e0  body_size_bytes=805
+    func RVA 0x583A10  name=FUN_140583a10  body_size_bytes=10989
+
+==============================================================================
+=== 6. (Note) struct-offset cross-checks need decompiler — skipped in headless run
+==============================================================================
+Run with -postScript KenshiOnlineRecon.py AND open the project in
+Ghidra GUI to use the decompiler view for the candidate functions above.
+
+==============================================================================
+=== Summary of artefacts to share back
+==============================================================================
+- Anchor strings present in 1.0.68 binary: see section 1.
+- Functions referencing those strings: see section 2 (these are our
+  highest-quality leads — each one is named informally and we can
+  walk inside to extract real offsets).
+- `ou` exported? see section 3.
+- Speed-constant readers: see section 4 — the function reading 5.0f
+  is almost certainly Kenshi's per-press-3x speed setter, which writes
+  to gameWorld + frameSpeedMultOffset directly.
+- The function that contains RVA 0x583400 (our broken FactoryCreate
+  hook target): see section 5.
+
+File: C:\Tools\GhidraProjects\recon_findings.txt
