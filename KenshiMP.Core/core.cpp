@@ -2184,25 +2184,38 @@ void Core::DrainCapturedCharactersToServer() {
         if (s_discoveredFaction != 0) {
             playerFaction = s_discoveredFaction;
         } else {
-            const std::string& wanted =
-                m_lobbyManager.GetFactionString();
-            if (!wanted.empty()) {
+            // Resolve via character-name match. The kenshi-online.mod's
+            // placeholder squad uses fixed names — slot 0 owns "Player 1",
+            // slot 1 owns "Player 2", etc. (see shared_save_sync's
+            // FactionToOwnName mapping). Walk captured chars; the first
+            // one whose name equals our slot's expected own-name is in
+            // our faction. Use its Faction* as the canonical pointer.
+            //
+            // Fallback names cover the typical mod slots; if the slot
+            // assignment doesn't map cleanly we just leave faction as 0
+            // and try again next tick.
+            const std::string fac = m_lobbyManager.GetFactionString();
+            std::string wantedCharName;
+            if (fac.find("10-kenshi-online") != std::string::npos) wantedCharName = "Player 1";
+            else if (fac.find("12-kenshi-online") != std::string::npos) wantedCharName = "Player 2";
+            else if (fac.find("14-kenshi-online") != std::string::npos) wantedCharName = "Player 3";
+            else if (fac.find("16-kenshi-online") != std::string::npos) wantedCharName = "Player 4";
+
+            if (!wantedCharName.empty()) {
                 for (size_t i = 0; i < n; ++i) {
                     uintptr_t cp = batch[i];
                     if (!cp) continue;
                     game::CharacterAccessor ch(reinterpret_cast<void*>(cp));
+                    if (ch.GetName() != wantedCharName) continue;
                     uintptr_t fp = ch.GetFactionPtr();
                     if (!fp) continue;
-                    game::FactionAccessor fa(reinterpret_cast<void*>(fp));
-                    if (!fa.IsValid()) continue;
-                    if (fa.GetName() == wanted) {
-                        s_discoveredFaction = fp;
-                        playerFaction = fp;
-                        spdlog::info("Core: DrainCapturedCharactersToServer "
-                                     "discovered faction by name '{}' -> 0x{:X}",
-                                     wanted, fp);
-                        break;
-                    }
+                    s_discoveredFaction = fp;
+                    playerFaction = fp;
+                    spdlog::info("Core: DrainCapturedCharactersToServer "
+                                 "discovered faction via own-name '{}' -> 0x{:X} "
+                                 "(slot fac '{}')",
+                                 wantedCharName, fp, fac);
+                    break;
                 }
             }
         }
