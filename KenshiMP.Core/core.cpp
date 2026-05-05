@@ -158,6 +158,47 @@ static uintptr_t ScanForKenshiNullDerefSite() {
 }
 
 // SEH-safe stack dump helper (no C++ objects with destructors allowed)
+// Read GameWorld* from the singleton slot. Lives at file scope so the
+// __try doesn't infect the surrounding function (C2712 — can't mix
+// __try with C++ unwinding-bearing locals).
+static uintptr_t SEH_ReadGameWorldFromSingleton(uintptr_t singletonSlot) {
+    if (!singletonSlot) return 0;
+    __try {
+        return *reinterpret_cast<uintptr_t*>(singletonSlot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// Read the first qword of an object — its vtable. Used to validate
+// that a bound Character* still points to a live object: if Kenshi
+// streamed it out / freed it, the vtable read either AVs (caught) or
+// returns garbage outside the module range.
+static uintptr_t SEH_ReadVTable(uintptr_t obj) {
+    if (!obj) return 0;
+    __try {
+        return *reinterpret_cast<uintptr_t*>(obj);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+static bool BoundCharLooksAlive(void* obj) {
+    if (!obj) return false;
+    uintptr_t p = reinterpret_cast<uintptr_t>(obj);
+    if (p < 0x10000 || p > 0x00007FFFFFFFFFFFULL) return false;
+    if (p & 0x7) return false;
+
+    uintptr_t modBase = reinterpret_cast<uintptr_t>(GetModuleHandleA("kenshi_x64.exe"));
+    if (!modBase) return true;  // can't verify; assume valid
+
+    uintptr_t vt = SEH_ReadVTable(p);
+    if (vt == 0) return false;
+    // A live Character's vtable lives in kenshi_x64.exe's .rdata.
+    // Module is ~64 MB; allow a generous range.
+    return vt >= modBase && vt < (modBase + 0x4000000);
+}
+
 static int SEH_DumpStack(char* outBuf, int outBufSize, uint64_t rsp) {
     int pos = sprintf_s(outBuf, outBufSize, "  Stack at RSP:\n");
     __try {
@@ -2211,9 +2252,15 @@ void Core::DrainCapturedCharactersToServer() {
                     if (!fp) continue;
                     s_discoveredFaction = fp;
                     playerFaction = fp;
+                    // Propagate to PlayerController so other code paths
+                    // (notably HandleSpawnQueue's PATH 0 bind filter) can
+                    // see the discovered faction. Without this, the
+                    // local-static `s_discoveredFaction` is invisible to
+                    // anyone outside this function and they get 0 back.
+                    m_playerController.SetLocalFactionPtr(fp);
                     spdlog::info("Core: DrainCapturedCharactersToServer "
                                  "discovered faction via own-name '{}' -> 0x{:X} "
-                                 "(slot fac '{}')",
+                                 "(slot fac '{}'); propagated to PlayerController",
                                  wantedCharName, fp, fac);
                     break;
                 }
@@ -3472,6 +3519,42 @@ void Core::HandleSpawnQueue() {
     // pending resources). This replaces the old 20-second fixed grace period
     // with resource-aware gating via AssetFacilitator.
     if (!m_gameLoaded) return;
+
+    // ── Bound-character validation ──
+    // Walk all remote entities that have a linked game object. If the
+    // pointer's vtable is no longer in the kenshi_x64.exe module range,
+    // Kenshi has freed/streamed-out the underlying Character. Clear the
+    // gameObject so position-sync stops writing to dead memory and the
+    // entity returns to "ghost" (registry-only) state. Next spawn-tick
+    // can re-bind it to a fresh same-faction char if one is captured.
+    //
+    // Throttled: every 1s instead of every tick — vtable validity
+    // doesn't change rapidly and full registry walks aren't cheap.
+    {
+        static auto s_lastValidate = std::chrono::steady_clock::time_point{};
+        auto vnow = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(vnow - s_lastValidate).count() >= 1000) {
+            s_lastValidate = vnow;
+            auto remoteIds = m_entityRegistry.GetRemoteEntities();
+            int unbound = 0;
+            for (EntityID id : remoteIds) {
+                void* obj = m_entityRegistry.GetGameObject(id);
+                if (!obj) continue;
+                if (!BoundCharLooksAlive(obj)) {
+                    spdlog::info("Core: bound char 0x{:X} for entity {} is stale "
+                                 "(vtable invalid) — unbinding",
+                                 reinterpret_cast<uintptr_t>(obj), id);
+                    m_entityRegistry.SetGameObject(id, nullptr);
+                    ++unbound;
+                }
+            }
+            if (unbound > 0) {
+                spdlog::info("Core: validated {} remote entities, unbound {} stale",
+                             remoteIds.size(), unbound);
+            }
+        }
+    }
+
     if (!AssetFacilitator::Get().CanSpawn() && !m_forceSpawnBypass.load()) {
         // Log gate reason once per second when spawns are pending
         static auto s_lastGateLog = std::chrono::steady_clock::time_point{};
@@ -3652,22 +3735,51 @@ void Core::HandleSpawnQueue() {
         bool hasModTemplates = m_spawnManager.GetModTemplateCount() > 0;
         bool hasFactory = m_spawnManager.IsReady(); // factory captured
 
+        // Bootstrap m_factory via vtable-match scan of GameWorld.
+        // The CharacterCreate hook is permanently bypassed in MP
+        // (see entity_hooks.cpp comments), so the legacy SetFactory
+        // path can't fire. Walk GameWorld[0..0x1000] looking for any
+        // pointer to an object whose vtable equals
+        // mod+RVA_ROOT_OBJECT_FACTORY_VTABLE — that's the factory.
+        // Verified offset varies per run (0x628, 0xE8, …) but the
+        // vtable RVA is fixed in the binary's .rdata.
+        if (!hasFactory) {
+            uintptr_t gw = SEH_ReadGameWorldFromSingleton(game::GetResolvedGameWorld());
+            if (gw && m_spawnManager.TryDeriveFactoryFromGameWorld(gw)) {
+                hasFactory = true;
+            }
+        }
+
         // Try direct spawn after 2s (gives heap scan time to find mod templates).
         // CallFactoryCreate uses RootObjectFactory::create which builds a fresh
         // request struct from the mod GameData — no stale pointers.
+        //
+        // Gate: enter the spawn block if EITHER we have a factory (for
+        // synthetic creation) OR we have captured characters available
+        // to bind (PATH 0, which doesn't need the factory at all).
         auto timeSinceLastAttempt = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - s_lastDirectAttempt);
-        if (hasFactory && pendingDuration.count() >= 2
+        const bool haveBindCandidates = entity_hooks::GetUniqueCapturedCharacterCount() > 0;
+        if ((hasFactory || haveBindCandidates) && pendingDuration.count() >= 2
             && timeSinceLastAttempt.count() >= 1) {
             s_lastDirectAttempt = std::chrono::steady_clock::now();
             SpawnRequest spawnReq;
             if (m_spawnManager.PopNextSpawn(spawnReq)) {
                 // ── Per-player spawn cap ──
-                // Only spawn 1 character per remote player to prevent squad panel flooding.
-                // The remote player's primary character is sufficient for co-op gameplay.
-                // Additional squad members are tracked as registry-only ghosts (position synced
-                // but no game object) to keep the world clean.
-                static constexpr int MAX_DIRECT_SPAWNS_PER_PLAYER = 1;
+                // History:
+                //   1   — primary char only (early conservative)
+                //   5   — stable for 27k ticks (~3 min) of gameplay
+                //   12  — last empirically-verified-stable count
+                //   13+ — crashed ~7s after the 13th bind. Stale-pointer
+                //         AV when sync wrote to a streamed-out char's
+                //         freed memory.
+                //
+                // With per-second bound-char validation now active in
+                // HandleSpawnQueue (vtable check, unbind on stale), we
+                // can lift the cap back to "effectively unlimited"
+                // — the validator will clean up dead binds before sync
+                // writes to them.
+                static constexpr int MAX_DIRECT_SPAWNS_PER_PLAYER = 256;
                 static std::unordered_map<PlayerID, int> s_directSpawnsPerPlayer;
                 if (s_directSpawnsPerPlayer[spawnReq.owner] >= MAX_DIRECT_SPAWNS_PER_PLAYER) {
                     // Already spawned enough for this player — drop remaining requests silently.
@@ -3687,9 +3799,53 @@ void Core::HandleSpawnQueue() {
 
                 void* newChar = nullptr;
                 bool usedModTemplate = false;
+                bool boundToExisting = false;
+
+                // ── PATH 0: bind to existing Kenshi-natural character ──
+                // Save-load already created the player-owned characters;
+                // we just need to bind the server's netId to the right
+                // Character*. Critical: filter by FACTION so we don't
+                // bind to random world NPCs (Bar Thugs, Hub Inhabitants)
+                // — that crashed earlier when their AI clashed with our
+                // remote sync. The local player's faction IS the
+                // kenshi-online.mod faction, so the filter accepts
+                // exactly the player-class characters and nothing else.
+                {
+                    uintptr_t playerFaction = m_playerController.GetLocalFactionPtr();
+                    if (playerFaction == 0) {
+                        playerFaction = entity_hooks::GetEarlyPlayerFaction();
+                    }
+                    if (playerFaction != 0) {
+                        // Exclude the local player's own primary character —
+                        // it lives in the same faction so the filter alone
+                        // would happily claim it, then remote sync would
+                        // fight you for control and crash.
+                        uintptr_t localPrimary = reinterpret_cast<uintptr_t>(
+                            m_playerController.GetPrimaryCharacter());
+                        uintptr_t claimed = entity_hooks::TryClaimCapturedCharacter(
+                            spawnReq.templateName,
+                            spawnReq.position.x, spawnReq.position.y, spawnReq.position.z,
+                            100.0f /* tolerance, world units — broader since save-loaded
+                                       positions can drift slightly from server's view */,
+                            playerFaction,
+                            localPrimary);
+                        if (claimed) {
+                            newChar = reinterpret_cast<void*>(claimed);
+                            boundToExisting = true;
+                            spdlog::info("Core: BIND existing char 0x{:X} to entity {} "
+                                         "(template='{}', faction=0x{:X}, "
+                                         "excludedLocal=0x{:X}, "
+                                         "pos=({:.1f},{:.1f},{:.1f}))",
+                                         claimed, spawnReq.netId, spawnReq.templateName,
+                                         playerFaction, localPrimary,
+                                         spawnReq.position.x, spawnReq.position.y,
+                                         spawnReq.position.z);
+                        }
+                    }
+                }
 
                 // ── PATH 1: Mod template (preferred — correct appearance) ──
-                if (hasModTemplates) {
+                if (!newChar && hasModTemplates) {
                     spdlog::info("Core: MOD TEMPLATE SPAWN for entity {} owner={} slot={} "
                                  "pos=({:.1f},{:.1f},{:.1f})",
                                  spawnReq.netId, spawnReq.owner, modSlot,
@@ -3699,41 +3855,73 @@ void Core::HandleSpawnQueue() {
                     if (newChar) usedModTemplate = true;
                 }
 
-                // ── PATH 2: createRandomChar (immediate fallback — wrong appearance) ──
+                // ── PATH 2 (DISABLED): createRandomChar synthetic spawn ──
+                // CallFactoryCreateRandom DOES return a Character* with
+                // the correct 7-arg signature, but the resulting char is
+                // not fully wired into Kenshi's faction-membership /
+                // AI-manager / squad lists. Subsequent game-tick code
+                // dereferences half-formed pointers and crashes
+                // (observed: AV at game+0x7916DC ~10s after spawn,
+                // RBX = our spawned char ptr). Until we figure out the
+                // full character-init protocol, leave entities pending
+                // rather than synthesize broken bodies.
+                //
+                // PATH 0 (bind-to-existing) is the only safe spawn path
+                // right now. If it doesn't bind, the entity stays in
+                // the queue indefinitely — annoying log spam, but no
+                // crash, no save corruption.
+#if 0
                 if (!newChar) {
-                    spdlog::info("Core: createRandomChar FALLBACK for entity {} owner={} "
-                                 "(modTemplate {})",
-                                 spawnReq.netId, spawnReq.owner,
-                                 hasModTemplates ? "failed" : "not available");
-
-                    newChar = entity_hooks::CallFactoryCreateRandom(m_spawnManager.GetFactory());
+                    uintptr_t factionPtr = m_playerController.GetLocalFactionPtr();
+                    newChar = entity_hooks::CallFactoryCreateRandom(
+                        m_spawnManager.GetFactory(),
+                        reinterpret_cast<void*>(factionPtr),
+                        spawnReq.position.x,
+                        spawnReq.position.y,
+                        spawnReq.position.z,
+                        0.0f);
                 }
+#endif
 
                 uintptr_t newCharAddr = reinterpret_cast<uintptr_t>(newChar);
                 if (newChar && newCharAddr > 0x10000 && newCharAddr < 0x00007FFFFFFFFFFF
                     && (newCharAddr & 0x7) == 0) {
-                    spdlog::info("Core: Spawn SUCCESS — char 0x{:X} for entity {} (modTemplate={})",
-                                 newCharAddr, spawnReq.netId, usedModTemplate);
+                    spdlog::info("Core: Spawn SUCCESS — char 0x{:X} for entity {} "
+                                 "(bound={}, modTemplate={})",
+                                 newCharAddr, spawnReq.netId, boundToExisting, usedModTemplate);
 
-                    // Only apply faction fix for non-mod-template spawns (random chars).
-                    // Mod template characters have persistent factions from kenshi-online.mod
-                    // that are always loaded. Writing the LOCAL player's faction causes them
-                    // to appear in the squad panel, flooding it and crashing the game.
-                    if (!usedModTemplate) {
-                        SEH_FixUpFaction_Core(newChar);
+                    // For bound-to-existing characters: DON'T fix up faction
+                    // and DON'T run FallbackPostSpawnSetup. The character is
+                    // already fully constructed by Kenshi's save-load —
+                    // touching its faction or rewriting setup data risks
+                    // corrupting valid game state. Just register the netId
+                    // so position sync can update it.
+                    if (!boundToExisting) {
+                        // Only apply faction fix for non-mod-template spawns (random chars).
+                        // Mod template characters have persistent factions from kenshi-online.mod
+                        // that are always loaded. Writing the LOCAL player's faction causes them
+                        // to appear in the squad panel, flooding it and crashing the game.
+                        if (!usedModTemplate) {
+                            SEH_FixUpFaction_Core(newChar);
+                        }
                     }
                     m_entityRegistry.SetGameObject(spawnReq.netId, newChar);
                     m_entityRegistry.UpdatePosition(spawnReq.netId, spawnReq.position);
-                    SEH_FallbackPostSpawnSetup(newChar, spawnReq.netId, spawnReq.owner, spawnReq.position);
+                    if (!boundToExisting) {
+                        SEH_FallbackPostSpawnSetup(newChar, spawnReq.netId, spawnReq.owner, spawnReq.position);
+                    }
 
                     s_directSpawnAttempts++;
                     s_directSpawnsPerPlayer[spawnReq.owner]++;
-                    if (usedModTemplate) {
+                    if (boundToExisting) {
+                        m_nativeHud.AddSystemMessage("Remote player bound to existing save character");
+                    } else if (usedModTemplate) {
                         m_nativeHud.AddSystemMessage("Remote player spawned!");
                     } else {
                         m_nativeHud.AddSystemMessage("Remote player spawned (fallback appearance)");
                     }
-                    m_nativeHud.LogStep("OK", "Entity " + std::to_string(spawnReq.netId) + " spawned");
+                    m_nativeHud.LogStep("OK", "Entity " + std::to_string(spawnReq.netId)
+                                       + (boundToExisting ? " bound" : " spawned"));
                 } else {
                     spdlog::warn("Core: Both spawn paths returned null for entity {} (attempt {})",
                                  spawnReq.netId, spawnReq.retryCount);

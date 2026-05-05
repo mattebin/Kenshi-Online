@@ -39,6 +39,9 @@ static uintptr_t s_destroyTargetAddr = 0;
 static CharacterCreateFn  s_origCreate  = nullptr;
 static CharacterDestroyFn s_origDestroy = nullptr;
 
+// GetCapturedFactoryThis is defined after s_savedFactory's declaration,
+// near the bottom of this file. Forward-declare here for the header.
+
 // ── AddToUpdateListMain hook (Kenshi 1.0.68 spawn capture) ────────────────
 // RVA 0x787C70 on 1.0.68 — identified by Ghidra recon 2026-05-04.
 // Signature: void(GameWorld* this, Character* character)
@@ -1175,6 +1178,15 @@ uintptr_t GetGameWorldFromHook() {
     return s_lastGameWorldFromHook.load(std::memory_order_relaxed);
 }
 
+// Returns the factory `this` pointer captured by Hook_CharacterCreate.
+// CharacterCreate and RootObjectFactory::process resolve to the SAME
+// address (RVA 0x581770 on 1.0.68) — installing a second hook on this
+// address would conflict, so we expose the existing capture instead.
+// Returns 0 until the game has called CharacterCreate at least once.
+uintptr_t GetCapturedFactoryThis() {
+    return reinterpret_cast<uintptr_t>(s_savedFactory);
+}
+
 size_t SnapshotCapturedCharacters(uintptr_t* outBuf, size_t maxCount) {
     if (!outBuf || maxCount == 0) return 0;
     std::lock_guard lock(s_capturedCharsMutex);
@@ -1184,6 +1196,170 @@ size_t SnapshotCapturedCharacters(uintptr_t* outBuf, size_t maxCount) {
         outBuf[i++] = p;
     }
     return i;
+}
+
+// ── Bind incoming server entities to existing Kenshi-natural characters ──
+// When Kenshi loads a savegame, it natively creates every persisted character.
+// AddToUpdateListMain hook captures them all. The server then sends the same
+// 109 entities as "remote spawn requests". Instead of synthesizing new
+// characters via the factory call (which is fragile — wrong arg counts,
+// faction issues, GameData lookup), we MATCH each request to an existing
+// captured character by (templateName, position) and bind the netId directly.
+//
+// Match tolerance: position within 50 units (Kenshi positions are in the
+// thousands; a few units of drift is normal between save-write and load-read).
+
+static std::mutex                       s_claimedMutex;
+static std::unordered_set<uintptr_t>    s_claimedChars;
+
+uintptr_t TryClaimCapturedCharacter(const std::string& templateName,
+                                     float posX, float posY, float posZ,
+                                     float positionTolerance,
+                                     uintptr_t requiredFaction,
+                                     uintptr_t excludeCharacter) {
+    constexpr size_t kMaxSnap = 512;
+    uintptr_t snap[kMaxSnap];
+    size_t n = SnapshotCapturedCharacters(snap, kMaxSnap);
+    if (n == 0) return 0;
+
+    const float tolSq = positionTolerance * positionTolerance;
+
+    // Match strategy: FACTION + POSITION. The server's 109 entities are
+    // player-owned characters from the kenshi-online.mod faction. World
+    // NPCs (Bar Thugs, Hub Inhabitants) sit at the same world positions
+    // and would match a position-only filter — that's how we crashed
+    // earlier (bound to a Bar Thug, NPC AI clashed with our remote sync).
+    // The faction filter excludes them.
+    //
+    // requiredFaction == 0 means "no filter" (legacy / debug behavior).
+    // Caller in core.cpp passes the local player's faction pointer (which
+    // for the local player is also kenshi-online.mod's faction) so the
+    // filter accepts only player-class characters.
+    //
+    // Position is then used to disambiguate among the per-faction
+    // candidates: closest match wins.
+    uintptr_t bestChar = 0;
+    float     bestDistSq = tolSq;
+    char      bestName[64] = {};
+    int       totalChecked = 0;
+    int       totalUnclaimed = 0;
+    int       totalSameFaction = 0;
+    int       totalInRange = 0;
+
+    // Same-faction fallback: if no character is within position
+    // tolerance, take ANY unclaimed character of the right faction.
+    // The 109 player-faction chars are all interchangeable bodies for
+    // the server-told entities — position sync will teleport whichever
+    // one we bind to where the server says. The faction filter alone
+    // is the safety check (it excludes world NPCs that crashed on bind).
+    uintptr_t fallbackChar = 0;
+    char      fallbackName[64] = {};
+
+    {
+        std::lock_guard claimLock(s_claimedMutex);
+        for (size_t i = 0; i < n; ++i) {
+            uintptr_t cp = snap[i];
+            ++totalChecked;
+            if (s_claimedChars.find(cp) != s_claimedChars.end()) continue;
+            // Exclude the local player's own primary character — it's in
+            // the player faction but binding+remote-control of it would
+            // fight the local player and Kenshi's AI controlling the same
+            // char, leading to state-collision crashes (observed: AV at
+            // game tick #754 after we bound 'Ribs' to a remote entity).
+            if (excludeCharacter != 0 && cp == excludeCharacter) continue;
+            ++totalUnclaimed;
+
+            SEH_CharData cd = SEH_ReadCharacterData(reinterpret_cast<void*>(cp));
+            if (!cd.valid) continue;
+
+            // Faction filter — skip characters not belonging to the
+            // expected faction (e.g. world NPCs vs player-owned chars).
+            if (requiredFaction != 0 && cd.factionPtr != requiredFaction) continue;
+            ++totalSameFaction;
+
+            // Read name once for both position-best and faction-fallback paths
+            char nameBuf[64] = {};
+            int nameLen = SEH_ReadCharName(reinterpret_cast<void*>(cp),
+                                           nameBuf, sizeof(nameBuf));
+
+            // Same-faction fallback: keep first unclaimed faction member
+            // in case nothing is within position tolerance.
+            if (!fallbackChar) {
+                fallbackChar = cp;
+                if (nameLen > 0 && nameLen < (int)sizeof(fallbackName)) {
+                    memcpy(fallbackName, nameBuf, nameLen);
+                    fallbackName[nameLen] = 0;
+                }
+            }
+
+            float dx = cd.position.x - posX;
+            float dy = cd.position.y - posY;
+            float dz = cd.position.z - posZ;
+            float distSq = dx*dx + dy*dy + dz*dz;
+            if (distSq > bestDistSq) continue;
+            ++totalInRange;
+
+            bestDistSq = distSq;
+            bestChar = cp;
+            if (nameLen > 0 && nameLen < (int)sizeof(bestName)) {
+                memcpy(bestName, nameBuf, nameLen);
+                bestName[nameLen] = 0;
+            } else {
+                bestName[0] = 0;
+            }
+        }
+
+        // Prefer best-position match. Fall back to "any same-faction"
+        // when no position match exists — server position sync will
+        // teleport the bound char into place.
+        if (!bestChar && fallbackChar) {
+            bestChar  = fallbackChar;
+            bestDistSq = -1.0f;  // sentinel for "fallback, no position match"
+            memcpy(bestName, fallbackName, sizeof(bestName));
+        }
+
+        if (bestChar) {
+            s_claimedChars.insert(bestChar);
+        }
+    }
+
+    if (bestChar) {
+        const char* matchType = (bestDistSq < 0.f) ? "faction-fallback" : "position";
+        float distStr = (bestDistSq < 0.f) ? -1.f : std::sqrt(bestDistSq);
+        spdlog::info("entity_hooks: claim MATCH ({}) for template='{}' pos=({:.1f},{:.1f},{:.1f}) "
+                     "-> char 0x{:X} name='{}' dist={:.1f}",
+                     matchType, templateName, posX, posY, posZ,
+                     bestChar, bestName, distStr);
+    } else {
+        // Throttled — many entities will fail to bind, don't spam.
+        static auto s_lastLog = std::chrono::steady_clock::time_point{};
+        static int  s_failCount = 0;
+        ++s_failCount;
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastLog).count() >= 5) {
+            s_lastLog = now;
+            spdlog::info("entity_hooks: claim NO match for template='{}' pos=({:.1f},{:.1f},{:.1f}) "
+                         "tol={:.1f}u faction=0x{:X} (snapshot={}, unclaimed={}, "
+                         "same-faction={}, in-range={}, skipped {} similar in last 5s)",
+                         templateName, posX, posY, posZ, positionTolerance,
+                         requiredFaction,
+                         totalChecked, totalUnclaimed, totalSameFaction, totalInRange,
+                         s_failCount - 1);
+            s_failCount = 0;
+        }
+    }
+
+    return bestChar;
+}
+
+void ReleaseClaimedCharacter(uintptr_t character) {
+    std::lock_guard lock(s_claimedMutex);
+    s_claimedChars.erase(character);
+}
+
+size_t GetClaimedCharacterCount() {
+    std::lock_guard lock(s_claimedMutex);
+    return s_claimedChars.size();
 }
 
 // ── Install/Uninstall ──
@@ -1281,6 +1457,14 @@ bool Install() {
             spdlog::info("entity_hooks: FactoryCreate VALIDATED at 0x{:X}{}",
                          resolvedCreate,
                          resolvedCreate != createAddr ? " (recovered)" : "");
+
+            // We deliberately do NOT hook FactoryCreate or process here.
+            // RootObjectFactory::process (RVA 0x581770) lives at the SAME
+            // address as CharacterCreate on 1.0.68 — they are the same
+            // function. The CharacterCreate hook already saves `factory`
+            // to s_savedFactory on every call (see line ~691). Bootstrap
+            // SpawnManager from GetCapturedFactoryThis() instead of
+            // installing a second detour on the same address.
         } else {
             spdlog::warn("entity_hooks: FactoryCreate at 0x{:X} FAILED validation — "
                          "mod template spawn disabled, will use createRandomChar or NPC hijack",
@@ -1590,27 +1774,72 @@ void* CallFactoryCreate(void* factory, void* gameData) {
     return result;
 }
 
-void* CallFactoryCreateRandom(void* factory) {
-    // Call RootObjectFactory::createRandomChar — creates a random NPC.
-    // Takes just the factory pointer (RCX=factory, RDX=0).
-    // Useful as last-resort when mod templates fail.
+// Layout of Ogre::Vector3 — 12 bytes (3 floats). MSVC x64 ABI passes
+// 12-byte aggregates by hidden pointer in the corresponding register
+// slot. So in the actual call:
+//   R8 = pointer to caller-allocated copy of the Vector3
+struct OgreVector3_ { float x, y, z; };
+
+// FULL signature of RootObjectFactory::createRandomCharacter from
+// KenshiLib RootObjectFactory.inc / master_index_1.0.68.csv:
+//   RootObjectBase* createRandomCharacter(
+//       Faction*, Ogre::Vector3, RootObjectContainer*,
+//       GameData*, Building*, float);
+// 7 args including `this`. Earlier code cast to a 2-arg pointer and
+// called with (factory, nullptr) — MSVC didn't initialize R8/R9/stack
+// args, causing AVs deep inside the function. Declaring the full
+// signature here makes MSVC place every arg correctly.
+using CreateRandomCharFullFn = void* (__fastcall*)(
+    void* factory,                  // RCX
+    void* faction,                  // RDX
+    const OgreVector3_* position,   // R8 (hidden ptr to caller's Vec3 copy)
+    void* container,                // R9
+    void* gameData,                 // [rsp+0x28]
+    void* building,                 // [rsp+0x30]
+    float level                     // [rsp+0x38]
+);
+
+static void* SEH_CallCreateRandomFull(CreateRandomCharFullFn fn,
+                                      void* factory, void* faction,
+                                      const OgreVector3_* position,
+                                      float level) {
+    __try {
+        return fn(factory, faction, position, nullptr, nullptr, nullptr, level);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void* CallFactoryCreateRandom(void* factory, void* faction,
+                               float posX, float posY, float posZ,
+                               float level) {
     if (!s_factoryCreateRandomChar) {
         spdlog::warn("entity_hooks: CallFactoryCreateRandom — function not resolved");
         return nullptr;
     }
+    OgreVector3_ pos{posX, posY, posZ};
+    auto fn = reinterpret_cast<CreateRandomCharFullFn>(s_factoryCreateRandomChar);
 
     s_directSpawnBypass.store(true, std::memory_order_release);
-    void* result = nullptr;
-    __try {
-        result = s_factoryCreateRandomChar(factory, nullptr);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    void* result = SEH_CallCreateRandomFull(fn, factory, faction, &pos, level);
+    if (!result) {
         static int s_crashCount = 0;
         if (++s_crashCount <= 5) {
-            spdlog::error("entity_hooks: CallFactoryCreateRandom CRASHED (SEH caught, attempt {})", s_crashCount);
+            spdlog::warn("entity_hooks: CallFactoryCreateRandom returned null "
+                         "(faction=0x{:X}, pos=({:.1f},{:.1f},{:.1f}), level={:.1f}, attempt {})",
+                         reinterpret_cast<uintptr_t>(faction),
+                         posX, posY, posZ, level, s_crashCount);
         }
     }
     s_directSpawnBypass.store(false, std::memory_order_release);
     return result;
+}
+
+// Backward-compatible 1-arg overload — callers that don't have position
+// info use these defaults. Should generally avoid this and pass real
+// position; spawning at origin will trip Kenshi's clip / faction checks.
+void* CallFactoryCreateRandom(void* factory) {
+    return CallFactoryCreateRandom(factory, nullptr, 0.f, 0.f, 0.f, 0.f);
 }
 
 // ── SEH-safe faction pointer validation ──

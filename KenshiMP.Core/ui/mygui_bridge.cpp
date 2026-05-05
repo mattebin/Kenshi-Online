@@ -1,5 +1,6 @@
 #include "mygui_bridge.h"
 #include <spdlog/spdlog.h>
+#include <chrono>
 
 namespace kmp {
 
@@ -403,7 +404,18 @@ void* MyGuiBridge::FindChildWidget(void* parent, const std::string& name) {
 void MyGuiBridge::SetVisible(void* widget, bool visible) {
     if (!m_ready || !widget || !m_fnSetVisible) return;
     if (!SEH_SetVisible(reinterpret_cast<void*>(m_fnSetVisible), widget, visible)) {
-        spdlog::error("MyGuiBridge: setVisible crashed");
+        // Throttled to once per second — repeated SEH-caught faults
+        // here usually mean a stale widget pointer (Kenshi destroyed
+        // the widget out from under us during shutdown). The exception
+        // is already caught; this is informational, not a real crash.
+        static auto s_lastLog = std::chrono::steady_clock::time_point{};
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastLog).count() > 1000) {
+            s_lastLog = now;
+            spdlog::warn("MyGuiBridge: setVisible faulted on widget 0x{:X} "
+                         "(SEH caught — likely stale pointer post-shutdown)",
+                         reinterpret_cast<uintptr_t>(widget));
+        }
     }
 }
 

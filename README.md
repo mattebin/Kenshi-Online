@@ -40,9 +40,11 @@ Run `KenshiMP.Server.exe` from the Kenshi folder (the installer drops it there).
 
 ### Known limits on 1.0.68
 
-Game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync. Remote players' characters may not render in your world even though chat / presence / position sync work — both gated on the same 1.0.68 binary-layout problem.
+Game speed is locked at 1× for everyone. Pressing 2× / 3× in-game speeds up your *local* world only — keep everyone on 1× for clean sync.
 
-Why and how to fix: [`docs/reverse-engineering/REPORT.md`](docs/reverse-engineering/REPORT.md) (Ghidra recon, what 1.0.68's spawn path actually does, why our hook misses it), [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md) (speed/time offsets), [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) (P0 backlog + RE tools).
+**Remote-player character rendering** is now working as of the 2026-05-05 build (see "What's new in this fork" below). You'll see remote players' characters in-world, position-synced. Caveat: only remote chars whose Kenshi-side bodies are currently streamed into the active zone get bound — typically ~20+ in active range at a Hub. Chars saved but not yet streamed in stay as registry-only ghosts until natural zone streaming brings them in; the system auto-binds them when they appear and auto-unbinds when they're freed.
+
+Background reading: [`docs/reverse-engineering/REPORT.md`](docs/reverse-engineering/REPORT.md) (Ghidra recon, 1.0.68 spawn path), [`docs/SPEED_SYNC_LEAD.md`](docs/SPEED_SYNC_LEAD.md) (speed/time offsets), [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) (backlog).
 
 For the technical details and what changed vs. upstream, keep reading.
 
@@ -68,6 +70,7 @@ Highlights:
 | MP correctness | Faction-pointer identity (avoids 18-char `Player 1` name-collision swap). Strip `.mod` suffix from server-sent faction strings. Resume sync after main-menu join + world load. Position read fallback chain (char-direct + AnimClass) for the first ~1-2s after world load. OIS keyDown/keyUp swallow when chat/menu modal is open (fixes double-input bug). |
 | MP scaling | Per-player spawn cap raised from upstream's hardcoded 4 to a configurable default of 32 (matches vanilla squad sizes). Infinite-retry bug fixed where cap-rejected spawn requests could spin in the spawn manager forever without ever bumping `retryCount`. |
 | Diagnostics | Watcher trace markers (`WATCH/HOOK`, `WATCH/PKT`, `WATCH/TICK`, `WATCH/SYNC`, `WATCH/POS`) — flush-forced, gated on a config flag. `KMP_DISABLE_HOOKS` runtime gate (file or env var) for per-hook bypass without recompiling. **Static hook arg-count verification** at install time via prologue + call-site analyzers — would have caught the AI::create 2-vs-6-arg bug from one log line. **Single-block install audit** dump for bug-report attachment. **Runtime analyzers** for struct-field corruption (`field_diff`), unsafe concurrent hook re-entry (`concurrency_watch`), and long-session memory leaks (`leak_watch`). |
+| **Remote-char rendering (2026-05-05)** | Bind-to-existing path: instead of calling `RootObjectFactory::create` (11-arg signature, fragile, half-formed chars crash later), match incoming server entities to **already-loaded Kenshi-natural Characters** by faction + position. The factory pointer is captured by **vtable-match scan** of `GameWorld[0..0x2000]` against the known `RootObjectFactory` vtable RVA `0x16993B0` — works regardless of which `GameWorld` field happens to hold it (offset varies per run; KenshiLib's documented `+0x4A0` is wrong on 1.0.68, real offsets seen at `+0x628`, `+0xE8`, etc.). Local primary character is excluded from candidates so we don't overwrite the user's own movement. **Per-second bound-char validation** reads the vtable on every linked Character; if invalid (Kenshi streamed it out), the entity returns to ghost state and gets re-bound when the char streams back in. Eliminates the "MyGuiBridge: setVisible crashed" shutdown noise too (widgets nulled before layout unload + log throttled). |
 
 **Verification status:** all fixes verified on a single PC running both client and server. No two-machine, two-Steam-account session has been run yet — the gate test for declaring MP combat works is documented in `FORK_CHANGES.md`.
 

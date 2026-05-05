@@ -8,6 +8,7 @@
 #include "kmp/messages.h"
 #include <spdlog/spdlog.h>
 #include <sstream>
+#include <Windows.h>  // SendInput for shift-spoof workaround
 #include <Windows.h>
 
 namespace kmp {
@@ -223,9 +224,32 @@ bool NativeHud::CreateWidgetsFallback() {
 
 void NativeHud::Shutdown() {
     if (!m_initialized) return;
-    Hide();
-    MyGuiBridge::Get().UnloadLayout("Kenshi_MultiplayerHUD.layout");
+
+    // Mark uninitialized FIRST so any concurrent Update/Hide/SetVisible calls
+    // bail out early instead of touching widgets we're about to invalidate.
     m_initialized = false;
+
+    // UnloadLayout destroys every widget owned by the layout. After this
+    // returns, any cached widget pointer is dangling. Null them out
+    // BEFORE the unload so a racy SetVisible (e.g. from another thread
+    // or a deferred event) hits the early-null-return in MyGuiBridge,
+    // not a use-after-free that SEH then has to catch and log.
+    auto& bridge = MyGuiBridge::Get();
+    if (m_root) bridge.SetVisible(m_root, false);
+
+    m_root            = nullptr;
+    m_statusBar       = nullptr;
+    m_statusText      = nullptr;
+    m_chatPanel       = nullptr;
+    m_chatInput       = nullptr;
+    m_playerListPanel = nullptr;
+    m_playerListTitle = nullptr;
+    m_logPanel        = nullptr;
+    m_logTitle        = nullptr;
+    m_logHint         = nullptr;
+    m_visible         = false;
+
+    bridge.UnloadLayout("Kenshi_MultiplayerHUD.layout");
 }
 
 void NativeHud::Show() {
@@ -532,13 +556,6 @@ void NativeHud::OpenChatInput() {
         bridge.SetVisible(m_chatInput, true);
         bridge.SetCaption(m_chatInput, "> _");
     }
-    // Tell MyGUI we have keyboard focus on our chat widget. Kenshi's
-    // hotkey path is gated on "is a MyGUI widget capturing input"
-    // (the same gate that suppresses hotkeys when the user types in
-    // an inventory search field, etc). With focus set here, F1 / M /
-    // Y / digit speed keys etc. don't fire while chat is open —
-    // sidesteps the GetKeyboardState/GetAsyncKeyState IAT path
-    // entirely on builds where Kenshi doesn't use those APIs.
     if (m_chatInput) bridge.SetKeyFocusWidget(m_chatInput);
 }
 
@@ -550,7 +567,6 @@ void NativeHud::CloseChatInput() {
         bridge.SetVisible(m_chatInput, false);
         bridge.SetCaption(m_chatInput, "");
     }
-    // Release keyboard focus so Kenshi's normal input flow resumes.
     bridge.SetKeyFocusWidget(nullptr);
 }
 

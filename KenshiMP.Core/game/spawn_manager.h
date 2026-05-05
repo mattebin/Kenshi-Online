@@ -138,6 +138,15 @@ public:
             m_factory = factory;
         }
     }
+
+    // Try to derive RootObjectFactory directly from GameWorld + 0x4A0.
+    // Used in MP where the CharacterCreate hook is disabled (and so
+    // SetFactory never fires from the legacy path). The +0x4A0 offset
+    // comes from KenshiLib's GameWorld.h ("RootObjectFactory* theFactory")
+    // and is stable across 1.0.65/1.0.68 — the C++ class layout doesn't
+    // shift between minor releases. Returns true if a factory was set
+    // (or was already set). Validates the pointer before assigning.
+    bool TryDeriveFactoryFromGameWorld(uintptr_t gameWorldPtr);
     void SetOrigProcess(FactoryProcessFn fn) { m_origProcess = fn; }
     void SetOnSpawnedCallback(std::function<void(EntityID, void*)> cb) { m_onSpawned = cb; }
 

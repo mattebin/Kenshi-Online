@@ -7,6 +7,7 @@
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
 #include <Windows.h>
+#include <chrono>
 
 namespace kmp {
 
@@ -157,6 +158,142 @@ void* SpawnManager::SpawnCharacterDirect(const Vec3* desiredPosition, int modSlo
 
     spdlog::warn("SpawnManager: SpawnCharacterDirect failed (slot={})", modSlot);
     return nullptr;
+}
+
+// SEH wrappers — file-scope so __try doesn't infect callers (C2712).
+static uintptr_t SEH_ReadQword(uintptr_t addr) {
+    __try { return *reinterpret_cast<volatile uintptr_t*>(addr); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static bool LooksLikeHeapPtr(uintptr_t v) {
+    return v >= 0x10000 && v <= 0x00007FFFFFFFFFFFULL && (v & 0x7) == 0;
+}
+
+// Scan GameWorld[0..0x800] for QWORDs that look like heap pointers
+// AND whose first qword (vtable) is also a heap pointer. Print
+// candidates so we can SEE where theFactory actually lives in this
+// binary. Returns the first plausible candidate, or 0.
+static uintptr_t FindFactoryByScan(uintptr_t gw, int maxOffset) {
+    static bool s_dumpedOnce = false;
+    uintptr_t firstCandidate = 0;
+    int candidateCount = 0;
+
+    uintptr_t modBase = reinterpret_cast<uintptr_t>(GetModuleHandleA("kenshi_x64.exe"));
+    uintptr_t modEnd  = modBase ? (modBase + 0x4000000) : 0; // ~64 MB module range
+
+    if (!s_dumpedOnce) {
+        // Sanity-check that gw is actually a GameWorld instance: its
+        // vtable should be in the kenshi_x64.exe module's .rdata range.
+        uintptr_t gwVtable = SEH_ReadQword(gw);
+        bool gwLooksReal = (modBase && gwVtable >= modBase && gwVtable < modEnd);
+        spdlog::info("SpawnManager: GameWorld @ 0x{:X}, gw[0]=0x{:X}, modBase=0x{:X}, "
+                     "gwLooksLikeRealClass={}",
+                     gw, gwVtable, modBase, gwLooksReal);
+        spdlog::info("SpawnManager: scanning GameWorld 0x{:X} for factory candidates "
+                     "(must point OUTSIDE GameWorld + have vtable in module range)...", gw);
+    }
+
+    // Real factory must be:
+    //  1. A pointer outside the GameWorld allocation (not embedded)
+    //  2. Whose first qword (vtable) is in kenshi_x64.exe's module range
+    constexpr uintptr_t kSelfSpan = 0x4000;  // exclude pointers to nearby allocations
+    for (int off = 0; off < maxOffset; off += 8) {
+        uintptr_t v = SEH_ReadQword(gw + off);
+        if (!LooksLikeHeapPtr(v)) continue;
+
+        // Filter 1: pointer must be far from GameWorld (not embedded)
+        uintptr_t dist = (v > gw) ? (v - gw) : (gw - v);
+        if (dist < kSelfSpan) continue;
+
+        uintptr_t vt = SEH_ReadQword(v);
+
+        // Filter 2: that thing's vtable must be in module range
+        bool vtableInModule = (modBase && vt >= modBase && vt < modEnd);
+        if (!vtableInModule) continue;
+
+        if (!s_dumpedOnce && candidateCount < 24) {
+            spdlog::info("  GW+0x{:X} = 0x{:X} (vtable=0x{:X} = mod+0x{:X}) <- LOOKS REAL",
+                         off, v, vt, vt - modBase);
+        }
+        if (!firstCandidate) firstCandidate = v;
+        ++candidateCount;
+    }
+    if (!s_dumpedOnce) {
+        spdlog::info("SpawnManager: scan complete — {} candidate heap-object pointers in GameWorld[0..0x{:X}]",
+                     candidateCount, maxOffset);
+        s_dumpedOnce = true;
+    }
+    return firstCandidate;
+}
+
+// The RootObjectFactory's vtable RVA on Steam 1.0.68. Verified at
+// runtime — the factory's first qword consistently points here when
+// it has been allocated. The vtable RVA is stable across runs (it's
+// read-only data in the binary); the heap pointer to the factory
+// shifts with each game launch but the vtable does not.
+static constexpr uintptr_t RVA_ROOT_OBJECT_FACTORY_VTABLE = 0x16993B0;
+
+bool SpawnManager::TryDeriveFactoryFromGameWorld(uintptr_t gameWorldPtr) {
+    if (m_factory) return true;
+    if (!gameWorldPtr) return false;
+
+    uintptr_t modBase = reinterpret_cast<uintptr_t>(GetModuleHandleA("kenshi_x64.exe"));
+    if (!modBase) return false;
+    const uintptr_t targetVtable = modBase + RVA_ROOT_OBJECT_FACTORY_VTABLE;
+
+    // Vtable-match scan. We don't trust any specific offset (KenshiLib's
+    // 0x4A0 is wrong on 1.0.68; observed offsets in successful runs:
+    // 0x628 once, 0xE8 once. Field layout depends on game state and
+    // some fields are lazy-init). The vtable address is what's stable.
+    // Walk every QWORD in GameWorld[0..kScanRange], follow valid heap
+    // pointers that aren't embedded sub-objects, and check whether the
+    // pointed-to object's first qword equals our target.
+    //
+    // 0x2000 (8 KB) chosen to cover the full GameWorld struct plus a
+    // little margin. Larger if the factory ever shows up further out.
+    constexpr int kScanRange = 0x2000;
+    uintptr_t found = 0;
+    int matched = 0;
+    int firstOffset = -1;
+
+    for (int off = 0; off < kScanRange; off += 8) {
+        uintptr_t p = SEH_ReadQword(gameWorldPtr + off);
+        if (!LooksLikeHeapPtr(p)) continue;
+        uintptr_t dist = (p > gameWorldPtr) ? (p - gameWorldPtr) : (gameWorldPtr - p);
+        if (dist < 0x4000) continue;
+        uintptr_t vt = SEH_ReadQword(p);
+        if (vt != targetVtable) continue;
+
+        if (!found) { found = p; firstOffset = off; }
+        ++matched;
+    }
+
+    if (!found) {
+        // Throttle "not found" warnings to once every 10s so the log
+        // stays readable while we keep retrying every spawn tick. The
+        // factory may not be allocated yet — keep scanning, it can
+        // appear mid-session as the savegame finishes loading.
+        static auto s_lastWarn = std::chrono::steady_clock::time_point{};
+        static int  s_attempts = 0;
+        ++s_attempts;
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastWarn).count() >= 10) {
+            s_lastWarn = now;
+            spdlog::warn("SpawnManager: vtable-match scan found no RootObjectFactory in "
+                         "GameWorld[0..0x{:X}] after {} attempt(s) (target vtable mod+0x{:X} = "
+                         "0x{:X}). Factory may not be allocated yet — will keep retrying.",
+                         kScanRange, s_attempts,
+                         RVA_ROOT_OBJECT_FACTORY_VTABLE, targetVtable);
+        }
+        return false;
+    }
+
+    m_factory = reinterpret_cast<void*>(found);
+    spdlog::info("SpawnManager: RootObjectFactory captured at 0x{:X} via vtable match "
+                 "(found at GW+0x{:X}, {} match(es) in [0..0x{:X}])",
+                 found, firstOffset, matched, kScanRange);
+    return true;
 }
 
 void SpawnManager::OnGameCharacterCreated(void* factory, void* gameData, void* character) {

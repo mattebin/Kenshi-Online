@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 
 namespace kmp::entity_hooks {
 
@@ -72,7 +73,46 @@ void* CallFactoryCreate(void* factory, void* gameData);
 
 // Call RootObjectFactory::createRandomChar — creates a random NPC character.
 // Takes just factory pointer. Last-resort fallback when templates fail.
+// Calls RootObjectFactory::createRandomCharacter(factory, faction, &pos,
+// nullptr, nullptr, nullptr, level). The 1-arg overload uses null
+// faction and origin position; prefer the 5-arg form when context
+// allows so Kenshi's clip / faction checks see plausible inputs.
 void* CallFactoryCreateRandom(void* factory);
+void* CallFactoryCreateRandom(void* factory, void* faction,
+                               float posX, float posY, float posZ,
+                               float level);
+
+// ── Bind-to-existing-character path (preferred over synthetic spawn) ──
+// Find a Kenshi-natural character (already created by save-load or
+// zone-stream and captured by AddToUpdateListMain) that:
+//   1. Belongs to `requiredFaction` (skip the filter by passing 0)
+//   2. Is within `positionTolerance` of (posX,posY,posZ)
+// Closest position-match wins. Returns the Character* on success and
+// marks it as claimed so subsequent calls won't re-bind it. Returns 0
+// if no unclaimed match.
+//
+// `requiredFaction` is critical for safety. Position-only matching
+// can bind to world NPCs that happen to be near a player char's saved
+// position; controlling those NPCs via remote sync collides with
+// Kenshi's NPC AI and crashes. Pass the kenshi-online.mod player
+// faction so only player-owned characters are eligible.
+//
+// `excludeCharacter` is also critical: pass the local player's primary
+// character pointer here. Without this exclusion the bind path will
+// claim the local player's own char (it's in the right faction!) and
+// remote sync will fight the local player + Kenshi AI for control.
+uintptr_t TryClaimCapturedCharacter(const std::string& templateName,
+                                     float posX, float posY, float posZ,
+                                     float positionTolerance = 50.0f,
+                                     uintptr_t requiredFaction = 0,
+                                     uintptr_t excludeCharacter = 0);
+
+// Release a previously-claimed character (e.g. when the remote entity
+// disconnects or our binding is invalidated). Idempotent.
+void ReleaseClaimedCharacter(uintptr_t character);
+
+// How many characters are currently claim-bound to remote entities.
+size_t GetClaimedCharacterCount();
 
 // Get the fallback faction pointer (last valid faction seen from any character creation).
 // Used by SEH_FixUpFaction_Core when primary character faction isn't available.
@@ -125,6 +165,12 @@ size_t    GetUniqueCapturedCharacterCount();
 // instance, not a slot — useful for direct field reads at +0x???.
 // Returns 0 if the hook hasn't fired yet.
 uintptr_t GetGameWorldFromHook();
+
+// The RootObjectFactory* captured by the FactoryCreate hook on its
+// first call. Returns 0 until the game has called RootObjectFactory::create
+// at least once (typical lag: a few seconds after world load when the
+// first NPC zone streams in).
+uintptr_t GetCapturedFactoryThis();
 
 // Copy up to maxCount unique Character* pointers into outBuf (in
 // arbitrary iteration order — we use unordered_set under the hood).
