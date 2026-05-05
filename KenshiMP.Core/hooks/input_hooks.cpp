@@ -127,18 +127,25 @@ bool Install() {
         "InputKeyUp", keyUpTarget,
         &Hook_InputKeyUp, &s_origKeyUp);
 
-    // Layer 4: IAT-hook USER32!GetKeyboardState. Kenshi's hotkey dispatcher
-    // (location unknown post-Recon7+8) calls this Win32 API to read keyboard
-    // state. By masking specific VK slots in the returned buffer when our
-    // modal UI is active, the engine's hotkey poll sees those keys as not-
-    // pressed and skips the corresponding actions. Layer 3 (Kenshi-function
-    // hook) is left disabled — wrong target on 1.0.68.
-    bool iatOk = InstallGetKeyboardStateIatHook();
+    // Layers 4-6 (IAT-GetKeyboardState, KenshiKeyPressed @ 0x360B30,
+    // KenshiOisKeyDown @ 0x82B010) are DISABLED. They were tested and
+    // didn't reliably gate the vanilla hotkey path on 1.0.68 — likely
+    // because IsModalUiActive() returned false on the input thread, or
+    // dispatch reached the function via a path our entry-point hook
+    // didn't cover. Implementations kept for reference / re-enabling.
+    constexpr bool kInstallLegacyInputHooks = false;
+    bool iatOk = false, keyPressedOk = false, oisKeyDownOk = false;
+    if (kInstallLegacyInputHooks) {
+        iatOk        = InstallGetKeyboardStateIatHook();
+        keyPressedOk = InstallKenshiKeyPressed();
+        oisKeyDownOk = InstallKenshiOisKeyDown();
+    }
 
     s_installed = true;
     spdlog::info("input_hooks: Installed (WndProc + OIS gate keyDown={} "
-                 "keyUp={}, IAT-GetKeyboardState={})",
-                 keyDownOk, keyUpOk, iatOk);
+                 "keyUp={}; legacy layers disabled)",
+                 keyDownOk, keyUpOk);
+    (void)iatOk; (void)keyPressedOk; (void)oisKeyDownOk;
     return keyDownOk && keyUpOk;
 }
 
@@ -437,6 +444,229 @@ static void Hook_KenshiHotkey(void* self) {
     }
 }
 
+// ── Kenshi _keyPressed hook (THE correct dispatcher) ──────────────────────
+//
+// Recon11→13 (2026-05-04) located Kenshi 1.0.68's hotkey dispatcher:
+//
+//   FUN_140360B30 — _keyPressed(this, scanCode):
+//       this+0xd8 / +0xd9 / +0xda  — ctrl / shift / alt held flags
+//       this+0xd0                 — gate flag (input enabled?)
+//       this+0x30 / +0x58          — std::set<HotkeyBinding> trees
+//       binding+0x10               — "currently held" byte
+//
+//   Function structure (matches symmetric _keyReleased at 0x360DA0):
+//       1. update modifier flag for sc==0x2a/0x36/0x1d/0x9d/0x38/0xb8
+//       2. if (this+0xd0 == 0) return;        ← Kenshi's own gate
+//       3. compute uVar7 = scanCode | (modifiers << 8)
+//       4. walk trees, fire matching bindings
+//
+//   Both keyDownEvent (0x360680) we already hook and _keyPressed
+//   (0x360B30) we add now are SEPARATE OIS::KeyListener subscribers
+//   on the same OIS::Keyboard. The earlier hook only covered the
+//   keyDownEvent listener (Kenshi's tree at +8); the hotkey dispatch
+//   was happening via the _keyPressed listener which uses different
+//   member trees (+0x30 and +0x58).
+//
+// We hook _keyPressed and drop the call entirely when our chat or
+// menu is modal — no hotkey binding fires while user is typing.
+// Modifier flags (this+0xd8/d9/da) are NOT updated when we drop, but
+// that only affects future hotkey-recognition combos which we're
+// also dropping, so consistent.
+
+using KenshiKeyPressedFn = void(__fastcall*)(void* self, std::uint32_t scanCode);
+static constexpr uintptr_t RVA_KENSHI_KEY_PRESSED = 0x360B30;
+static KenshiKeyPressedFn s_origKenshiKeyPressed = nullptr;
+static std::atomic<int> s_keyPressedSwallowed{0};
+static std::atomic<int> s_keyPressedForwarded{0};
+// Diagnostic — log first N calls so we can SEE the function fires per
+// keypress and which scancodes hit it. Unset after we've validated.
+static std::atomic<int> s_keyPressedDiagLogged{0};
+
+static void __fastcall Hook_KenshiKeyPressed(void* self, std::uint32_t scanCode) {
+    int n = s_keyPressedDiagLogged.fetch_add(1, std::memory_order_relaxed);
+    bool modal = IsModalUiActive();
+    if (n < 30) {
+        spdlog::info(
+            "input_hooks: KenshiKeyPressed FIRED #{} self=0x{:X} sc=0x{:X} "
+            "modal={} -> {}",
+            n, reinterpret_cast<uintptr_t>(self), scanCode,
+            modal ? "yes" : "no", modal ? "DROP" : "forward");
+    }
+    if (modal) {
+        s_keyPressedSwallowed.fetch_add(1, std::memory_order_relaxed);
+        return; // drop entire dispatcher — no hotkey binding fires
+    }
+    s_keyPressedForwarded.fetch_add(1, std::memory_order_relaxed);
+    if (s_origKenshiKeyPressed) {
+        __try {
+            s_origKenshiKeyPressed(self, scanCode);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // No destructible locals — same SEH-isolation pattern as
+            // CallOrigAddToUpdateListMainSafe.
+            OutputDebugStringA("KMP: KenshiKeyPressed trampoline crashed\n");
+        }
+    }
+}
+
+bool InstallKenshiKeyPressed() {
+    if (s_origKenshiKeyPressed) return true;
+    HMODULE exe = GetModuleHandleA(nullptr);
+    if (!exe) return false;
+    auto target = reinterpret_cast<uintptr_t>(exe) + RVA_KENSHI_KEY_PRESSED;
+
+    // .pdata sanity — refuse if mid-function on this build.
+    DWORD64 imageBase = 0;
+    auto* rt = RtlLookupFunctionEntry(static_cast<DWORD64>(target),
+                                      &imageBase, nullptr);
+    if (rt) {
+        uintptr_t funcStart = static_cast<uintptr_t>(imageBase) + rt->BeginAddress;
+        if (funcStart != target) {
+            spdlog::warn(
+                "input_hooks: KenshiKeyPressed RVA 0x{:X} is MID-FUNCTION "
+                "(real start 0x{:X}, offset +0x{:X}) — RECOVERING",
+                RVA_KENSHI_KEY_PRESSED, funcStart, target - funcStart);
+            target = funcStart;
+        } else {
+            spdlog::info(
+                "input_hooks: KenshiKeyPressed .pdata bounds OK "
+                "(start=0x{:X}, end=0x{:X}, size=0x{:X})",
+                funcStart, static_cast<uintptr_t>(imageBase) + rt->EndAddress,
+                rt->EndAddress - rt->BeginAddress);
+        }
+    } else {
+        spdlog::warn("input_hooks: KenshiKeyPressed .pdata lookup FAILED — "
+                     "function may not exist on this build");
+    }
+
+    // Dump first 16 bytes of prologue for diagnosis. MinHook needs at
+    // least 5 bytes of overwriteable instructions for a JMP rel32.
+    auto* p = reinterpret_cast<const std::uint8_t*>(target);
+    spdlog::info(
+        "input_hooks: KenshiKeyPressed prologue at 0x{:X}: "
+        "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} "
+        "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+        target,
+        p[0], p[1], p[2],  p[3],  p[4],  p[5],  p[6],  p[7],
+        p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+
+    auto& hookMgr = HookManager::Get();
+    if (!hookMgr.InstallAt("KenshiKeyPressed", target,
+                           &Hook_KenshiKeyPressed, &s_origKenshiKeyPressed)) {
+        spdlog::warn("input_hooks: KenshiKeyPressed install FAILED at 0x{:X}",
+                     target);
+        return false;
+    }
+    spdlog::info(
+        "input_hooks: KenshiKeyPressed hook INSTALLED at 0x{:X} "
+        "(RVA 0x{:X}) — vanilla hotkeys skip while modal UI active. "
+        "trampoline=0x{:X}",
+        target, RVA_KENSHI_KEY_PRESSED,
+        reinterpret_cast<uintptr_t>(s_origKenshiKeyPressed));
+    return true;
+}
+
+// ── Kenshi OIS keyDown listener hook ───────────────────────────────────────
+//
+// FUN_14082B010 at RVA 0x82B010 (Recon17 2026-05-04) is the OIS
+// KeyListener::keyPressed callback registered by Kenshi. It receives
+// the OIS KeyEvent, calls MyGUI::injectKeyPress, then performs the
+// "is keyboard-focused widget an EditBox" check and (if not) calls
+// thunk_FUN_140360b30 to fire hotkey bindings.
+//
+// By hooking this whole function and dropping the call when our
+// chat/menu is modal, we cut every downstream path simultaneously
+// without needing to find the `this` pointer for Kenshi's input
+// handler instance (the +0xD0 gate flag).
+//
+// Returns 1 (low byte) to mimic "event consumed" so OIS won't
+// propagate to other listeners — matches the original function's
+// success-path return value.
+
+using KenshiOisKeyDownFn = std::uint64_t(__fastcall*)(std::int64_t p1,
+                                                      std::int64_t keyEvent);
+static constexpr uintptr_t RVA_KENSHI_OIS_KEYDOWN = 0x82B010;
+static KenshiOisKeyDownFn s_origKenshiOisKeyDown = nullptr;
+static std::atomic<int> s_oisKeyDownSwallowed{0};
+static std::atomic<int> s_oisKeyDownForwarded{0};
+static std::atomic<int> s_oisKeyDownDiagLogged{0};
+
+static std::uint64_t __fastcall Hook_KenshiOisKeyDown(std::int64_t p1,
+                                                      std::int64_t keyEvent) {
+    int n = s_oisKeyDownDiagLogged.fetch_add(1, std::memory_order_relaxed);
+    bool modal = IsModalUiActive();
+    if (n < 30) {
+        // KeyEvent struct layout: scancode at +0x10 per the decompile.
+        std::uint32_t sc = 0;
+        if (keyEvent) {
+            sc = *reinterpret_cast<const std::uint32_t*>(
+                reinterpret_cast<const std::uint8_t*>(keyEvent) + 0x10);
+        }
+        spdlog::info(
+            "input_hooks: KenshiOisKeyDown FIRED #{} p1=0x{:X} ev=0x{:X} "
+            "sc=0x{:X} modal={} -> {}",
+            n, static_cast<uintptr_t>(p1), static_cast<uintptr_t>(keyEvent),
+            sc, modal ? "yes" : "no", modal ? "DROP" : "forward");
+    }
+    if (modal) {
+        s_oisKeyDownSwallowed.fetch_add(1, std::memory_order_relaxed);
+        return 1; // claim "event consumed"
+    }
+    s_oisKeyDownForwarded.fetch_add(1, std::memory_order_relaxed);
+    if (s_origKenshiOisKeyDown) {
+        __try {
+            return s_origKenshiOisKeyDown(p1, keyEvent);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            OutputDebugStringA("KMP: KenshiOisKeyDown trampoline crashed\n");
+        }
+    }
+    return 0;
+}
+
+bool InstallKenshiOisKeyDown() {
+    if (s_origKenshiOisKeyDown) return true;
+    HMODULE exe = GetModuleHandleA(nullptr);
+    if (!exe) return false;
+    auto target = reinterpret_cast<uintptr_t>(exe) + RVA_KENSHI_OIS_KEYDOWN;
+
+    DWORD64 imageBase = 0;
+    auto* rt = RtlLookupFunctionEntry(static_cast<DWORD64>(target),
+                                      &imageBase, nullptr);
+    if (rt) {
+        uintptr_t funcStart = static_cast<uintptr_t>(imageBase) + rt->BeginAddress;
+        if (funcStart != target) {
+            spdlog::warn(
+                "input_hooks: KenshiOisKeyDown RVA 0x{:X} is MID-FUNCTION "
+                "(real start 0x{:X}) — RECOVERING",
+                RVA_KENSHI_OIS_KEYDOWN, funcStart);
+            target = funcStart;
+        } else {
+            spdlog::info(
+                "input_hooks: KenshiOisKeyDown .pdata bounds OK "
+                "(start=0x{:X}, size=0x{:X})",
+                funcStart, rt->EndAddress - rt->BeginAddress);
+        }
+    }
+
+    auto* p = reinterpret_cast<const std::uint8_t*>(target);
+    spdlog::info(
+        "input_hooks: KenshiOisKeyDown prologue at 0x{:X}: "
+        "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+        target, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+
+    auto& hookMgr = HookManager::Get();
+    if (!hookMgr.InstallAt("KenshiOisKeyDown", target,
+                           &Hook_KenshiOisKeyDown, &s_origKenshiOisKeyDown)) {
+        spdlog::warn("input_hooks: KenshiOisKeyDown install FAILED at 0x{:X}",
+                     target);
+        return false;
+    }
+    spdlog::info(
+        "input_hooks: KenshiOisKeyDown hook INSTALLED at 0x{:X} (RVA 0x{:X}) "
+        "— full OIS keyDown chain skipped while modal UI active",
+        target, RVA_KENSHI_OIS_KEYDOWN);
+    return true;
+}
+
 bool InstallKenshiHotkey() {
     if (s_origKenshiHotkey) return true;
     HMODULE exe = GetModuleHandleA(nullptr);
@@ -544,6 +774,22 @@ void Uninstall() {
                      s_kenshiHotkeySwallowed.load(std::memory_order_relaxed),
                      s_kenshiHotkeyForwarded.load(std::memory_order_relaxed));
         s_origKenshiHotkey = nullptr;
+    }
+    if (s_origKenshiKeyPressed) {
+        hookMgr.Remove("KenshiKeyPressed");
+        spdlog::info("input_hooks: Uninstalled KenshiKeyPressed "
+                     "(swallowed={}, forwarded={})",
+                     s_keyPressedSwallowed.load(std::memory_order_relaxed),
+                     s_keyPressedForwarded.load(std::memory_order_relaxed));
+        s_origKenshiKeyPressed = nullptr;
+    }
+    if (s_origKenshiOisKeyDown) {
+        hookMgr.Remove("KenshiOisKeyDown");
+        spdlog::info("input_hooks: Uninstalled KenshiOisKeyDown "
+                     "(swallowed={}, forwarded={})",
+                     s_oisKeyDownSwallowed.load(std::memory_order_relaxed),
+                     s_oisKeyDownForwarded.load(std::memory_order_relaxed));
+        s_origKenshiOisKeyDown = nullptr;
     }
     // Always try to undo the IAT hook; safe no-op when not installed.
     UninstallGetKeyboardStateIatHook();

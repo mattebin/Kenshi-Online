@@ -1,0 +1,35 @@
+Recon10 — keyDownEvent helper chain
+====================================
+
+Goal: keyDownEvent (0x360680) calls FUN_14035EE40 then FUN_14035F820.
+If those functions mutate keyboard STATE (a 256-byte buffer or similar)
+that the hotkey poll later reads, we'd be able to gate the path there.
+
+Findings:
+
+FUN_14035EE40 (109 bytes) — allocates a tree node:
+  puVar1 = Ogre::NedPoolingPolicy::allocateBytes(0x28, ...);
+  *puVar1 = *(this+8);     // copy parent tree root
+  puVar1[1] = *(this+8);
+  puVar1[2] = *(this+8);
+  *(uint16_t*)(puVar1+4) = 0;
+  if (puVar1+3 != 0) puVar1[3] = *param_2;  // store key from event
+  return puVar1;
+
+FUN_14035F820 (315 bytes) — red-black tree insertion search:
+  walks tree at this+8 keyed by node[+0x18] vs incoming key
+  bVar6 / puVar pattern is std::_Tree<>::_Find_lower
+
+→ This chain is std::set<...>::insert. NOT a key-state buffer. It's
+  Kenshi's "currently held keys" registry implemented as an STL set,
+  used by the keyDownEvent listener for held-state queries.
+
+Direct callers of 0x35EE40: empty in Ghidra's xref index. They're called
+through the keyDownEvent thunk — which is a vtable slot (Recon11 finds
+the .pdata SEH ref).
+
+Conclusion: hooking keyDownEvent (0x360680) gates ONE OIS::KeyListener.
+Kenshi's vanilla hotkey handler must be a SEPARATE OIS::KeyListener with
+its own keyDownEvent + state. We need to find that other listener — try
+the message pump (WndProc / SetWindowLongPtr) and search neighborhood
+for tree-walking key-state functions. → Recon11.

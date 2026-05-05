@@ -1,0 +1,37 @@
+Recon9 — Win32 keyboard-related imports + callers
+====================================================
+
+Goal: After Recon7+8 disproved both 0x82B370 and 0x22B370 as the hotkey
+dispatcher, enumerate every Win32 keyboard API kenshi_x64.exe imports and
+inspect their direct callers, since one of them MUST be the path the
+hotkey poll uses on 1.0.68.
+
+Result summary:
+  IMPORT  USER32::GetKeyboardState   at 0x463    1 caller (0x82A3A0, 376B)
+  IMPORT  USER32::ToUnicodeEx        at 0x465    1 caller (0x82A3A0, 376B)
+  IMPORT  USER32::GetKeyboardLayout  at 0x462    1 caller (0x82A3A0, 376B)
+
+  miss  GetKeyState
+  miss  GetAsyncKeyState
+  miss  GetRawInputData / RegisterRawInputDevices / GetRawInputBuffer
+  miss  DefRawInputProc
+  miss  MapVirtualKey / MapVirtualKeyEx
+  miss  ToUnicode
+  miss  VkKeyScan / VkKeyScanEx
+  miss  DirectInput8Create
+  miss  PeekMessage / GetMessage
+
+Single function FUN_14082A3A0 (376 bytes) calls all three keyboard APIs —
+that's a translate-key-to-unicode helper, NOT a per-frame poll. So Win32
+API is NOT how Kenshi reads hotkey state on 1.0.68.
+
+Also enumerated small bool(this,int)-shape candidates near keyDownEvent
+in [0x360000..0x361000]:
+  RVA 0x3601E0  85B   small InputHandler dtor-ish helper
+  RVA 0x360680  55B   keyDownEvent (already hooked)
+  RVA 0x3606D0  55B   sibling dispatcher (mirror — calls thunk to
+                      0x35EED0 then 0x35F820)
+
+Conclusion: Kenshi does NOT use a Win32 API for the hotkey path on 1.0.68.
+The dispatcher is purely OIS-internal — needs further drill into the OIS
+event tree at FUN_14035EE40 / FUN_14035F820. → Recon10.

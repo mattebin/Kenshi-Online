@@ -1,0 +1,40 @@
+Recon11 — WndProc / message pump + OIS-region function survey
+=============================================================
+
+Hunting for either (a) the WndProc that processes WM_KEYDOWN/WM_KEYUP
+or (b) the actual hotkey-state mutator. After Recon10 ruled out the
+0x35EE40 / 0x35F820 chain as state mutators (just a held-keys std::set
+maintained for the keyDownEvent listener), drill wider.
+
+A. Win32 message-pump / hook APIs:
+
+  miss   PeekMessage*, GetMessage*, SetWindowsHookEx*, CallNextHookEx
+  miss   DispatchMessage*, TranslateMessage
+  IMPORT SetWindowLongPtrW    @ 0x453    2 callers
+  IMPORT GetWindowLongPtrW    @ 0x452    1 caller
+  IMPORT CallWindowProcW      @ 0x454    1 caller (RVA 0xAA9450, 194B)
+  IMPORT CWnd::DefWindowProcW (MFC100U)  via thunk
+  IMPORT LoadLibrary*         (used by AK::Wwise audio + steam_api)
+
+→ Kenshi uses MFC100U for windowing. The "WndProc" is owned by MFC's
+  message map; key processing happens deep inside MFC. The single
+  CallWindowProcW caller at 0xAA9450 turned out to be a WM_DEVICECHANGE
+  joystick-hotplug handler (Recon12), not a key WndProc.
+
+B. References TO 0x360680 (keyDownEvent):
+  Only 1 ref, from .pdata block (SEH unwinding metadata, NOT a vtable).
+  Means keyDownEvent is registered through C++ vtable at runtime — not
+  statically discoverable in .rdata.
+
+C. Function survey in [0x35E000..0x361500]:
+
+  Notable medium/large functions with 0 callers (likely vtable methods):
+    0x360DA0   511B   _keyReleased candidate — large, standalone
+    0x360B30   614B   _keyPressed candidate — large, standalone
+    0x3614B0  1407B   uses Ogre::StringConverter — rendering helper
+    0x361100   462B   uses MultiByteToWideChar — string helper
+    0x3612E0   449B   "Mouse"/"Shift+"/"Ctrl+" string builder
+
+  → 0x360B30 + 0x360DA0 are the prime candidates: both ~500-600B,
+    both standalone, both near the OIS event helpers. Decompile both.
+    → Recon12 / Recon13.

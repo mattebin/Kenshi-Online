@@ -1,0 +1,103 @@
+Recon13 — _keyPressed FOUND at RVA 0x360B30
+============================================
+
+Search: find the symmetric companion to _keyReleased (0x360DA0). Should
+write 1 (not 0) to *(binding+0x10), and check the input-enabled gate at
+this+0xd0.
+
+Hit: FUN_140360B30 @ RVA 0x360B30 (614 bytes, 2 callees, 0 callers in
+xref index — vtable invocation).
+
+Decompile (paraphrased to expose the structure):
+
+  void FUN_140360b30(longlong this, uint scanCode) {
+    // 1. Update modifier-held flags FIRST (always, regardless of gate)
+    if (sc==0x2a || sc==0x36) *(this+0xd9) = 1;   // SHIFT
+    if (sc==0x1d || sc==0x9d) *(this+0xd8) = 1;   // CTRL
+    if (sc==0x38 || sc==0xb8) *(this+0xda) = 1;   // ALT
+
+    // 2. The KENSHI INPUT GATE — perfect spot for our chat-typing fix
+    //    if internally-driven, but we can't know if Kenshi already uses
+    //    it for save dialog / window defocus / etc. → don't toggle.
+    if (*(char*)(this+0xd0) == 0) return;
+
+    // 3. Build composite key-with-modifiers
+    uint mods = (-(int)(this+0xda != 0) & 0x400)
+              | (-(int)(this+0xd8 != 0) & 0x200)
+              | (-(int)(this+0xd9 != 0) & 0x100);
+    uint keyWithMods = mods | scanCode;
+
+    // 4. First check tree at this+0x58 (likely "context" hotkeys)
+    if (*(int*)(this+0xd4) == 1) {
+      walk tree this+0x58 keyed by keyWithMods (modifier-aware match);
+      if found:
+        binding = *(node+0x20);
+        if (binding != 0) goto LAB_140360c78;  // ← fire it
+      else if mods != 0:
+        walk tree this+0x58 keyed by scanCode (modifier-strip retry);
+        if found: → fire
+    }
+
+    // 5. Fallback: tree at this+0x30 ("global" hotkeys) — same logic
+    walk tree this+0x30 keyed by keyWithMods;
+    if not found and mods != 0:
+      walk tree this+0x30 keyed by scanCode;
+    if found:
+   LAB_140360c78:
+      ... fire bound action via *(binding+stuff) callback ...
+  }
+
+CONFIRMED: this is the SOLE function that fires Kenshi hotkey bindings
+on key press. F1, F2/F3/F4, M, Y, all the letter binds — every one
+funnels through this function before binding lookup.
+
+ARCHITECTURE — putting it all together:
+
+  Class instance (this) at some unknown ptr in .bss/.data:
+    +0x00  vtable (OIS::KeyListener-derived)
+    +0x08  std::set<int> currently-held-keys (from keyDownEvent path)
+    +0x30  std::set<HotkeyBinding> "global" bindings tree (RB-tree root)
+    +0x58  std::set<HotkeyBinding> "context" bindings tree
+    +0xd0  uint8_t gate flag (1 = input enabled, 0 = disabled)
+    +0xd4  uint32_t context tree active flag (1 = use context tree)
+    +0xd8  uint8_t ctrl-held
+    +0xd9  uint8_t shift-held
+    +0xda  uint8_t alt-held
+
+  Per-frame flow on a keypress:
+    OIS Win32Keyboard::capture()
+      → fires OIS::KeyListener::keyPressed(KeyEvent)
+        → THIS instance is registered listener
+        → invokes _keyPressed (0x360B30)
+          → updates modifier flag at +0xd8/d9/da
+          → checks gate at +0xd0
+          → if open: walks tree, fires bound action
+
+  Per-frame flow on a key release:
+    OIS Win32Keyboard::capture()
+      → fires keyReleased(KeyEvent)
+        → invokes _keyReleased (0x360DA0)
+          → clears modifier flag
+          → walks tree, clears bindings' "held" flag
+
+THE FIX:
+
+  Hook FUN_140360B30 at RVA 0x360B30 with signature
+    void __fastcall(this, uint scanCode)
+
+  When IsModalUiActive() returns true, drop the call (early return).
+  Otherwise pass through to original. This bypasses the binding tree
+  walk entirely while chat or our menu is open — no hotkey fires.
+
+  We deliberately do NOT toggle (this+0xd0) because Kenshi may already
+  use that flag for its own pause/dialog states; competing for it
+  could fight Kenshi's UI logic.
+
+  The existing keyDownEvent (0x360680) hook stays — it gates a SEPARATE
+  OIS::KeyListener (the one tracking held-keys at this+0x08). Same for
+  the MyGUI inject-key hooks. Layered defense; minimal cost.
+
+IMPLEMENTED: KenshiMP.Core/hooks/input_hooks.cpp
+  Hook_KenshiKeyPressed   (the hook fn)
+  InstallKenshiKeyPressed (the installer)
+  Called from input_hooks::Install().

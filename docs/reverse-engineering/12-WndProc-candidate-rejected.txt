@@ -1,0 +1,83 @@
+Recon12 — Decompile WndProc + OIS-region candidates
+====================================================
+
+Decompiles for the candidates surfaced by Recon11.
+
+A. CallWindowProcW caller @ 0xAA9450 (194 bytes):
+
+  void FUN_140aa9450(HWND p1, UINT p2, WPARAM p3, longlong p4) {
+    if (((p2 == 0x219) && (p3 == 0x8000)) && (DAT_142136bc0 != 0)) {
+      // 0x219 = WM_DEVICECHANGE, 0x8000 = DBT_DEVICEARRIVAL
+      // Compare GUIDs against {11D093EF-...} and {11D08F56-...}
+      ...
+      FUN_140a887e0();   // re-init joystick / device list
+    }
+    CallWindowProcW(DAT_142136eb0, p1, p2, p3, p4);
+  }
+
+  → REJECTED. This is a USB device-change handler for joystick hotplug.
+    NOT the key-message WndProc. Kenshi's main WndProc lives inside
+    MFC100U.DLL (CWnd::DefWindowProcW) and is not directly hookable
+    without intercepting MFC's message map.
+
+B. SetWindowLongPtrW caller @ 0xAA9520 (116 bytes):
+  Removes the device-change subclass on shutdown.
+
+C. Second SetWindowLongPtrW caller @ 0xAA99F0 (310 bytes):
+  Sets up the device-change subclass at startup. Calls CoCreateInstance
+  with IID {bcde0395-e52f-467c-...} (KSCATEGORY_AUDIO?), registers a
+  device-notification handler, hooks WndProc with FUN_140aa9450 as the
+  subclass, falls through to RegisterDeviceNotificationW.
+
+D. FUN_140360DA0 @ 0x360DA0 (511 bytes) — JACKPOT:
+
+  void FUN_140360da0(longlong this, uint scanCode) {
+    uint flags = (-(int)(this+0xd9 != 0) & 0x100)
+               | (-(int)(this+0xd8 != 0) & 0x200)
+               | scanCode;
+    if (sc==0x2a || sc==0x36) this+0xd9 = 0;   // SHIFT release
+    if (sc==0x1d || sc==0x9d) this+0xd8 = 0;   // CTRL release
+    if (sc==0x38 || sc==0xb8) this+0xda = 0;   // ALT release
+    walk tree at this+0x30 looking for binding with key flags;
+      if found, set *(binding+0x10) = 0
+    walk tree at this+0x58 looking for binding with key flags;
+      if found, set *(binding+0x10) = 0
+    walk tree at this+0x30 looking for binding with key scanCode;
+      if found, set *(binding+0x10) = 0
+    walk tree at this+0x58 looking for binding with key scanCode;
+      if found, set *(binding+0x10) = 0
+  }
+
+  → CONFIRMED: this is _keyReleased — Kenshi's per-scancode release
+    handler. Maintains:
+      this+0xd0  : input-enabled gate (read by _keyPressed)
+      this+0xd8  : ctrl-held flag
+      this+0xd9  : shift-held flag
+      this+0xda  : alt-held flag
+      this+0x30  : std::set<HotkeyBinding> tree #1
+      this+0x58  : std::set<HotkeyBinding> tree #2
+      *(binding+0x10) : "currently held" byte per binding
+    No-callers result is normal — it's a vtable method, called via the
+    OIS dispatcher.
+
+  Reference TO 0x360DA0: from RVA 0x332BC (a .text thunk), confirming
+  it's invoked via thunk/jump-table — i.e. registered as an OIS event
+  callback.
+
+E. Sibling functions (smaller decompiles):
+  0x3604B0 / 0x3605A0 — string-key tree-walks (not us)
+  0x360720 — std::string destructor (heap deletes)
+  0x360940 — Ogre::NedPoolingPolicy allocator wrapper
+  0x3609D0 / 0x360A80 — bulk "clear all held flags" (release-all on
+                        defocus or context switch)
+  0x360FB0 — small bool poll: walks both trees keyed by int, returns
+             bool. This IS the "isHotkeyHeld(scanCode)" reader.
+
+  All consistent with the model: Kenshi has its own hotkey binding
+  registry on this object. _keyReleased clears flags; _keyPressed
+  sets them and fires actions; 0x360FB0 is the read-side accessor.
+
+Conclusion: the corresponding _keyPressed must mirror _keyReleased,
+writing 1 to (binding+0x10) and additionally firing the bound action.
+Look for a function with the same modifier-byte pattern but writing 1
+instead of 0. → Recon13 found it: FUN_140360B30.
