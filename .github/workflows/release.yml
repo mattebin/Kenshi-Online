@@ -108,8 +108,15 @@ jobs:
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "Inno Setup not found at $iscc" }
 
+          # ISCC resolves Source: paths relative to the .iss file's
+          # directory (installer/), not the workflow's CWD. Pass an
+          # absolute path so the staged release/ folder is found
+          # regardless of where it lives relative to the script.
+          $absSource = (Resolve-Path "release\Kenshi-Online").Path
+          if (-not (Test-Path $absSource)) { throw "Staged release dir missing: $absSource" }
+
           & $iscc /Qp `
-            "/DSourceDir=release\Kenshi-Online" `
+            "/DSourceDir=$absSource" `
             "/DAppVersion=$version" `
             installer\KenshiMP.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
