@@ -431,11 +431,42 @@ void NativeHud::UpdatePlayerList() {
     }
 }
 
+// SEH-wrapped row writer. C2712 means we can't put __try in a function that
+// holds a std::lock_guard or any unwindable object, so the inner write goes
+// in this file-scope helper. Catches widget-pointer use-after-free that has
+// historically taken down the process during MyGUI bursts (see crash logs:
+// `inMyGUI=1`, AV at `[reg+0x46C]`).
+static bool SafeSetCaption(MyGuiBridge& bridge, void* widget,
+                           const std::string& line) {
+    if (!widget) return false;
+    __try {
+        bridge.SetCaption(widget, line);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool SafeSetVisible(MyGuiBridge& bridge, void* widget, bool visible) {
+    if (!widget) return false;
+    __try {
+        bridge.SetVisible(widget, visible);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void NativeHud::UpdateLogPanel() {
     if (!m_logPanel) return;
 
     auto& bridge = MyGuiBridge::Get();
-    bridge.SetVisible(m_logPanel, m_showLogPanel);
+    if (!SafeSetVisible(bridge, m_logPanel, m_showLogPanel)) {
+        // Lost the panel widget — null it so we stop poking the corpse.
+        m_logPanel = nullptr;
+        spdlog::warn("NativeHud: log panel widget vanished, dropping ref");
+        return;
+    }
     if (!m_showLogPanel) return;
 
     std::lock_guard lock(m_logMutex);
@@ -447,27 +478,77 @@ void NativeHud::UpdateLogPanel() {
     for (int i = 0; i < MAX_LOG_LINES; i++) {
         if (!m_logLines[i]) continue;
         int entryIdx = startIdx + i;
+        std::string line;
         if (entryIdx < entryCount) {
             auto& entry = m_logEntries[entryIdx];
-            std::string line = "[" + entry.tag + "] " + entry.message;
-            bridge.SetCaption(m_logLines[i], line);
-        } else {
-            bridge.SetCaption(m_logLines[i], "");
+            line = "[" + entry.tag + "] " + entry.message;
+        }
+        if (!SafeSetCaption(bridge, m_logLines[i], line)) {
+            // Stale row pointer. Drop it and stop touching this slot.
+            m_logLines[i] = nullptr;
+            spdlog::warn("NativeHud: log line {} widget vanished, dropping ref", i);
         }
     }
 }
 
 void NativeHud::LogStep(const std::string& tag, const std::string& message) {
-    std::lock_guard lock(m_logMutex);
-    LogEntry entry;
-    entry.tag = tag;
-    entry.message = message;
-    entry.time = std::chrono::steady_clock::now();
-    m_logEntries.push_back(entry);
-    if (m_logEntries.size() > MAX_LOG_ENTRIES) {
-        m_logEntries.pop_front();
+    // ── Burst rate-limit ──
+    // When the server snapshot lands at connect time, packet/spawn handlers
+    // can fire LogStep 100+ times within a single millisecond. The in-memory
+    // deque churn alone is fine, but MyGUI's per-frame UpdateLogPanel reads
+    // the deque under lock — and prior crash logs (`KenshiOnline_CRASH.log`,
+    // `Last CharacterCreate: #0, OnGameTick step: 15, inMyGUI=1`) traced the
+    // deaths to MyGUI dereferencing freed/stale widget pointers shortly after
+    // a burst. Throttle here so the deque stays sane under floods. spdlog
+    // and OutputDebugStringA paths still run on every call, so diagnostics
+    // are unaffected.
+    {
+        std::lock_guard lock(m_logMutex);
+        auto nowTp = std::chrono::steady_clock::now();
+        // Per-tag dedupe window: 100 ms. If the same tag fired within this
+        // window AND the message matches the last one, drop it from the
+        // deque path. Counter is reset whenever a different tag/message
+        // breaks the streak.
+        if (tag == m_lastLogTag &&
+            message == m_lastLogMessage &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                nowTp - m_lastLogTime).count() < 100) {
+            ++m_suppressedDupes;
+            // Still spdlog so diagnostics keep everything.
+            spdlog::info("NativeHud: [{}] {} (dup suppressed, total={} this run)",
+                         tag, message, m_suppressedDupes);
+            return;
+        }
+        // If we suppressed any, emit a summary first.
+        if (m_suppressedDupes > 0) {
+            LogEntry summaryEntry;
+            summaryEntry.tag = "DUP";
+            summaryEntry.message = "(+ " + std::to_string(m_suppressedDupes) +
+                                   " repeated)";
+            summaryEntry.time = nowTp;
+            m_logEntries.push_back(summaryEntry);
+            if (m_logEntries.size() > MAX_LOG_ENTRIES) {
+                m_logEntries.pop_front();
+            }
+            m_suppressedDupes = 0;
+        }
+
+        LogEntry entry;
+        entry.tag = tag;
+        entry.message = message;
+        entry.time = nowTp;
+        m_logEntries.push_back(entry);
+        if (m_logEntries.size() > MAX_LOG_ENTRIES) {
+            m_logEntries.pop_front();
+        }
+        m_lastLogTag = tag;
+        m_lastLogMessage = message;
+        m_lastLogTime = nowTp;
     }
-    // NativeHud is now the sole logging pipeline — log directly here
+
+    // NativeHud is now the sole logging pipeline — log directly here.
+    // These two outputs are file/debug-stream and do not touch MyGUI, so
+    // no rate-limit is needed for diagnostics.
     std::string logLine = "[" + tag + "] " + message;
     spdlog::info("NativeHud: {}", logLine);
     OutputDebugStringA(("KMP: " + logLine + "\n").c_str());

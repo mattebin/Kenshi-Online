@@ -965,6 +965,29 @@ bool Install() {
                   (unsigned long long)s_createTargetAddr);
         OutputDebugStringA(buf);
 
+        // SAFE-PROCESS GATE.  When `enableCharacterCreateHook` is false we
+        // skip patching Kenshi's CharacterCreate prologue entirely.  Past
+        // test runs documented in re_kenshi 2/manual_findings showed that
+        // even a pure-passthrough trampoline destabilises Kenshi after
+        // connect — back-to-back PIDs (22468, 29744 on 2026-05-06) died
+        // silently via __fastfail/TerminateProcess, bypassing every
+        // user-mode handler.  Disabling at the bypass-flag level wasn't
+        // enough because the prologue was still patched and the
+        // MovRaxRsp wrapper's mov rax,rsp shim still ran on every call.
+        // Skipping InstallAt avoids touching the prologue at all, which
+        // empirically eliminates that crash class.
+        //
+        // Trade-off: with the hook off, factory pointer capture has to
+        // come from a different path (vtable scan, polling, etc.) — see
+        // the spawn_manager `TryDeriveFactoryFromGameWorld` helper.  The
+        // spawn pipeline runs in a degraded state until that lands.
+        if (!core.GetConfig().enableCharacterCreateHook) {
+            spdlog::info("entity_hooks: CharacterCreate prologue NOT patched "
+                         "(enableCharacterCreateHook=false) — safe-process mode");
+            OutputDebugStringA(
+                "KMP: entity_hooks — CharacterCreate prologue NOT patched "
+                "(safe-process mode)\n");
+        } else
         if (!hookMgr.InstallAt("CharacterCreate",
                                s_createTargetAddr,
                                &Hook_CharacterCreate, &s_origCreate)) {

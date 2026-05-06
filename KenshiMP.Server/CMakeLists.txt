@@ -21,6 +21,7 @@ target_link_libraries(KenshiMP.Server PRIVATE
     ole32
     oleaut32
     iphlpapi
+    shlwapi
 )
 
 # Copy server exe to Kenshi directory so the Host button can find it

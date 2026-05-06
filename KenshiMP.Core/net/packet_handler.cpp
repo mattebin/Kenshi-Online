@@ -473,10 +473,32 @@ private:
         spdlog::info("PacketHandler: Entity spawn id={} type={} owner={} template='{}' at ({:.1f}, {:.1f}, {:.1f})",
                      entityId, type, ownerId, templateName, px, py, pz);
 
-        // Log to HUD for visibility
-        core.GetNativeHud().LogStep("NET", "Remote entity spawn: id=" + std::to_string(entityId)
-                              + " owner=" + std::to_string(ownerId)
-                              + " '" + templateName + "'");
+        // Throttle HUD spam during connect-time entity floods. The server
+        // can dump 100+ entity spawns in a single millisecond on connect,
+        // and even with the LogStep dedupe the per-spawn LogStep call is
+        // pure noise. Show first 3 then a period summary; spdlog above
+        // captures every single one for debugging.
+        {
+            static volatile LONG s_spawnLogCount = 0;
+            static volatile LONG s_spawnLogSilenced = 0;
+            static thread_local std::chrono::steady_clock::time_point s_lastSummary{};
+            LONG n = InterlockedIncrement(&s_spawnLogCount);
+            if (n <= 3) {
+                core.GetNativeHud().LogStep("NET",
+                    "Remote entity spawn: id=" + std::to_string(entityId)
+                  + " owner=" + std::to_string(ownerId)
+                  + " '" + templateName + "'");
+            } else {
+                LONG silenced = InterlockedIncrement(&s_spawnLogSilenced);
+                auto nowTp = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        nowTp - s_lastSummary).count() > 1000) {
+                    s_lastSummary = nowTp;
+                    core.GetNativeHud().LogStep("NET",
+                        "+ " + std::to_string(silenced) + " more entity spawns");
+                }
+            }
+        }
 
         // Save the first remote player character's position as host spawn point.
         // When a joiner receives entity spawns from the host, they'll teleport there.
@@ -522,14 +544,36 @@ private:
             }
             spawnMgr.QueueSpawn(req);
 
-            // Notify on HUD
-            auto* rp = core.GetPlayerController().GetRemotePlayer(ownerId);
-            std::string ownerName = rp ? rp->playerName : ("Player_" + std::to_string(ownerId));
-            if (spawnMgr.IsReady()) {
-                core.GetNativeHud().AddSystemMessage("Spawning " + ownerName + "'s character...");
-            } else {
-                core.GetNativeHud().AddSystemMessage("Queued " + ownerName + "'s character (waiting for game event)...");
-                spdlog::info("PacketHandler: SpawnManager not ready yet — entity {} queued for deferred spawn", entityId);
+            // Notify on HUD — throttled so connect-time floods don't slam
+            // MyGUI. Same architecture as the entity-spawn LogStep above:
+            // first few go through, rest get periodic summaries. spdlog
+            // line below still fires for every queue (debug visibility).
+            spdlog::info("PacketHandler: SpawnManager{} — entity {} queued for spawn",
+                         spawnMgr.IsReady() ? " ready" : " not ready yet",
+                         entityId);
+            {
+                static volatile LONG s_queueLogCount = 0;
+                static volatile LONG s_queueLogSilenced = 0;
+                static thread_local std::chrono::steady_clock::time_point s_lastSummary{};
+                LONG n = InterlockedIncrement(&s_queueLogCount);
+                if (n <= 3) {
+                    auto* rp = core.GetPlayerController().GetRemotePlayer(ownerId);
+                    std::string ownerName = rp ? rp->playerName : ("Player_" + std::to_string(ownerId));
+                    if (spawnMgr.IsReady()) {
+                        core.GetNativeHud().AddSystemMessage("Spawning " + ownerName + "'s character...");
+                    } else {
+                        core.GetNativeHud().AddSystemMessage("Queued " + ownerName + "'s character (waiting for game event)...");
+                    }
+                } else {
+                    LONG silenced = InterlockedIncrement(&s_queueLogSilenced);
+                    auto nowTp = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                            nowTp - s_lastSummary).count() > 1000) {
+                        s_lastSummary = nowTp;
+                        core.GetNativeHud().AddSystemMessage(
+                            "Queued + " + std::to_string(silenced) + " more characters");
+                    }
+                }
             }
         }
     }

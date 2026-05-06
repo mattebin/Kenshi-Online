@@ -126,6 +126,21 @@ static std::atomic<uintptr_t> g_kenshiNullDerefRVA{0};
 // scanned RVA gets redirected. Same atomic-bool reasoning as above.
 static std::atomic<bool> g_kenshiCrashRecoveryEnabled{false};
 
+// Master gate from ClientConfig::factionSignExtRescue. Default off until
+// Core::Initialize sees the config. When enabled, the VEH rescue catches
+// access violations whose target address is of the form 0xFFFFFFFF<low>
+// (high 32 bits all 1s = sign-extended from a negative int32) — the
+// signature of the recurring Faction*+0x250 crash documented in
+// re_kenshi 2/manual_findings/notes/bind_crash_faction_0x250_signext.md.
+//
+// On match, the handler iterates the 16 GPRs to find the one whose
+// upper 32 bits are 0xFFFFFFFF and whose value is within a small
+// struct-offset window of the AV target, masks that register's upper
+// bits to 0, and resumes. Same idea as the engine null-deref redirect:
+// don't fix the bug, supply a sane register at the moment of fault and
+// let the game's per-tick code paths drain naturally.
+static std::atomic<bool> g_factionSignExtRescueEnabled{false};
+
 // Scan helper — runs on the kenshi_x64.exe module loaded into the host
 // process. We're looking for the specific function context where Kenshi
 // dereferences a null pointer at +0x90:
@@ -202,39 +217,318 @@ static uintptr_t ScanForKenshiNullDerefSite() {
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
 
-    // ── Recovery: Kenshi engine periodic-AI null deref ──
-    // Pattern-scanned at init. Gated by ClientConfig::kenshiCrashRecovery so
-    // upstream maintainers / debuggers can disable it to reproduce the
-    // underlying engine bug if they want to investigate root cause.
+    // ── Recovery: universal null-deref in game/Ogre/MyGUI ──
+    // Previously this was pattern-scanned to one specific RVA. That broke
+    // when the same `[reg+small_offset]` AV class fired at OTHER RVAs
+    // (e.g. game+0x644365 vs the scanned game+0x643AFB) — the rescue
+    // missed and the process terminated unhandled.
+    //
+    // Super-mode generalisation: any READ AV where the target address is
+    // in low memory (< 0x10000, classic null-or-near-null deref) AND RIP
+    // is inside game/Ogre/MyGUI, is by definition a null-pointer-deref
+    // bug in code we don't control. Find any GPR == 0 (other than RSP/
+    // RBP), redirect it to s_safeZeroBuf, and resume. The faulting
+    // function reads zeros and takes its null-handling branch.
+    //
+    // No false positives possible: a GPR == 0 with target == GPR+offset
+    // means SOMEONE intended to read through that GPR as a pointer, and
+    // it was null. That's always a bug.
     if (g_kenshiCrashRecoveryEnabled.load(std::memory_order_relaxed) &&
         code == EXCEPTION_ACCESS_VIOLATION &&
         ep->ExceptionRecord->NumberParameters >= 2 &&
-        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */ &&
-        ep->ExceptionRecord->ExceptionInformation[1] == 0x90 &&
-        g_gameModuleBase != 0)
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */)
     {
-        uintptr_t recoverRva = g_kenshiNullDerefRVA.load(std::memory_order_relaxed);
-        uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
-            ep->ExceptionRecord->ExceptionAddress);
-        if (recoverRva != 0 &&
-            fault_rip == g_gameModuleBase + recoverRva &&
-            ep->ContextRecord->Rax == 0)
-        {
-            ep->ContextRecord->Rax = reinterpret_cast<DWORD64>(s_safeZeroBuf);
-            // Power-of-two log throttle so the workaround is visible without
-            // flooding under heavy fault rates. OutputDebugStringA — spdlog
-            // is unsafe from inside an exception handler that can re-enter.
-            static volatile LONG s_recoverCount = 0;
-            LONG n = InterlockedIncrement(&s_recoverCount);
-            if (n == 1 || (n & (n - 1)) == 0 /* power of two */) {
-                char buf[160];
-                sprintf_s(buf,
-                    "KMP RECOVER #%ld: game+0x%llX null-deref at +0x90, "
-                    "redirected rax to safe zero buffer\n",
-                    n, (unsigned long long)recoverRva);
-                OutputDebugStringA(buf);
+        uint64_t target = static_cast<uint64_t>(
+            ep->ExceptionRecord->ExceptionInformation[1]);
+        // Low-memory target = null + small offset.
+        if (target < 0x10000) {
+            // Resolve game/Ogre/MyGUI module bounds lazily once.
+            static uintptr_t s_nullDerefOgreBase = 0, s_nullDerefOgreEnd = 0;
+            static uintptr_t s_nullDerefMyguiBase = 0, s_nullDerefMyguiEnd = 0;
+            static bool s_nullDerefResolved = false;
+            if (!s_nullDerefResolved) {
+                s_nullDerefResolved = true;
+                auto resolveModuleLocal = [](const char* name,
+                                              uintptr_t& base, uintptr_t& end) {
+                    HMODULE h = GetModuleHandleA(name);
+                    if (h) {
+                        base = reinterpret_cast<uintptr_t>(h);
+                        auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(h);
+                        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                            reinterpret_cast<const uint8_t*>(h) + dos->e_lfanew);
+                        end = base + nt->OptionalHeader.SizeOfImage;
+                    }
+                };
+                resolveModuleLocal("OgreMain_x64.dll",
+                                   s_nullDerefOgreBase, s_nullDerefOgreEnd);
+                resolveModuleLocal("MyGUIEngine_x64.dll",
+                                   s_nullDerefMyguiBase, s_nullDerefMyguiEnd);
             }
-            return EXCEPTION_CONTINUE_EXECUTION;
+
+            uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+                ep->ExceptionRecord->ExceptionAddress);
+            bool inGameModule = (g_gameModuleBase != 0 &&
+                                 fault_rip >= g_gameModuleBase &&
+                                 fault_rip <  g_gameModuleEnd);
+            bool inOgreModule = (s_nullDerefOgreBase != 0 &&
+                                 fault_rip >= s_nullDerefOgreBase &&
+                                 fault_rip <  s_nullDerefOgreEnd);
+            bool inMyGUIModule = (s_nullDerefMyguiBase != 0 &&
+                                  fault_rip >= s_nullDerefMyguiBase &&
+                                  fault_rip <  s_nullDerefMyguiEnd);
+
+            if (inGameModule || inOgreModule || inMyGUIModule) {
+                CONTEXT* ctx = ep->ContextRecord;
+                DWORD64* gprs[16] = {
+                    &ctx->Rax, &ctx->Rcx, &ctx->Rdx, &ctx->Rbx,
+                    &ctx->Rsp, &ctx->Rbp, &ctx->Rsi, &ctx->Rdi,
+                    &ctx->R8,  &ctx->R9,  &ctx->R10, &ctx->R11,
+                    &ctx->R12, &ctx->R13, &ctx->R14, &ctx->R15
+                };
+                const char* gprNames[16] = {
+                    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
+                };
+                int matchIdx = -1;
+                for (int i = 0; i < 16; ++i) {
+                    if (i == 4 /*rsp*/ || i == 5 /*rbp*/) continue;
+                    if (*gprs[i] == 0) { matchIdx = i; break; }
+                }
+                if (matchIdx >= 0) {
+                    *gprs[matchIdx] = reinterpret_cast<DWORD64>(s_safeZeroBuf);
+                    static volatile LONG s_recoverCount = 0;
+                    LONG n = InterlockedIncrement(&s_recoverCount);
+                    if (n == 1 || (n & (n - 1)) == 0) {
+                        const char* mod = inGameModule ? "game"
+                                        : inOgreModule ? "Ogre"
+                                        : "MyGUI";
+                        uintptr_t modBase = inGameModule ? g_gameModuleBase
+                                          : inOgreModule ? s_nullDerefOgreBase
+                                          : s_nullDerefMyguiBase;
+                        char buf[256];
+                        sprintf_s(buf,
+                            "KMP RECOVER #%ld: %s null-deref at %s+0x%llX, "
+                            "%s=0 -> safeZeroBuf, target=0x%llX\n",
+                            n, mod, mod,
+                            (unsigned long long)(fault_rip - modBase),
+                            gprNames[matchIdx],
+                            (unsigned long long)target);
+                        OutputDebugStringA(buf);
+                    }
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+            }
+        }
+    }
+
+    // ── Recovery: sign-extended Faction* dereference (bind-path crash) ──
+    // The recurring crash blocking remote-character rendering AVs at an
+    // address of the form 0xFFFFFFFF<low>, which is a 32-bit value
+    // sign-extended to 64 bits and then treated as a pointer. The
+    // canonical site is `cmp [reg+0x250], 0` after `getFaction()`
+    // returns, but the same shape recurs at multiple call sites and
+    // possibly inside other DLLs. See manual_findings/notes/
+    // bind_crash_faction_0x250_signext.md for the full Ghidra recon.
+    //
+    // Rather than patching each producer of the bad value (some of which
+    // live outside kenshi_x64.exe), catch the AV here, find the GPR
+    // whose value is 0xFFFFFFFF<gpr_low> and within a small struct-offset
+    // window of the fault target, mask its upper 32 bits to 0, and
+    // resume. Re-execution then dereferences a valid heap pointer.
+    if (g_factionSignExtRescueEnabled.load(std::memory_order_relaxed) &&
+        code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */)
+    {
+        uint64_t target = static_cast<uint64_t>(
+            ep->ExceptionRecord->ExceptionInformation[1]);
+        // Only act on AV targets that are in the kernel-form sign-ext
+        // shape: upper 32 bits all 1s. Real kernel addresses on Windows
+        // x64 user-mode never appear in user-mode code paths, and a
+        // negative-int sign-extended user pointer is exactly this shape.
+        const uint64_t kHighMask = 0xFFFFFFFF00000000ULL;
+        if ((target & kHighMask) == kHighMask) {
+            CONTEXT* ctx = ep->ContextRecord;
+            DWORD64* gprs[16] = {
+                &ctx->Rax, &ctx->Rcx, &ctx->Rdx, &ctx->Rbx,
+                &ctx->Rsp, &ctx->Rbp, &ctx->Rsi, &ctx->Rdi,
+                &ctx->R8,  &ctx->R9,  &ctx->R10, &ctx->R11,
+                &ctx->R12, &ctx->R13, &ctx->R14, &ctx->R15
+            };
+            const char* gprNames[16] = {
+                "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
+            };
+            // Find a GPR with the same sign-ext shape AND whose value
+            // is within 0x1000 bytes BELOW the fault target (i.e. the
+            // offset (target - gpr) is a small struct field offset).
+            // 0x1000 covers the documented +0x250 case plus headroom for
+            // other field offsets that could trigger the same shape.
+            int matchIdx = -1;
+            int matchCount = 0;
+            uint64_t fieldOffset = 0;
+            for (int i = 0; i < 16; ++i) {
+                uint64_t v = static_cast<uint64_t>(*gprs[i]);
+                if ((v & kHighMask) != kHighMask) continue;
+                if (target < v) continue;
+                uint64_t off = target - v;
+                if (off > 0x1000) continue;
+                ++matchCount;
+                if (matchIdx < 0) {
+                    matchIdx = i;
+                    fieldOffset = off;
+                }
+            }
+            // Skip RSP — never mask the stack pointer even if it
+            // happens to match. RSP being in kernel-form would be a
+            // genuinely fatal stack-corruption crash.
+            if (matchIdx == 4 /* rsp */) {
+                matchIdx = -1;
+                matchCount = 0;
+            }
+            if (matchIdx >= 0) {
+                uint64_t before = static_cast<uint64_t>(*gprs[matchIdx]);
+                uint64_t after  = before & 0x00000000FFFFFFFFULL;
+                *gprs[matchIdx] = static_cast<DWORD64>(after);
+
+                static volatile LONG s_signExtCount = 0;
+                LONG n = InterlockedIncrement(&s_signExtCount);
+                // Power-of-two throttle: log #1, #2, #4, #8, ...
+                if (n == 1 || (n & (n - 1)) == 0) {
+                    char buf[256];
+                    uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+                        ep->ExceptionRecord->ExceptionAddress);
+                    uint64_t rva = (g_gameModuleBase != 0 &&
+                                    fault_rip >= g_gameModuleBase &&
+                                    fault_rip < g_gameModuleEnd)
+                                   ? (fault_rip - g_gameModuleBase)
+                                   : 0;
+                    sprintf_s(buf,
+                        "KMP RESCUE #%ld: sign-ext Faction-deref at "
+                        "rip=0x%llX (game+0x%llX), %s=0x%llX -> 0x%llX, "
+                        "+0x%llX (%d GPR matches)\n",
+                        n,
+                        (unsigned long long)fault_rip,
+                        (unsigned long long)rva,
+                        gprNames[matchIdx],
+                        (unsigned long long)before,
+                        (unsigned long long)after,
+                        (unsigned long long)fieldOffset,
+                        matchCount);
+                    OutputDebugStringA(buf);
+                }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+    }
+
+    // ── Recovery: MyGUI use-after-free dereference ──
+    // The recurring connect-time crash documented in
+    // `KenshiOnline_CRASH.log` lands at `[reg+0x46C]` with `inMyGUI=1`.
+    // Root cause is a stale Widget pointer that's been freed and its
+    // memory recycled — the AV target `0x...920 + 0x46C = 0x...D8C` is
+    // a heap-form address whose page no longer maps a valid widget.
+    //
+    // Strategy: when an AV fires inside the MyGUIEngine_x64.dll address
+    // range AND it's a READ AV with target shape `[gpr + small offset]`,
+    // redirect that GPR to a static zero buffer (`s_safeZeroBuf`, the
+    // same one the engine null-deref rescue uses) and resume. The MyGUI
+    // function reads zeros, returns "no widget here" or its equivalent
+    // null-handling branch, and the process keeps running.
+    //
+    // This is a hammer — it doesn't fix the use-after-free, just makes
+    // the dereference harmless. Trade-off: a repeated UAF on the same
+    // widget will re-fire every frame and we'll catch it every frame,
+    // logging once per power-of-two. That's acceptable; the alternative
+    // is process termination during connect-time entity floods.
+    //
+    // Only fires for READ AVs. WRITE AVs to a stale pointer would
+    // silently corrupt the zero buffer and could mask real bugs in our
+    // own code, so writes still propagate.
+    if (code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */)
+    {
+        // Resolve MyGUI module bounds once. Lazy because the module loads
+        // after our DllMain — by the time any VEH fires, it's there.
+        static uintptr_t s_myguiResRescueBase = 0, s_myguiResRescueEnd = 0;
+        static bool s_myguiResolved = false;
+        if (!s_myguiResolved) {
+            s_myguiResolved = true;
+            HMODULE h = GetModuleHandleA("MyGUIEngine_x64.dll");
+            if (h) {
+                s_myguiResRescueBase = reinterpret_cast<uintptr_t>(h);
+                auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(h);
+                auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                    reinterpret_cast<const uint8_t*>(h) + dos->e_lfanew);
+                s_myguiResRescueEnd = s_myguiResRescueBase +
+                                       nt->OptionalHeader.SizeOfImage;
+            }
+        }
+
+        uintptr_t rescue_rip = reinterpret_cast<uintptr_t>(
+            ep->ExceptionRecord->ExceptionAddress);
+        bool inMyGUIRescue = (s_myguiResRescueBase != 0 &&
+                              rescue_rip >= s_myguiResRescueBase &&
+                              rescue_rip <  s_myguiResRescueEnd);
+
+        if (inMyGUIRescue) {
+            uint64_t target = static_cast<uint64_t>(
+                ep->ExceptionRecord->ExceptionInformation[1]);
+            CONTEXT* ctx = ep->ContextRecord;
+            DWORD64* gprs[16] = {
+                &ctx->Rax, &ctx->Rcx, &ctx->Rdx, &ctx->Rbx,
+                &ctx->Rsp, &ctx->Rbp, &ctx->Rsi, &ctx->Rdi,
+                &ctx->R8,  &ctx->R9,  &ctx->R10, &ctx->R11,
+                &ctx->R12, &ctx->R13, &ctx->R14, &ctx->R15
+            };
+            const char* gprNames[16] = {
+                "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
+            };
+            // Find a GPR whose value is within 0x2000 bytes BELOW the
+            // fault target. 0x2000 covers MyGUI Widget which is ~0x500
+            // bytes plus subskin/parent pointer chains. Skip RSP/RBP
+            // since masking those would corrupt the call frame.
+            int matchIdx = -1;
+            int matchCount = 0;
+            uint64_t fieldOffset = 0;
+            for (int i = 0; i < 16; ++i) {
+                if (i == 4 /*rsp*/ || i == 5 /*rbp*/) continue;
+                uint64_t v = static_cast<uint64_t>(*gprs[i]);
+                if (v == 0) continue;          // null is a different bug
+                if (target < v) continue;
+                uint64_t off = target - v;
+                if (off > 0x2000) continue;
+                ++matchCount;
+                if (matchIdx < 0) {
+                    matchIdx = i;
+                    fieldOffset = off;
+                }
+            }
+            if (matchIdx >= 0) {
+                uint64_t before = static_cast<uint64_t>(*gprs[matchIdx]);
+                *gprs[matchIdx] = reinterpret_cast<DWORD64>(s_safeZeroBuf);
+
+                static volatile LONG s_myguiCount = 0;
+                LONG n = InterlockedIncrement(&s_myguiCount);
+                if (n == 1 || (n & (n - 1)) == 0) {
+                    char buf[256];
+                    sprintf_s(buf,
+                        "KMP RESCUE #%ld: MyGUI UAF deref at rip=0x%llX "
+                        "(MyGUI+0x%llX), %s=0x%llX -> safeZeroBuf, "
+                        "+0x%llX (%d GPR matches)\n",
+                        n,
+                        (unsigned long long)rescue_rip,
+                        (unsigned long long)(rescue_rip - s_myguiResRescueBase),
+                        gprNames[matchIdx],
+                        (unsigned long long)before,
+                        (unsigned long long)fieldOffset,
+                        matchCount);
+                    OutputDebugStringA(buf);
+                }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
     }
 
@@ -667,6 +961,21 @@ bool Core::Initialize() {
         }
     } else {
         spdlog::info("Core: kenshi-crash-recovery disabled by config");
+    }
+
+    // Arm the sign-extended Faction*+0x250 rescue. Independent of the
+    // null-deref recovery — different fault shape, different gate. No
+    // pattern scan needed; the rescue triggers on the AV target shape
+    // (upper 32 bits == 0xFFFFFFFF) regardless of which call site
+    // produced it.
+    g_factionSignExtRescueEnabled.store(m_config.factionSignExtRescue,
+                                        std::memory_order_relaxed);
+    if (m_config.factionSignExtRescue) {
+        spdlog::info("Core: faction-signext-rescue armed (catches AVs "
+                     "at 0xFFFFFFFF<low> and masks the offending GPR's "
+                     "high bits)");
+    } else {
+        spdlog::info("Core: faction-signext-rescue disabled by config");
     }
 
     // Initialize game offsets (CE fallbacks)
@@ -2976,6 +3285,21 @@ void Core::HandleSpawnQueue() {
     static bool s_retriedHookEnable = false;
     static int64_t s_lastNotReadyLog = 0;
     static auto s_lastDirectAttempt = std::chrono::steady_clock::time_point{};
+
+    // ── Brainer-guided hook-free factory discovery ──
+    // Cartographer/SpeshimenQursiveBrainer reported every entry in
+    // RootObjectFactory as hookBad (8/8 = 100%), so we don't depend
+    // on the CharacterCreate hook to capture the factory anymore.
+    // Read GameWorld+0x4A0 directly each tick the spawn manager is
+    // still un-ready.  Validates against the vtable RVA recorded in
+    // re_kenshi 2/manual_findings/notes/RootObjectFactory.vtable.md;
+    // bad reads return false silently and keep retrying next tick.
+    if (!m_spawnManager.IsReady()) {
+        if (m_spawnManager.TryDiscoverFactoryFromGameWorld()) {
+            m_nativeHud.LogStep("SPAWN",
+                "Factory captured via GameWorld+0x4A0 (hook-free)");
+        }
+    }
 
     if (m_needSpawnQueueReset) {
         m_needSpawnQueueReset = false;

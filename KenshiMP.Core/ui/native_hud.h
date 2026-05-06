@@ -108,6 +108,17 @@ private:
     std::deque<LogEntry> m_logEntries;
     static constexpr int MAX_LOG_ENTRIES = 100;
 
+    // Burst-dedupe state for LogStep.
+    // Same (tag, message) within 100 ms gets suppressed from the deque so
+    // server-snapshot bursts (100+ entity spawns / 1 ms) don't churn the
+    // MyGUI listbox refresh and trip the use-after-free at MyGUI Widget
+    // +0x46C documented in KenshiOnline_CRASH.log. spdlog still receives
+    // every call.
+    std::string m_lastLogTag;
+    std::string m_lastLogMessage;
+    std::chrono::steady_clock::time_point m_lastLogTime{};
+    int m_suppressedDupes = 0;
+
     std::mutex m_chatMutex;
     std::mutex m_logMutex;
 

@@ -1,5 +1,6 @@
 #include "injector.h"
 #include "process.h"
+#include "kmp/logtail_launcher.h"
 #include <Windows.h>
 #include <CommCtrl.h>
 #include <shlobj.h>
@@ -85,11 +86,52 @@ void OnPlay() {
     WideCharToMultiByte(CP_UTF8, 0, playerName, -1, nameA, sizeof(nameA), nullptr, nullptr);
     kmp::WriteConnectConfig(addrA, portA, nameA);
 
-    // 5. Launch the game
+    // 5. Launch live log tail viewer (no-op if already running).  Done
+    //    BEFORE the game so the tail console is up and ready by the time
+    //    Kenshi starts writing its log.  Honours KMP_NO_LOGTAIL=1.
+    kmp::LaunchLogTailIfAbsent();
+
+    // 6. Launch the game
     UpdateStatus(L"Launching Kenshi via Steam...");
     if (!kmp::LaunchKenshi(gameDir)) {
         UpdateStatus(L"Failed to launch Kenshi");
         return;
+    }
+
+    // 7. Launch out-of-process companions: CrashWatchdog and Probe.
+    //    Both attach read-only to kenshi_x64.exe.  Each finds the PID
+    //    on its own (they poll for kenshi_x64.exe), so no PID handoff
+    //    is needed and they survive the user starting Kenshi outside
+    //    the injector.  Honours KMP_NO_COMPANIONS=1 for unattended
+    //    runs that don't want extra console windows.
+    {
+        char skip[8]{};
+        bool wantCompanions =
+            !(GetEnvironmentVariableA("KMP_NO_COMPANIONS", skip, sizeof(skip)) > 0
+              && skip[0] == '1');
+        if (wantCompanions) {
+            wchar_t self[MAX_PATH]{};
+            GetModuleFileNameW(nullptr, self, MAX_PATH);
+            PathRemoveFileSpecW(self);
+
+            auto launchSilent = [&](const wchar_t* exe) {
+                std::wstring full = std::wstring(self) + L"\\" + exe;
+                if (!PathFileExistsW(full.c_str())) return;
+                STARTUPINFOW si{}; si.cb = sizeof(si);
+                PROCESS_INFORMATION pi{};
+                std::wstring cmd = L"\"" + full + L"\"";
+                if (CreateProcessW(nullptr,
+                        const_cast<LPWSTR>(cmd.c_str()),
+                        nullptr, nullptr, FALSE,
+                        CREATE_NEW_CONSOLE,
+                        nullptr, self, &si, &pi)) {
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                }
+            };
+            launchSilent(L"KenshiMP.CrashWatchdog.exe");
+            launchSilent(L"KenshiMP.Probe.exe");
+        }
     }
 
     UpdateStatus(L"Kenshi launched! Click OK in Kenshi's settings, then the mod loads automatically.");
@@ -178,7 +220,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     label(L"Server Address:", 15, 100);
     label(L"Port:", 340, 40);
     y += 22;
-    g_editServerAddr = CreateWindowW(L"EDIT", L"162.248.94.149",
+    g_editServerAddr = CreateWindowW(L"EDIT", L"127.0.0.1",
         WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
         15, y, 315, 24, g_hwnd, (HMENU)IDC_SERVERADDR, hInstance, nullptr);
     g_editServerPort = CreateWindowW(L"EDIT", L"27800",

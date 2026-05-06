@@ -8,13 +8,13 @@ namespace kmp {
 
 struct ClientConfig {
     std::string playerName     = "Player";
-    std::string lastServer     = "162.248.94.149";
+    std::string lastServer     = "127.0.0.1";
     uint16_t    lastPort       = KMP_DEFAULT_PORT;
-    bool        autoConnect    = true;
+    bool        autoConnect    = false;
     float       overlayScale   = 1.0f;
-    std::string masterServer   = "162.248.94.149";   // Master server address
+    std::string masterServer   = "127.0.0.1";        // Master server address
     uint16_t    masterPort     = 27801;               // Master server port
-    std::vector<std::string> favoriteServers = {"162.248.94.149:27800"};
+    std::vector<std::string> favoriteServers = {"127.0.0.1:27800"};
     bool        useSyncOrchestrator = false; // New 7-stage sync pipeline (set true to test)
 
     // ── Experimental/workaround flags ──
@@ -32,16 +32,43 @@ struct ClientConfig {
                                                          // game+0x644365 null
                                                          // deref; pattern is
                                                          // scanned at install
-    bool        enableCharacterCreateHook      = false; // re-enables the
+    bool        enableCharacterCreateHook      = false; // RE-DISABLED
+                                                         // 2026-05-06 (later
+                                                         // run). Enabling it
+                                                         // caused
+                                                         // back-to-back
+                                                         // silent
+                                                         // terminations of
+                                                         // Kenshi (PIDs
+                                                         // 22468, 29744)
+                                                         // right after the
+                                                         // first
+                                                         // post-connect
                                                          // CharacterCreate
-                                                         // detour after
-                                                         // OnGameLoaded; the
-                                                         // mod's spawn pipeline
-                                                         // depends on it but
-                                                         // the intercept itself
-                                                         // terminates Kenshi
-                                                         // on the first runtime
-                                                         // NPC. See
+                                                         // — `__fastfail`-
+                                                         // class
+                                                         // termination
+                                                         // that bypasses
+                                                         // both VEH and
+                                                         // `SetUnhandledExceptionFilter`,
+                                                         // so we can't
+                                                         // intercept it
+                                                         // from user mode.
+                                                         // Until factory
+                                                         // capture has a
+                                                         // hook-free
+                                                         // alternative
+                                                         // (vtable-scan
+                                                         // path noted in
+                                                         // re_kenshi 2/
+                                                         // manual_findings),
+                                                         // leave this OFF
+                                                         // and accept that
+                                                         // the spawn
+                                                         // pipeline stays
+                                                         // gated on
+                                                         // `factory=false`.
+                                                         // See
                                                          // KNOWN_ISSUES.md.
     bool        safeModeFirstConnectedCreate   = true;  // companion to the
                                                          // above: when the
@@ -49,6 +76,22 @@ struct ClientConfig {
                                                          // capture work for
                                                          // the very first
                                                          // connected create.
+    bool        factionSignExtRescue           = true;  // VEH rescue for the
+                                                         // recurring AV at a
+                                                         // sign-extended
+                                                         // Faction* + 0x250
+                                                         // (isPlayer field).
+                                                         // Detects AV target
+                                                         // of form
+                                                         // 0xFFFFFFFF<low>,
+                                                         // finds the matching
+                                                         // GPR with high-bits
+                                                         // = 0xFFFFFFFF, masks
+                                                         // them off, resumes.
+                                                         // See manual_findings/
+                                                         // notes/bind_crash_
+                                                         // faction_0x250_
+                                                         // signext.md.
 
     bool Load(const std::string& path);
     bool Save(const std::string& path) const;

@@ -56,6 +56,8 @@ bool ClientConfig::Load(const std::string& path) {
             enableCharacterCreateHook = j["enableCharacterCreateHook"].get<bool>();
         if (j.contains("safeModeFirstConnectedCreate"))
             safeModeFirstConnectedCreate = j["safeModeFirstConnectedCreate"].get<bool>();
+        if (j.contains("factionSignExtRescue"))
+            factionSignExtRescue = j["factionSignExtRescue"].get<bool>();
         return true;
     } catch (...) {
         return false;
@@ -77,6 +79,7 @@ bool ClientConfig::Save(const std::string& path) const {
     j["kenshiCrashRecovery"]          = kenshiCrashRecovery;
     j["enableCharacterCreateHook"]    = enableCharacterCreateHook;
     j["safeModeFirstConnectedCreate"] = safeModeFirstConnectedCreate;
+    j["factionSignExtRescue"]         = factionSignExtRescue;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;

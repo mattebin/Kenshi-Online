@@ -90,6 +90,148 @@ void SpawnManager::SetSavedRequestStruct(const uint8_t* data, size_t size) {
     spdlog::info("SpawnManager: Saved request struct ({} bytes)", size);
 }
 
+// ── Hook-free factory discovery via GameWorld + 0x4A0 ─────────────
+// Why this exists
+// ---------------
+// The CharacterCreate hook used to capture the factory for us, but
+// `KenshiMP.Cartographer` (the SpeshimenQursiveBrainer) showed that
+// 8/8 entry points in `RootObjectFactory` have unsafe prologues
+// (`mov rax,rsp` or `mov [rsp+...],reg`).  Patching any one of them
+// triggers the recurring `__fastfail`/`TerminateProcess` we saw in
+// PIDs 22468 and 29744 right after the first post-connect
+// CharacterCreate fired through a passthrough hook.  The brainer's
+// recommendation: don't hook anywhere in this class — read the
+// factory pointer directly from the GameWorld struct.
+//
+// Layout per KenshiLib `GameWorld.h`:
+//   class GameWorld {
+//     ...
+//     RootObjectFactory* theFactory;  // 0x4A0 Member
+//     ...
+//   };
+//
+// Validation
+// ----------
+// We don't blindly trust whatever happens to live at +0x4A0 on the
+// resolved GameWorld* — we validate the candidate pointer's vtable
+// against the recorded `RootObjectFactory` vtable RVA
+// (`mod+0x16993B0`, recorded in re_kenshi 2/manual_findings/
+// notes/RootObjectFactory.vtable.md).  If the first qword of the
+// candidate doesn't match that RVA, we leave m_factory unset.
+//
+// Cost
+// ----
+// Three pointer reads + one comparison per call.  Safe to invoke
+// every game tick from `Core::HandleSpawnQueue` while m_factory is
+// still null.
+bool SpawnManager::TryDiscoverFactoryFromGameWorld() {
+    if (m_factory != nullptr) return false;       // already captured
+
+    auto& core = Core::Get();
+    uintptr_t gwAddr = core.GetGameFunctions().GameWorldSingleton;
+    if (gwAddr == 0) return false;
+
+    HMODULE host = GetModuleHandleA(nullptr);
+    if (host == nullptr) return false;
+    uintptr_t moduleBase = reinterpret_cast<uintptr_t>(host);
+
+    // Image size for the module-range exclusion test.
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(host);
+    auto* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        reinterpret_cast<const uint8_t*>(host) + dos->e_lfanew);
+    size_t imageSize = nt->OptionalHeader.SizeOfImage;
+
+    constexpr uintptr_t kHeapMin = 0x10000ULL;
+    constexpr uintptr_t kHeapMax = 0x00007FFFFFFFFFFFULL;
+    auto looksHeap = [&](uintptr_t p) {
+        return p >= kHeapMin && p < kHeapMax &&
+               !(p >= moduleBase && p < moduleBase + imageSize);
+    };
+
+    // Step 1: deref the singleton to get the GameWorld* itself.
+    uintptr_t gwPtr = 0;
+    if (!Memory::Read(gwAddr, gwPtr) || !looksHeap(gwPtr)) {
+        // Throttled diagnostic — once per 5 s so we know the poll is
+        // running but the singleton hasn't materialised yet.  Without
+        // this we get total silence and can't tell if the early
+        // return paths are firing.
+        static std::atomic<int64_t> s_lastSingletonLog{0};
+        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        int64_t prev = s_lastSingletonLog.load();
+        if (now - prev > 5LL * 1000000000LL) {
+            s_lastSingletonLog.store(now);
+            spdlog::debug("SpawnManager: TryDiscover — singleton "
+                          "addr=0x{:X} ptr=0x{:X} (waiting for valid "
+                          "GameWorld pointer)", gwAddr, gwPtr);
+        }
+        return false;
+    }
+
+    // Step 2: vtable-match scan over a window of the GameWorld struct.
+    //
+    // Why a scan instead of a fixed offset
+    // ------------------------------------
+    // re_kenshi 2/manual_findings/README.md explicitly notes:
+    //   "GameWorld theFactory (RootObjectFactory*) — +0x4A0 (KenshiLib
+    //    header) — offset varies per run (0x628, 0xE8, …); find by
+    //    vtable match instead."
+    //
+    // KenshiLib's published 0x4A0 worked on the reference build but
+    // ours doesn't pin to it — possibly because GameWorld inherits
+    // from `Ogre::GeneralAllocatedObject` and the inherited prefix
+    // size differs between builds, shifting every member offset.
+    //
+    // Solution: scan a window of GameWorld looking for a pointer
+    // whose first qword equals the recorded RootObjectFactory vtable
+    // (`mod+0x16993B0`, see notes/RootObjectFactory.vtable.md).  The
+    // first match wins.  Window size 0x1000 covers all known
+    // historical offsets with margin; alignment 8 because pointers
+    // on x64 are 8-byte aligned.
+    constexpr uintptr_t kRootObjectFactoryVtableRva = 0x16993B0;
+    uintptr_t expectedVtable = moduleBase + kRootObjectFactoryVtableRva;
+
+    // Probe up to 0x1000 bytes (512 qwords) of GameWorld.
+    constexpr size_t kScanBytes = 0x1000;
+    constexpr size_t kStride    = sizeof(uintptr_t);
+    uintptr_t firstAlternate = 0; // first non-vtable looksHeap pointer
+                                  // (used only for diagnostics)
+    for (size_t off = 0; off + kStride <= kScanBytes; off += kStride) {
+        uintptr_t candidate = 0;
+        if (!Memory::Read(gwPtr + off, candidate)) continue;
+        if (!looksHeap(candidate)) continue;
+        uintptr_t candidateVtable = 0;
+        if (!Memory::Read(candidate, candidateVtable)) continue;
+        if (firstAlternate == 0) firstAlternate = candidate;
+        if (candidateVtable == expectedVtable) {
+            m_factory = reinterpret_cast<void*>(candidate);
+            spdlog::info(
+                "SpawnManager: TryDiscover — captured RootObjectFactory "
+                "at 0x{:X} via vtable-match scan, GameWorld+0x{:X} "
+                "(KenshiLib header had said +0x4A0)",
+                candidate, off);
+            return true;
+        }
+    }
+
+    // No match in the scanned window.  Throttled log so a regression
+    // in the vtable RVA or the GameWorld pointer is visible without
+    // flooding.  Includes the first heap-shaped pointer we found so
+    // we have a hint when debugging.
+    static std::atomic<int64_t> s_lastNoMatchLog{0};
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    int64_t prev = s_lastNoMatchLog.load();
+    if (now - prev > 5LL * 1000000000LL) {
+        s_lastNoMatchLog.store(now);
+        spdlog::warn(
+            "SpawnManager: TryDiscover — no vtable match in 0x{:X}-byte "
+            "scan of GameWorld at 0x{:X}.  Expected vtable=mod+0x{:X} "
+            "(=0x{:X}).  First heap-shaped ptr in window=0x{:X}.",
+            kScanBytes, gwPtr, kRootObjectFactoryVtableRva,
+            expectedVtable, firstAlternate);
+    }
+    return false;
+}
+
 void SpawnManager::SetPreCallData(const uint8_t* data, size_t size, uintptr_t origAddr) {
     std::lock_guard lock(m_templateMutex);
     size_t copySize = (size < sizeof(m_preCallData)) ? size : sizeof(m_preCallData);
