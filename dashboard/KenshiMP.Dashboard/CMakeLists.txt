@@ -12,6 +12,7 @@ add_executable(KenshiMP.Dashboard WIN32
     process_status.cpp
     log_aggregator.cpp
     spawn_queue.cpp
+    bg_fader.cpp
 )
 
 target_include_directories(KenshiMP.Dashboard PRIVATE
@@ -26,6 +27,7 @@ target_link_libraries(KenshiMP.Dashboard PRIVATE
     psapi
     comctl32
     shell32
+    gdiplus
 )
 
 target_compile_definitions(KenshiMP.Dashboard PRIVATE UNICODE _UNICODE)
