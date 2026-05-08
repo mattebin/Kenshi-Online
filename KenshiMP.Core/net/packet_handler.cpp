@@ -549,6 +549,7 @@ private:
         // If this is our own entity being confirmed by the server, remap the
         // local entity ID to the server-assigned ID instead of spawning a duplicate.
         if (ownerId == core.GetLocalPlayerId()) {
+            shared_save_sync::OnOwnEntitySpawnConfirmed(entityId);
             EntityID localId = registry.FindLocalEntityNear(spawnPos, ownerId);
             if (localId != INVALID_ENTITY && localId != entityId) {
                 if (registry.RemapEntityId(localId, entityId)) {
@@ -1225,6 +1226,7 @@ private:
             // Skip our own entities — they already exist in-game.
             // Remap local ID to server ID if needed.
             if (ownerId == core.GetLocalPlayerId()) {
+                shared_save_sync::OnOwnEntitySpawnConfirmed(entityId);
                 EntityID localId = registry.FindLocalEntityNear(pos, ownerId);
                 if (localId != INVALID_ENTITY && localId != entityId) {
                     registry.RemapEntityId(localId, entityId);

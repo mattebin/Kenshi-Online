@@ -89,6 +89,9 @@ uintptr_t GetFallbackFaction();
 // Validates the pointer before returning; returns 0 if stale.
 uintptr_t GetEarlyPlayerFaction();
 
+// Re-check cached faction pointers and rescan live characters if they went stale.
+bool RevalidateFaction();
+
 // Externally publish a faction observation. Safe to call from any thread.
 // Used by ai_hooks::Hook_AICreate after the CharBody::create 6-arg fix —
 // the 5th arg is a Character*, and Character.owner @ +0x10 is the Faction.

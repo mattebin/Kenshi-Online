@@ -5,6 +5,7 @@
 #include "../hooks/ai_hooks.h"
 #include "../sys/watcher.h"
 #include "kmp/protocol.h"
+#include "kmp/messages.h"
 #include "kmp/memory.h"
 #include <spdlog/spdlog.h>
 #include <atomic>
@@ -46,6 +47,9 @@ static bool s_initialized = false;
 static bool s_ownFound = false;
 static bool s_otherFound = false;
 static bool s_ownOnlyNoticeLogged = false;
+static bool s_ownSpawnAnnounced = false;
+static EntityID s_ownLocalEntityId = INVALID_ENTITY;
+static std::atomic<EntityID> s_ownServerEntityId{INVALID_ENTITY};
 
 // Position sending throttle
 static auto s_lastPosSend = std::chrono::steady_clock::time_point{};
@@ -118,6 +122,9 @@ void Init() {
     s_ownFound = false;
     s_otherFound = false;
     s_ownOnlyNoticeLogged = false;
+    s_ownSpawnAnnounced = false;
+    s_ownLocalEntityId = INVALID_ENTITY;
+    s_ownServerEntityId.store(INVALID_ENTITY, std::memory_order_release);
     s_ownAnimClass = nullptr;
     s_otherAnimClass = nullptr;
     s_ownCharPtr = nullptr;
@@ -141,6 +148,9 @@ void Reset() {
     s_ownFound = false;
     s_otherFound = false;
     s_ownOnlyNoticeLogged = false;
+    s_ownSpawnAnnounced = false;
+    s_ownLocalEntityId = INVALID_ENTITY;
+    s_ownServerEntityId.store(INVALID_ENTITY, std::memory_order_release);
     s_ownAnimClass = nullptr;
     s_otherAnimClass = nullptr;
     s_ownCharPtr = nullptr;
@@ -211,6 +221,47 @@ static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
 // fallback for builds where the cached-position write to char+0x48 is
 // insufficient (e.g., the engine reads from the anim chain and ignores
 // the cached field).
+// Publish the real local shared-save character as a player-owned network entity.
+static void AnnounceOwnSpawnIfNeeded(Core& core, const Vec3& pos) {
+    if (s_ownSpawnAnnounced || !s_ownCharPtr || s_ownCharName.empty()) return;
+
+    PlayerID localId = core.GetLocalPlayerId();
+    if (localId == INVALID_PLAYER) return;
+
+    auto& registry = core.GetEntityRegistry();
+    EntityID localEntityId = registry.Register(s_ownCharPtr, EntityType::PlayerCharacter, localId);
+    if (localEntityId == INVALID_ENTITY) {
+        spdlog::warn("shared_save_sync: Could not register local '{}' for spawn announce",
+                     s_ownCharName);
+        return;
+    }
+
+    Quat rot;
+    registry.UpdatePosition(localEntityId, pos);
+    registry.UpdateRotation(localEntityId, rot);
+
+    PacketWriter writer;
+    writer.WriteHeader(MessageType::C2S_EntitySpawnReq);
+    writer.WriteU32(localEntityId);
+    writer.WriteU8(static_cast<uint8_t>(EntityType::PlayerCharacter));
+    writer.WriteU32(localId);
+    writer.WriteU32(0);
+    writer.WriteF32(pos.x);
+    writer.WriteF32(pos.y);
+    writer.WriteF32(pos.z);
+    writer.WriteU32(rot.Compress());
+    writer.WriteU32(0);
+    writer.WriteString(s_ownCharName);
+
+    core.GetClient().SendReliable(writer.Data(), writer.Size());
+    s_ownLocalEntityId = localEntityId;
+    s_ownSpawnAnnounced = true;
+
+    spdlog::info("shared_save_sync: Announced local player spawn localEntity={} owner={} template='{}' pos=({:.1f},{:.1f},{:.1f})",
+                 localEntityId, localId, s_ownCharName, pos.x, pos.y, pos.z);
+}
+
+// Legacy/GOG fallback write to the AnimClass movement position chain.
 static bool SEH_WriteAnimClassPosition(void* animClass, const Vec3& pos) {
     __try {
         uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClass);
@@ -501,6 +552,7 @@ void Update(float deltaTime) {
             gotPos = SEH_ReadAnimClassPosition(s_ownAnimClass, myPos);
         }
         if (gotPos) {
+            AnnounceOwnSpawnIfNeeded(core, myPos);
             // Use the existing position update format — the server reads:
             // U32(sourcePlayer) [handled by server from peer], U8(count), then
             // CharacterPosition structs. We need to match this EXACTLY.
@@ -509,7 +561,8 @@ void Update(float deltaTime) {
             // The server reads sourcePlayer as U32 first, but the canonical client
             // code (core.cpp PollLocalPositions) writes U8(count) first, then
             // CharacterPosition structs. Let me match the canonical format.
-            writer.WriteU8(1); // count = 1 (FIX: was U32, must be U8)
+            EntityID ownServerEntityId = s_ownServerEntityId.load(std::memory_order_acquire);
+            writer.WriteU8(ownServerEntityId != INVALID_ENTITY ? 2 : 1);
 
             // CharacterPosition struct — must match the server's ReadRaw size
             CharacterPosition cp{};
@@ -522,6 +575,10 @@ void Update(float deltaTime) {
             cp.moveSpeed = 0;
             cp.flags = 0;
             writer.WriteRaw(&cp, sizeof(cp));
+            if (ownServerEntityId != INVALID_ENTITY) {
+                cp.entityId = ownServerEntityId;
+                writer.WriteRaw(&cp, sizeof(cp));
+            }
 
             core.GetClient().SendUnreliable(writer.Data(), writer.Size());
 
@@ -597,6 +654,16 @@ void OnRemotePositionReceived(const Vec3& pos) {
 
 void OnRemoteGameSpeedReceived(float speed) {
     s_remoteGameSpeed.store(speed);
+}
+
+void OnOwnEntitySpawnConfirmed(EntityID serverEntityId) {
+    if (serverEntityId == INVALID_ENTITY) return;
+
+    EntityID previous = s_ownServerEntityId.exchange(serverEntityId, std::memory_order_acq_rel);
+    if (previous != serverEntityId) {
+        spdlog::info("shared_save_sync: Server confirmed local player entity serverEntity={} (localEntity={})",
+                     serverEntityId, s_ownLocalEntityId);
+    }
 }
 
 bool IsOwnCharacterFound() { return s_ownFound; }

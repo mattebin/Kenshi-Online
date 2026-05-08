@@ -24,6 +24,9 @@ void OnRemotePositionReceived(const Vec3& pos);
 // Called when we receive a game speed update from the server.
 void OnRemoteGameSpeedReceived(float speed);
 
+// Called when the server confirms the shared-save local character as a network entity.
+void OnOwnEntitySpawnConfirmed(EntityID serverEntityId);
+
 // Status queries for HUD/diagnostics
 bool IsOwnCharacterFound();
 bool IsOtherCharacterFound();
