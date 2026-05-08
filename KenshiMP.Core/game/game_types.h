@@ -60,16 +60,17 @@ struct CharacterOffsets {
     int healthBase    = 0x40;    // Final offset to health float
     int healthStride  = 8;       // Stride between body parts (health+stun = 2 floats)
 
-    // Writable position chain (from KServerMod RE):
+    // Writable position chain (from KServerMod RE / runtime checks):
     // character -> AnimationClassHuman ptr (+animClassOffset)
     //   -> CharMovement ptr (+charMovementOffset from AnimClass)
-    //     -> writable Vec3 (+writablePosOffset from CharMovement)
-    //       -> x,y,z floats (+writablePosVecOffset within Vec3 struct)
+    //     -> HavokCharacter* (+writablePosOffset from CharMovement)
+    //       -> x,y,z floats (+writablePosVecOffset inside HavokCharacter)
+    // Also corroborated: Character+0x640 -> CharMovement* on Kenshi 1.0.68.
     // Writing here actually moves the character in the physics engine.
     int animClassOffset      = -1;    // Offset to AnimationClassHuman* on character
     int charMovementOffset   = 0xC0;  // AnimClass -> CharMovement* (KServerMod verified)
-    int writablePosOffset    = 0x320; // CharMovement -> writable position struct
-    int writablePosVecOffset = 0x20;  // position struct -> x float
+    int writablePosOffset    = 0x320; // CharMovement -> HavokCharacter*
+    int writablePosVecOffset = 0x20;  // HavokCharacter -> position.x
 
     // Squad pointer (heuristic: near faction in struct)
     int squad         = -1;      // Offset to KSquad* (discovered at runtime)

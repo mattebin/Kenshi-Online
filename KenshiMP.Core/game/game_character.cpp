@@ -51,6 +51,56 @@ void InitOffsetsFromScanner() {
 static bool s_animClassProbed = false;
 static int  s_discoveredAnimClassOffset = -1;
 
+static bool IsValidGamePtr(uintptr_t ptr) {
+    return ptr >= 0x10000 && ptr < 0x00007FFFFFFFFFFF && (ptr & 0x7) == 0;
+}
+
+static bool TryResolveHavokPosition(uintptr_t charPtr,
+                                    uintptr_t& outPosAddr,
+                                    uintptr_t* outCharMovement = nullptr,
+                                    uintptr_t* outHavok = nullptr) {
+    auto& offsets = GetOffsets().character;
+    outPosAddr = 0;
+    if (outCharMovement) *outCharMovement = 0;
+    if (outHavok) *outHavok = 0;
+
+    if (!IsValidGamePtr(charPtr)) return false;
+
+    auto tryFromCharMovement = [&](uintptr_t charMovement) -> bool {
+        if (!IsValidGamePtr(charMovement)) return false;
+
+        uintptr_t havok = 0;
+        if (!Memory::Read(charMovement + offsets.writablePosOffset, havok)) return false;
+        if (!IsValidGamePtr(havok)) return false;
+
+        outPosAddr = havok + offsets.writablePosVecOffset;
+        if (outCharMovement) *outCharMovement = charMovement;
+        if (outHavok) *outHavok = havok;
+        return true;
+    };
+
+    // Kenshi 1.0.68: Character+0x640 -> CharMovement*.
+    uintptr_t directCharMovement = 0;
+    if (Memory::Read(charPtr + 0x640, directCharMovement) &&
+        tryFromCharMovement(directCharMovement)) {
+        return true;
+    }
+
+    // Fallback: Character+animClassOffset -> AnimationClass -> +0xC0 -> CharMovement.
+    if (offsets.animClassOffset >= 0) {
+        uintptr_t animClass = 0;
+        uintptr_t charMovement = 0;
+        if (Memory::Read(charPtr + offsets.animClassOffset, animClass) &&
+            IsValidGamePtr(animClass) &&
+            Memory::Read(animClass + offsets.charMovementOffset, charMovement) &&
+            tryFromCharMovement(charMovement)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void ProbeAnimClassOffset(uintptr_t charPtr) {
     if (s_animClassProbed) return;
 
@@ -81,8 +131,15 @@ static void ProbeAnimClassOffset(uintptr_t charPtr) {
             charMovement == 0) continue;
         if (charMovement < 0x10000 || charMovement > 0x00007FFFFFFFFFFF) continue;
 
-        // Read position at the known writable offset
-        uintptr_t posAddr = charMovement + offsets.writablePosOffset + offsets.writablePosVecOffset;
+        // Read position at the known writable offset:
+        // CharMovement+0x320 -> HavokCharacter*, HavokCharacter+0x20 -> Vec3.
+        uintptr_t havok = 0;
+        if (!Memory::Read(charMovement + offsets.writablePosOffset, havok) ||
+            !IsValidGamePtr(havok)) {
+            continue;
+        }
+
+        uintptr_t posAddr = havok + offsets.writablePosVecOffset;
         float px = 0.f, py = 0.f, pz = 0.f;
         if (!Memory::Read(posAddr, px)) continue;
         if (!Memory::Read(posAddr + 4, py)) continue;
@@ -185,16 +242,9 @@ Vec3 CharacterAccessor::GetPosition() const {
     // yet; the writable chain has the real value sooner. Without this, the
     // first network position broadcast is (0,0,0) and the server interprets
     // it as a teleport.
-    if (offsets.animClassOffset >= 0) {
-        uintptr_t animClass = 0;
-        if (Memory::Read(m_ptr + offsets.animClassOffset, animClass) && animClass) {
-            uintptr_t charMov = 0;
-            if (Memory::Read(animClass + offsets.charMovementOffset, charMov) && charMov) {
-                Memory::ReadVec3(charMov + offsets.writablePosOffset
-                                          + offsets.writablePosVecOffset,
-                                 pos.x, pos.y, pos.z);
-            }
-        }
+    uintptr_t posAddr = 0;
+    if (TryResolveHavokPosition(m_ptr, posAddr)) {
+        Memory::ReadVec3(posAddr, pos.x, pos.y, pos.z);
     }
     return pos;
 }
@@ -410,8 +460,8 @@ uintptr_t CharacterAccessor::GetInventoryPtr() const {
     return ptr;
 }
 
-// Function pointer for HavokCharacter::setPosition (resolved by patterns.cpp)
-// Prologue analysis confirms: params~2 (RCX=this, RDX=Vec3*), stack=288
+// Function pointer for HavokCharacter::setPosition (resolved by patterns.cpp).
+// Kept for diagnostics only: WritePosition must not call this with Character*.
 using SetPositionFn = void(__fastcall*)(void* character, const Vec3* pos);
 static SetPositionFn s_setPositionFn = nullptr;
 
@@ -421,78 +471,67 @@ void SetGameSetPositionFn(void* fn) {
 
 // Track WritePosition method transitions: log when method changes, not just first call.
 // This ensures we see if characters silently fall back to worse methods.
-static int s_lastWritePosMethod = 0;  // 0=none, 1=setPositionFn, 2=physicsChain, 3=cached
+static int s_lastWritePosMethod = 0;  // 0=none, 1=Havok memory chain, 2=cached
 static int s_writePosMethodCount = 0; // Total calls since last method change
 
 bool CharacterAccessor::WritePosition(const Vec3& pos) {
     auto& offsets = GetOffsets().character;
 
-    // Method 1 (best): Call the game's own HavokCharacter::setPosition function.
-    // This properly moves the character through the physics engine.
-    // Signature: void __fastcall setPosition(this, const Vec3* pos)
-    if (s_setPositionFn) {
+    // Kenshi 1.0.68 exposes the writable physics position through:
+    // Character+0x640 -> CharMovement* -> +0x320 HavokCharacter* -> +0x20 Vec3.
+    // Do not call HavokCharacter::setPosition with a Character*; that corrupts state.
+    uintptr_t posAddr = 0;
+    uintptr_t charMovement = 0;
+    uintptr_t havok = 0;
+    if (TryResolveHavokPosition(m_ptr, posAddr, &charMovement, &havok)) {
+        bool ok = true;
+        ok = Memory::Write(posAddr, pos.x) && ok;
+        ok = Memory::Write(posAddr + 4, pos.y) && ok;
+        ok = Memory::Write(posAddr + 8, pos.z) && ok;
+
+        if (offsets.position >= 0) {
+            Memory::Write(m_ptr + offsets.position, pos.x);
+            Memory::Write(m_ptr + offsets.position + 4, pos.y);
+            Memory::Write(m_ptr + offsets.position + 8, pos.z);
+        }
+
         if (s_lastWritePosMethod != 1) {
-            spdlog::info("WritePosition: Using Method 1 (setPosition fn) at 0x{:X} for char 0x{:X} (prev method={})",
-                         reinterpret_cast<uintptr_t>(s_setPositionFn), m_ptr, s_lastWritePosMethod);
+            spdlog::info("WritePosition: Using Method 1 (Havok memory chain) char=0x{:X} charMovement=0x{:X} havok=0x{:X} pos=0x{:X} (unsafe setPosition fn 0x{:X} bypassed, prev method={})",
+                         m_ptr, charMovement, havok, posAddr,
+                         reinterpret_cast<uintptr_t>(s_setPositionFn),
+                         s_lastWritePosMethod);
             s_lastWritePosMethod = 1;
             s_writePosMethodCount = 0;
         }
         s_writePosMethodCount++;
-        s_setPositionFn(reinterpret_cast<void*>(m_ptr), &pos);
-        return true;
+        return ok;
     }
 
-    // Method 2: Try the writable physics position chain.
-    // Eagerly probe on first access for ANY character, not just this one.
     if (offsets.animClassOffset < 0 && !s_animClassProbed) {
-        spdlog::info("WritePosition: Method 1 unavailable (no setPosition fn), probing physics chain...");
+        spdlog::debug("WritePosition: direct Havok chain unavailable, probing animClass chain...");
         ProbeAnimClassOffset(m_ptr);
     }
-    if (offsets.animClassOffset >= 0) {
-        uintptr_t animClass = 0;
-        if (Memory::Read(m_ptr + offsets.animClassOffset, animClass) && animClass != 0 &&
-            animClass > 0x10000 && animClass < 0x00007FFFFFFFFFFF && (animClass & 0x7) == 0) {
-            uintptr_t charMovement = 0;
-            if (Memory::Read(animClass + offsets.charMovementOffset, charMovement) && charMovement != 0 &&
-                charMovement > 0x10000 && charMovement < 0x00007FFFFFFFFFFF && (charMovement & 0x7) == 0) {
-                uintptr_t posAddr = charMovement + offsets.writablePosOffset + offsets.writablePosVecOffset;
-                Memory::Write(posAddr, pos.x);
-                Memory::Write(posAddr + 4, pos.y);
-                Memory::Write(posAddr + 8, pos.z);
-                if (s_lastWritePosMethod != 2) {
-                    spdlog::info("WritePosition: Using Method 2 (physics chain) animClass=0x{:X} for char 0x{:X} (prev method={})",
-                                 offsets.animClassOffset, m_ptr, s_lastWritePosMethod);
-                    s_lastWritePosMethod = 2;
-                    s_writePosMethodCount = 0;
-                }
-                s_writePosMethodCount++;
-                return true;
-            }
-        }
-    }
 
-    // Method 3 (fallback): Write to the cached read-only position.
-    // This may be overwritten by the physics engine next frame, but for remote
-    // characters that are continuously updated it's acceptable.
     if (offsets.position >= 0) {
-        Memory::Write(m_ptr + offsets.position, pos.x);
-        Memory::Write(m_ptr + offsets.position + 4, pos.y);
-        Memory::Write(m_ptr + offsets.position + 8, pos.z);
-        if (s_lastWritePosMethod != 3) {
-            spdlog::warn("WritePosition: Using Method 3 (cached position fallback) for char 0x{:X} "
-                         "— position may drift due to physics engine overwrite (prev method={})",
+        bool ok = true;
+        ok = Memory::Write(m_ptr + offsets.position, pos.x) && ok;
+        ok = Memory::Write(m_ptr + offsets.position + 4, pos.y) && ok;
+        ok = Memory::Write(m_ptr + offsets.position + 8, pos.z) && ok;
+        if (s_lastWritePosMethod != 2) {
+            spdlog::warn("WritePosition: Using Method 2 (cached position fallback) for char 0x{:X} - position may drift due to physics engine overwrite (prev method={})",
                          m_ptr, s_lastWritePosMethod);
-            s_lastWritePosMethod = 3;
+            s_lastWritePosMethod = 2;
             s_writePosMethodCount = 0;
         }
         s_writePosMethodCount++;
-    } else if (s_lastWritePosMethod != -1) {
-        spdlog::error("WritePosition: ALL methods failed for char 0x{:X} — "
-                      "no setPosition fn, no physics chain, no cached position offset", m_ptr);
-        s_lastWritePosMethod = -1;
+        return ok;
     }
 
-    return offsets.position >= 0;
+    if (s_lastWritePosMethod != -1) {
+        spdlog::error("WritePosition: ALL methods failed for char 0x{:X} - no Havok chain and no cached position offset", m_ptr);
+        s_lastWritePosMethod = -1;
+    }
+    return false;
 }
 
 uintptr_t CharacterAccessor::GetFactionPtr() const {

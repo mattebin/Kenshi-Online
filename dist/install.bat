@@ -81,7 +81,7 @@ if not defined STAMP set "STAMP=manual"
 set "BACKUP_DIR=%KENSHI_DIR%\KenshiMP_backup_%STAMP%"
 mkdir "%BACKUP_DIR%" 2>nul
 
-echo  [1/8] Backing up files that may be changed...
+echo  [1/9] Backing up files that may be changed...
 if exist "%KENSHI_DIR%\Plugins_x64.cfg" (
     copy /Y "%KENSHI_DIR%\Plugins_x64.cfg" "%BACKUP_DIR%\Plugins_x64.cfg.bak" >nul
     echo         Plugins_x64.cfg
@@ -98,7 +98,7 @@ for %%F in ("%KENSHI_DIR%\KenshiMP.*.dll" "%KENSHI_DIR%\KenshiMP.*.exe" "%KENSHI
     if exist "%%~F" copy /Y "%%~F" "%BACKUP_DIR%\%%~nxF.bak" >nul
 )
 
-echo  [2/8] Installing core plugin and tools...
+echo  [2/9] Installing core plugin and tools...
 if not exist "%~dp0KenshiMP.Core.dll" (
     echo  [ERROR] KenshiMP.Core.dll not found in installer folder.
     pause
@@ -137,7 +137,7 @@ for %%F in (
     )
 )
 
-echo  [3/8] Enabling KenshiMP.Core in Plugins_x64.cfg...
+echo  [3/9] Enabling KenshiMP.Core in Plugins_x64.cfg...
 set "CFG=%KENSHI_DIR%\Plugins_x64.cfg"
 if not exist "%CFG%" type nul > "%CFG%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$cfg=$env:CFG; $lines=@(); if(Test-Path -LiteralPath $cfg){ $lines=Get-Content -LiteralPath $cfg }; $lines=@($lines | Where-Object { $_ -notmatch '^Plugin=KenshiMP\.(Core|SafeAddon)\s*$' }); $lines += 'Plugin=KenshiMP.Core'; Set-Content -LiteralPath $cfg -Value $lines -Encoding ASCII"
@@ -148,7 +148,7 @@ if errorlevel 1 (
 )
 echo         Plugin=KenshiMP.Core
 
-echo  [4/8] Installing UI layouts...
+echo  [4/9] Installing UI layouts...
 if not exist "%KENSHI_DIR%\data\gui\layout" mkdir "%KENSHI_DIR%\data\gui\layout"
 for %%F in (
     "Kenshi_MainMenu.layout"
@@ -161,7 +161,7 @@ for %%F in (
     )
 )
 
-echo  [5/8] Installing and enabling kenshi-online.mod...
+echo  [5/9] Installing and enabling kenshi-online.mod...
 if exist "%~dp0kenshi-online.mod" (
     if not exist "%KENSHI_DIR%\data" mkdir "%KENSHI_DIR%\data"
     if not exist "%KENSHI_DIR%\mods\kenshi-online" mkdir "%KENSHI_DIR%\mods\kenshi-online"
@@ -179,7 +179,27 @@ if exist "%~dp0kenshi-online.mod" (
     echo         [WARN] kenshi-online.mod not found in installer folder.
 )
 
-echo  [6/8] Installing default server config...
+echo  [6/9] Installing bundled shared test save...
+set "SAVE_DIR=%LOCALAPPDATA%\kenshi\save"
+set "BUNDLED_SAVE=%~dp0saves\123"
+if exist "%BUNDLED_SAVE%\quick.save" (
+    if not exist "%SAVE_DIR%" mkdir "%SAVE_DIR%"
+    if exist "%SAVE_DIR%\123" (
+        move /Y "%SAVE_DIR%\123" "%SAVE_DIR%\123.before-kenshimp-%STAMP%" >nul
+        echo         backed up existing save 123
+    )
+    xcopy /E /I /Y "%BUNDLED_SAVE%" "%SAVE_DIR%\123" >nul
+    if errorlevel 1 (
+        echo  [ERROR] Failed to install bundled save 123.
+        pause
+        exit /b 1
+    )
+    echo         %SAVE_DIR%\123
+) else (
+    echo         bundled save 123 not present, skipping
+)
+
+echo  [7/9] Installing default server config...
 if exist "%~dp0server.json" (
     if not exist "%KENSHI_DIR%\server.json" (
         copy /Y "%~dp0server.json" "%KENSHI_DIR%\server.json" >nul
@@ -189,7 +209,7 @@ if exist "%~dp0server.json" (
     )
 )
 
-echo  [7/8] Writing default client config...
+echo  [8/9] Writing default client config...
 set "CLIENT_CFG_DIR=%APPDATA%\KenshiMP"
 if not exist "%CLIENT_CFG_DIR%" mkdir "%CLIENT_CFG_DIR%"
 if not exist "%CLIENT_CFG_DIR%\client.json" (
@@ -211,7 +231,7 @@ if not exist "%CLIENT_CFG_DIR%\client.json" (
     echo         client.json already exists, leaving as-is
 )
 
-echo  [8/8] Final checks...
+echo  [9/9] Final checks...
 if exist "%KENSHI_DIR%\KenshiMP.Core.dll" ( echo         Core DLL installed )
 if exist "%KENSHI_DIR%\KenshiMP.Server.exe" ( echo         Server installed )
 if exist "%KENSHI_DIR%\KenshiMP.TestClient.exe" ( echo         Test client installed )
@@ -226,7 +246,7 @@ echo.
 echo   Quick local test:
 echo    1. Run KenshiMP.Server.exe
 echo    2. Launch Kenshi from Steam
-echo    3. Load your multiplayer save
+echo    3. Load Game: 123
 echo    4. Join 127.0.0.1:27800 from the multiplayer menu
 echo.
 echo   Alpha warning:

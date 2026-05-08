@@ -10,9 +10,10 @@ This is a test build, not a finished co-op release. Connection, server join, UI,
 2. Extract this zip anywhere.
 3. Run `install.bat`.
 4. Let it auto-detect Kenshi, or paste the Kenshi folder path when asked.
-5. Start `KenshiMP.Server.exe`.
-6. Launch Kenshi from Steam.
-7. Load the multiplayer save/start, open Multiplayer, and join `127.0.0.1:27800`.
+5. The installer also copies the shared test save to `%LOCALAPPDATA%\kenshi\save\123`.
+6. Start `KenshiMP.Server.exe`.
+7. Launch Kenshi from Steam.
+8. Use **Load Game** with save `123`, open Multiplayer, and join `127.0.0.1:27800`.
 
 The installer backs up changed files to:
 
@@ -50,7 +51,7 @@ Host:
 
 1. Run `KenshiMP.Server.exe`.
 2. Launch Kenshi.
-3. Load the same multiplayer save/start.
+3. Use **Load Game** with save `123`. Do not use **New Game** for the multiplayer test.
 4. Join `127.0.0.1:27800`.
 5. Wait for player 2 before moving.
 
@@ -58,7 +59,7 @@ Other player:
 
 1. Install the same package.
 2. Launch Kenshi.
-3. Load the same multiplayer save/start.
+3. Use **Load Game** with save `123`. Do not use **New Game** for the multiplayer test.
 4. Join the host IP on UDP port `27800`.
 5. Wait 20-30 seconds after joining.
 6. Move only a few steps for the first test.
