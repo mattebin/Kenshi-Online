@@ -34,6 +34,7 @@ static PlayerID    g_myId   = 0;
 static bool        g_connected = false;
 static uint32_t    g_myEntityId = 0;
 static std::string g_playerName; // Set in main()
+static bool        g_passiveMode = false;
 
 // Position: start near Kenshi's "The Hub" area
 static float g_posX = -51200.f;
@@ -178,10 +179,14 @@ static void HandlePacket(const uint8_t* data, size_t len) {
         if (r.ReadRaw(&ack, sizeof(ack))) {
             g_myId = ack.playerId;
             g_connected = true;
-            g_needsSpawn = true;  // Wait for host position before spawning
+            g_needsSpawn = !g_passiveMode;  // Passive mode never asks Kenshi to spawn a fake character.
             printf("[<] Handshake OK! Player ID: %u, Players: %u/%u, Time: %.2f\n",
                    ack.playerId, ack.currentPlayers, ack.maxPlayers, ack.timeOfDay);
-            printf("[*] Waiting for host entity position before spawning...\n");
+            if (g_passiveMode) {
+                printf("[*] PASSIVE mode: listening only; no spawn request or position send will be sent.\n");
+            } else {
+                printf("[*] Waiting for host entity position before spawning...\n");
+            }
         }
         break;
     }
@@ -240,7 +245,7 @@ static void HandlePacket(const uint8_t* data, size_t len) {
                        px, py, pz, entId);
 
                 // Now spawn near the host
-                if (g_needsSpawn) {
+                if (!g_passiveMode && g_needsSpawn) {
                     // Position ourselves 10 units away from host
                     g_posX = g_hostPosX + 10.f;
                     g_posY = g_hostPosY;
@@ -274,17 +279,35 @@ static void HandlePacket(const uint8_t* data, size_t len) {
         r.ReadU8(count);
         g_posUpdatesReceived++;
 
+        CharacterPosition first{};
+        bool haveFirst = false;
+        if (count > 0) {
+            haveFirst = r.ReadRaw(&first, sizeof(first));
+        }
+
+        if (g_passiveMode && sourcePlayer != 0 && sourcePlayer != g_myId && haveFirst) {
+            g_hostPosKnown = true;
+            g_hostPosX = first.posX;
+            g_hostPosY = first.posY;
+            g_hostPosZ = first.posZ;
+
+            if (g_posUpdatesReceived <= 10 || g_posUpdatesReceived % 50 == 0) {
+                printf("[PASSIVE] Position update from player %u: entity=%u pos=(%.1f, %.1f, %.1f) speed=%u anim=%u [total recv: %d]\n",
+                       sourcePlayer, first.entityId, first.posX, first.posY, first.posZ,
+                       first.moveSpeed, first.animStateId, g_posUpdatesReceived);
+            }
+            break;
+        }
+
         // Print periodically
         if (g_posUpdatesReceived <= 3 || g_posUpdatesReceived % 100 == 0) {
             printf("[<] Position update from player %u: %u characters [total recv: %d]\n",
                    sourcePlayer, count, g_posUpdatesReceived);
             // Print first character's position
-            if (count > 0) {
-                CharacterPosition cp;
-                if (r.ReadRaw(&cp, sizeof(cp))) {
-                    printf("     entity=%u pos=(%.1f, %.1f, %.1f) speed=%u anim=%u\n",
-                           cp.entityId, cp.posX, cp.posY, cp.posZ, cp.moveSpeed, cp.animStateId);
-                }
+            if (haveFirst) {
+                printf("     entity=%u pos=(%.1f, %.1f, %.1f) speed=%u anim=%u\n",
+                       first.entityId, first.posX, first.posY, first.posZ,
+                       first.moveSpeed, first.animStateId);
             }
         }
         break;
@@ -430,14 +453,40 @@ static void PrintHelp() {
     printf("  h        - This help\n\n");
 }
 
+static void PrintUsage(const char* exe) {
+    printf("Usage: %s [server] [port] [name] [--passive]\n", exe);
+    printf("\n");
+    printf("Options:\n");
+    printf("  --passive, --listen-only   Connect and receive packets only; never spawn or send positions.\n");
+    printf("  --help, -h                 Show this help and exit.\n");
+    printf("\n");
+    printf("Examples:\n");
+    printf("  %s 127.0.0.1 27800 FakeBob\n", exe);
+    printf("  %s 127.0.0.1 27800 FakeBob --passive\n", exe);
+}
+
 int main(int argc, char** argv) {
     // Parse args
     std::string serverAddr = "127.0.0.1";
     uint16_t serverPort = KMP_DEFAULT_PORT;
 
-    if (argc >= 2) serverAddr = argv[1];
-    if (argc >= 3) serverPort = static_cast<uint16_t>(atoi(argv[2]));
-    if (argc >= 4) g_playerName = argv[3];
+    std::vector<std::string> positional;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            PrintUsage(argv[0]);
+            return 0;
+        }
+        if (arg == "--passive" || arg == "--listen-only") {
+            g_passiveMode = true;
+            continue;
+        }
+        positional.push_back(arg);
+    }
+
+    if (positional.size() >= 1) serverAddr = positional[0];
+    if (positional.size() >= 2) serverPort = static_cast<uint16_t>(atoi(positional[1].c_str()));
+    if (positional.size() >= 3) g_playerName = positional[2];
 
     // Generate a unique name if none provided
     if (g_playerName.empty()) {
@@ -452,6 +501,9 @@ int main(int argc, char** argv) {
 
     printf("=== KenshiMP Test Client ===\n");
     printf("Connecting to %s:%u as '%s'\n\n", serverAddr.c_str(), serverPort, g_playerName.c_str());
+    if (g_passiveMode) {
+        printf("Mode: PASSIVE/listen-only (no spawn request, no position send)\n\n");
+    }
 
     // Save origin for circular walk
     g_originX = g_posX;
@@ -520,7 +572,7 @@ int main(int argc, char** argv) {
         }
 
         // If we're waiting to spawn and haven't found host position in 5 seconds, spawn at default
-        if (g_connected && g_needsSpawn) {
+        if (!g_passiveMode && g_connected && g_needsSpawn) {
             static auto spawnWaitStart = std::chrono::steady_clock::now();
             auto waitElapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - spawnWaitStart);
@@ -534,7 +586,7 @@ int main(int argc, char** argv) {
         }
 
         // Send position updates at tick rate
-        if (g_connected && g_myEntityId != 0) {
+        if (!g_passiveMode && g_connected && g_myEntityId != 0) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPosSend);
             if (elapsed.count() >= KMP_TICK_INTERVAL_MS) {
@@ -565,6 +617,7 @@ int main(int argc, char** argv) {
                         std::chrono::steady_clock::now() - startTime);
                     printf("\n--- Status ---\n");
                     printf("Connected: %s\n", g_connected ? "YES" : "NO");
+                    printf("Passive mode: %s\n", g_passiveMode ? "YES" : "NO");
                     printf("Player ID: %u\n", g_myId);
                     printf("Entity ID: %u\n", g_myEntityId);
                     printf("Position: (%.1f, %.1f, %.1f)\n", g_posX, g_posY, g_posZ);

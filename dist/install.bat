@@ -5,46 +5,54 @@ color 0A
 
 echo.
 echo  ============================================
-echo   Kenshi-Online (KenshiMP) Installer
-echo   Co-op alpha build
+echo   Kenshi-Online / KenshiMP Installer
+echo   Alpha multiplayer build for Kenshi 1.0.68
 echo  ============================================
 echo.
 
-:: ── Auto-detect Kenshi directory ──
-
 set "KENSHI_DIR="
 
-:: Local checks first (installer dropped into / next to game folder)
-if exist "%~dp0kenshi_x64.exe"     ( set "KENSHI_DIR=%~dp0"     & goto :found_kenshi )
-if exist "%~dp0..\kenshi_x64.exe"  ( set "KENSHI_DIR=%~dp0..\"  & goto :found_kenshi )
+rem Local checks first, so the package can be extracted into the game folder.
+if exist "%~dp0kenshi_x64.exe"    ( set "KENSHI_DIR=%~dp0"    & goto :found_kenshi )
+if exist "%~dp0..\kenshi_x64.exe" ( set "KENSHI_DIR=%~dp0..\" & goto :found_kenshi )
 
-:: Default Steam install path
-set "P=C:\Program Files (x86)\Steam\steamapps\common\Kenshi"
-if exist "%P%\kenshi_x64.exe" ( set "KENSHI_DIR=%P%" & goto :found_kenshi )
+rem Common Steam/GOG locations.
+for %%P in (
+    "C:\Program Files (x86)\Steam\steamapps\common\Kenshi"
+    "C:\Program Files\Steam\steamapps\common\Kenshi"
+    "C:\SteamLibrary\Steam\steamapps\common\Kenshi"
+    "C:\SteamLibrary\steamapps\common\Kenshi"
+    "D:\SteamLibrary\Steam\steamapps\common\Kenshi"
+    "D:\SteamLibrary\steamapps\common\Kenshi"
+    "E:\SteamLibrary\Steam\steamapps\common\Kenshi"
+    "E:\SteamLibrary\steamapps\common\Kenshi"
+    "C:\GOG Games\Kenshi"
+) do (
+    if exist "%%~P\kenshi_x64.exe" (
+        set "KENSHI_DIR=%%~P"
+        goto :found_kenshi
+    )
+)
 
-:: GOG default
-set "P=C:\GOG Games\Kenshi"
-if exist "%P%\kenshi_x64.exe" ( set "KENSHI_DIR=%P%" & goto :found_kenshi )
-
-:: Parse Steam libraryfolders.vdf for non-default library locations
-:: (Steam stores extra libraries like D:\SteamLibrary, C:\SteamLibrary, etc.)
-set "VDF=C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf"
-if exist "%VDF%" (
-    for /f "tokens=2 delims=^"" %%A in ('findstr /C:"\"path\"" "%VDF%" 2^>nul') do (
-        set "CAND=%%A\steamapps\common\Kenshi"
-        :: Replace double backslashes (libraryfolders.vdf escapes them)
-        set "CAND=!CAND:\\=\!"
-        if exist "!CAND!\kenshi_x64.exe" (
-            set "KENSHI_DIR=!CAND!"
-            goto :found_kenshi
+rem Parse Steam libraryfolders.vdf for non-default libraries.
+for %%V in (
+    "C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf"
+    "C:\Program Files\Steam\steamapps\libraryfolders.vdf"
+) do (
+    if exist "%%~V" (
+        for /f "tokens=2 delims=^"" %%A in ('findstr /C:"\"path\"" "%%~V" 2^>nul') do (
+            set "CAND=%%A\steamapps\common\Kenshi"
+            set "CAND=!CAND:\\=\!"
+            if exist "!CAND!\kenshi_x64.exe" (
+                set "KENSHI_DIR=!CAND!"
+                goto :found_kenshi
+            )
         )
     )
 )
 
-:: Last-resort manual prompt
 echo  Could not auto-detect Kenshi.
-echo  Enter the full path to your Kenshi folder
-echo  ^(the folder containing kenshi_x64.exe^):
+echo  Enter the full path to the folder containing kenshi_x64.exe:
 echo.
 set /p "KENSHI_DIR=Path: "
 
@@ -61,7 +69,6 @@ if "%KENSHI_DIR:~-1%"=="\" set "KENSHI_DIR=%KENSHI_DIR:~0,-1%"
 echo  Found Kenshi at: %KENSHI_DIR%
 echo.
 
-:: ── Refuse to install while Kenshi is running ──
 tasklist /FI "IMAGENAME eq kenshi_x64.exe" 2>NUL | find /I "kenshi_x64.exe" >NUL
 if %errorlevel% equ 0 (
     echo  [ERROR] Kenshi is currently running. Close it before installing.
@@ -69,13 +76,12 @@ if %errorlevel% equ 0 (
     exit /b 1
 )
 
-:: ── Timestamped backup directory ──
-for /f "tokens=2 delims==" %%T in ('wmic os get localdatetime /value 2^>nul') do set "STAMP=%%T"
-set "STAMP=%STAMP:~0,8%-%STAMP:~8,6%"
+for /f "delims=" %%T in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Date -Format yyyyMMdd-HHmmss" 2^>nul') do set "STAMP=%%T"
+if not defined STAMP set "STAMP=manual"
 set "BACKUP_DIR=%KENSHI_DIR%\KenshiMP_backup_%STAMP%"
 mkdir "%BACKUP_DIR%" 2>nul
 
-echo  [1/7] Backing up files we are about to modify...
+echo  [1/8] Backing up files that may be changed...
 if exist "%KENSHI_DIR%\Plugins_x64.cfg" (
     copy /Y "%KENSHI_DIR%\Plugins_x64.cfg" "%BACKUP_DIR%\Plugins_x64.cfg.bak" >nul
     echo         Plugins_x64.cfg
@@ -88,86 +94,106 @@ if exist "%KENSHI_DIR%\data\__mods.list" (
     copy /Y "%KENSHI_DIR%\data\__mods.list" "%BACKUP_DIR%\__mods.list.bak" >nul
     echo         __mods.list
 )
+for %%F in ("%KENSHI_DIR%\KenshiMP.*.dll" "%KENSHI_DIR%\KenshiMP.*.exe" "%KENSHI_DIR%\KenshiMP.*.bat") do (
+    if exist "%%~F" copy /Y "%%~F" "%BACKUP_DIR%\%%~nxF.bak" >nul
+)
 
-echo  [2/7] Installing KenshiMP.Core.dll...
+echo  [2/8] Installing core plugin and tools...
 if not exist "%~dp0KenshiMP.Core.dll" (
     echo  [ERROR] KenshiMP.Core.dll not found in installer folder.
     pause
     exit /b 1
 )
-copy /Y "%~dp0KenshiMP.Core.dll" "%KENSHI_DIR%\KenshiMP.Core.dll" >nul
+
+for %%F in (
+    "KenshiMP.Core.dll"
+    "KenshiMP.SafeAddon.dll"
+    "KenshiMP.Dashboard.exe"
+    "KenshiMP.Server.exe"
+    "KenshiMP.MasterServer.exe"
+    "KenshiMP.Injector.exe"
+    "KenshiMP.TestClient.exe"
+    "KenshiMP.LogTail.exe"
+    "KenshiMP.Cartographer.exe"
+    "KenshiMP.CrashWatchdog.exe"
+    "KenshiMP.Probe.exe"
+    "KenshiMP.Restore.bat"
+    "KenshiMP.SwitchAddon.bat"
+) do (
+    if exist "%~dp0%%~F" (
+        set "SRC=%~dp0%%~F"
+        set "DST=%KENSHI_DIR%\%%~F"
+        if /I "!SRC!"=="!DST!" (
+            echo         %%~F already in place
+        ) else (
+            copy /Y "!SRC!" "!DST!" >nul
+            if errorlevel 1 (
+                echo  [ERROR] Could not copy %%~F. Close Kenshi/KenshiMP tools and retry.
+                pause
+                exit /b 1
+            )
+            echo         %%~F
+        )
+    )
+)
+
+echo  [3/8] Enabling KenshiMP.Core in Plugins_x64.cfg...
+set "CFG=%KENSHI_DIR%\Plugins_x64.cfg"
+if not exist "%CFG%" type nul > "%CFG%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$cfg=$env:CFG; $lines=@(); if(Test-Path -LiteralPath $cfg){ $lines=Get-Content -LiteralPath $cfg }; $lines=@($lines | Where-Object { $_ -notmatch '^Plugin=KenshiMP\.(Core|SafeAddon)\s*$' }); $lines += 'Plugin=KenshiMP.Core'; Set-Content -LiteralPath $cfg -Value $lines -Encoding ASCII"
 if errorlevel 1 (
-    echo  [ERROR] DLL copy failed. Is something locking the file?
+    echo  [ERROR] Failed to patch Plugins_x64.cfg
     pause
     exit /b 1
 )
-echo         OK
+echo         Plugin=KenshiMP.Core
 
-echo  [3/7] Patching Plugins_x64.cfg...
-findstr /C:"Plugin=KenshiMP.Core" "%KENSHI_DIR%\Plugins_x64.cfg" >nul 2>&1
-if errorlevel 1 (
-    echo Plugin=KenshiMP.Core>> "%KENSHI_DIR%\Plugins_x64.cfg"
-    echo         Added Plugin=KenshiMP.Core
-) else (
-    echo         Already present, leaving as-is
-)
-
-echo  [4/7] Installing UI layouts...
-if exist "%~dp0Kenshi_MultiplayerPanel.layout" (
-    copy /Y "%~dp0Kenshi_MultiplayerPanel.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout" >nul
-    echo         Kenshi_MultiplayerPanel.layout
-)
-if exist "%~dp0Kenshi_MultiplayerHUD.layout" (
-    copy /Y "%~dp0Kenshi_MultiplayerHUD.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerHUD.layout" >nul
-    echo         Kenshi_MultiplayerHUD.layout
-)
-if exist "%~dp0Kenshi_MainMenu.layout" (
-    copy /Y "%~dp0Kenshi_MainMenu.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >nul
-    echo         Kenshi_MainMenu.layout (with MULTIPLAYER button)
+echo  [4/8] Installing UI layouts...
+if not exist "%KENSHI_DIR%\data\gui\layout" mkdir "%KENSHI_DIR%\data\gui\layout"
+for %%F in (
+    "Kenshi_MainMenu.layout"
+    "Kenshi_MultiplayerPanel.layout"
+    "Kenshi_MultiplayerHUD.layout"
+) do (
+    if exist "%~dp0%%~F" (
+        copy /Y "%~dp0%%~F" "%KENSHI_DIR%\data\gui\layout\%%~F" >nul
+        echo         %%~F
+    )
 )
 
-echo  [5/7] Installing kenshi-online.mod...
+echo  [5/8] Installing and enabling kenshi-online.mod...
 if exist "%~dp0kenshi-online.mod" (
-    copy /Y "%~dp0kenshi-online.mod" "%KENSHI_DIR%\data\kenshi-online.mod" >nul
+    if not exist "%KENSHI_DIR%\data" mkdir "%KENSHI_DIR%\data"
     if not exist "%KENSHI_DIR%\mods\kenshi-online" mkdir "%KENSHI_DIR%\mods\kenshi-online"
+    copy /Y "%~dp0kenshi-online.mod" "%KENSHI_DIR%\data\kenshi-online.mod" >nul
     copy /Y "%~dp0kenshi-online.mod" "%KENSHI_DIR%\mods\kenshi-online\kenshi-online.mod" >nul
-    findstr /C:"kenshi-online" "%KENSHI_DIR%\data\__mods.list" >nul 2>&1
+    if not exist "%KENSHI_DIR%\data\__mods.list" type nul > "%KENSHI_DIR%\data\__mods.list"
+    findstr /I /X /C:"kenshi-online" "%KENSHI_DIR%\data\__mods.list" >nul 2>&1
     if errorlevel 1 (
         echo kenshi-online>> "%KENSHI_DIR%\data\__mods.list"
-        echo         Activated kenshi-online in __mods.list
+        echo         enabled in data\__mods.list
     ) else (
-        echo         kenshi-online already in __mods.list
+        echo         already enabled in data\__mods.list
     )
 ) else (
-    echo         [INFO] kenshi-online.mod not in package, skipping
+    echo         [WARN] kenshi-online.mod not found in installer folder.
 )
 
-echo  [6/7] Installing dedicated server + master server...
-if exist "%~dp0KenshiMP.Server.exe" (
-    copy /Y "%~dp0KenshiMP.Server.exe" "%KENSHI_DIR%\KenshiMP.Server.exe" >nul
-    echo         KenshiMP.Server.exe
-)
-if exist "%~dp0KenshiMP.MasterServer.exe" (
-    copy /Y "%~dp0KenshiMP.MasterServer.exe" "%KENSHI_DIR%\KenshiMP.MasterServer.exe" >nul
-    echo         KenshiMP.MasterServer.exe
-)
+echo  [6/8] Installing default server config...
 if exist "%~dp0server.json" (
     if not exist "%KENSHI_DIR%\server.json" (
         copy /Y "%~dp0server.json" "%KENSHI_DIR%\server.json" >nul
-        echo         server.json (default config)
+        echo         server.json
     ) else (
         echo         server.json already exists, leaving as-is
     )
 )
 
-echo  [7/7] Writing default client config...
-:: Default client config — points at localhost so a self-host setup
-:: (run KenshiMP.Server.exe on the same machine) "just works."
-:: Edit %APPDATA%\KenshiMP\client.json afterwards to point elsewhere.
-set "CFG_DIR=%APPDATA%\KenshiMP"
-if not exist "%CFG_DIR%" mkdir "%CFG_DIR%"
-if not exist "%CFG_DIR%\client.json" (
-    > "%CFG_DIR%\client.json" (
+echo  [7/8] Writing default client config...
+set "CLIENT_CFG_DIR=%APPDATA%\KenshiMP"
+if not exist "%CLIENT_CFG_DIR%" mkdir "%CLIENT_CFG_DIR%"
+if not exist "%CLIENT_CFG_DIR%\client.json" (
+    > "%CLIENT_CFG_DIR%\client.json" (
         echo {
         echo   "autoConnect": true,
         echo   "favoriteServers": ["127.0.0.1:27800"],
@@ -180,41 +206,34 @@ if not exist "%CFG_DIR%\client.json" (
         echo   "useSyncOrchestrator": false
         echo }
     )
-    echo         Created %CFG_DIR%\client.json
+    echo         %CLIENT_CFG_DIR%\client.json
 ) else (
-    echo         %CFG_DIR%\client.json already exists, leaving as-is
+    echo         client.json already exists, leaving as-is
 )
+
+echo  [8/8] Final checks...
+if exist "%KENSHI_DIR%\KenshiMP.Core.dll" ( echo         Core DLL installed )
+if exist "%KENSHI_DIR%\KenshiMP.Server.exe" ( echo         Server installed )
+if exist "%KENSHI_DIR%\KenshiMP.TestClient.exe" ( echo         Test client installed )
 
 echo.
 echo  ============================================
 echo   Installation complete.
 echo  ============================================
 echo.
-echo   ALPHA STATUS — please read:
+echo   Read README.md and JOINING.md in this package.
 echo.
-echo   What works:
-echo    - Mod loads, in-game F1 menu, MULTIPLAYER button
-echo    - Server connect, name/ping display, chat HUD
-echo    - Auto-connect on save load
-echo.
-echo   What doesn't yet:
-echo    - Kenshi can terminate when the first NPC spawns
-echo      after connecting. Reproducible across builds.
-echo      Tracked in KNOWN_ISSUES.md on the fork.
-echo.
-echo   TO HOST + JOIN LOCALLY (recommended first test):
-echo    1. Run KenshiMP.Server.exe ^(stays in console window^)
+echo   Quick local test:
+echo    1. Run KenshiMP.Server.exe
 echo    2. Launch Kenshi from Steam
-echo    3. New Game ^> pick the "Singleplayer" start
-echo    4. Auto-connect fires ~2s after world loads
+echo    3. Load your multiplayer save
+echo    4. Join 127.0.0.1:27800 from the multiplayer menu
 echo.
-echo   TO PLAY WITH ANOTHER PERSON:
-echo    The host runs KenshiMP.Server.exe and forwards
-echo    UDP port 27800. Joiner edits
-echo    %APPDATA%\KenshiMP\client.json -> set
-echo    "lastServer" to the host's public IP.
+echo   Alpha warning:
+echo    - Passive fake-client relay is safe for testing.
+echo    - Real remote player spawning is experimental and may crash.
 echo.
-echo   Backup of original files: %BACKUP_DIR%
-echo   Uninstall: run uninstall.bat
+echo   Backups: %BACKUP_DIR%
+echo   Uninstall: run uninstall.bat from this package.
 echo.
 pause

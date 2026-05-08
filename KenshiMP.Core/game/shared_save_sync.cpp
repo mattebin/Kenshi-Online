@@ -45,6 +45,7 @@ static uintptr_t s_otherFactionPtr = 0;
 static bool s_initialized = false;
 static bool s_ownFound = false;
 static bool s_otherFound = false;
+static bool s_ownOnlyNoticeLogged = false;
 
 // Position sending throttle
 static auto s_lastPosSend = std::chrono::steady_clock::time_point{};
@@ -116,6 +117,7 @@ void Init() {
     s_initialized = true;
     s_ownFound = false;
     s_otherFound = false;
+    s_ownOnlyNoticeLogged = false;
     s_ownAnimClass = nullptr;
     s_otherAnimClass = nullptr;
     s_ownCharPtr = nullptr;
@@ -138,6 +140,7 @@ void Reset() {
     s_initialized = false;
     s_ownFound = false;
     s_otherFound = false;
+    s_ownOnlyNoticeLogged = false;
     s_ownAnimClass = nullptr;
     s_otherAnimClass = nullptr;
     s_ownCharPtr = nullptr;
@@ -349,6 +352,29 @@ void Update(float deltaTime) {
             }
         }
 
+        // Vanilla-start / solo fallback: if the multiplayer placeholder
+        // names never appear, still publish the earliest unique tracked
+        // character as OWN. This keeps position relay alive for tests that
+        // load a normal save instead of the kenshi-online shared-save preset.
+        if (!s_ownFound && s_ownFactionPtr == 0 && s_otherFactionPtr == 0) {
+            if (auto* tc = char_tracker_hooks::FindEarliestUniqueNonPlaceholder(
+                    s_ownCharName, s_otherCharName)) {
+                s_ownAnimClass = tc->animClassPtr;
+                s_ownCharPtr = tc->characterPtr;
+                s_ownFactionPtr = tc->factionPtr;
+                s_ownFound = true;
+                core.GetPlayerController().SetLocalFactionPtr(s_ownFactionPtr);
+                spdlog::info("shared_save_sync: Found OWN '{}' [earliest-unique fallback] "
+                             "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
+                             tc->name,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass),
+                             reinterpret_cast<uintptr_t>(s_ownCharPtr),
+                             tc->factionPtr);
+                core.GetNativeHud().AddSystemMessage(
+                    "Found your character: " + tc->name + " (fallback)");
+            }
+        }
+
         if (!s_otherFound && s_ownFactionPtr != 0 && s_otherFactionPtr != 0) {
             // OTHER must be in a *different* faction than OWN. Compute the
             // expected other-faction from OWN's faction (which we now know
@@ -412,10 +438,20 @@ void Update(float deltaTime) {
             }
         }
 
-        if (!s_ownFound || !s_otherFound) return;
+        if (!s_ownFound) return;
 
-        core.GetNativeHud().AddSystemMessage("Both players found! Position sync active.");
-        spdlog::info("shared_save_sync: BOTH CHARACTERS FOUND — sync active");
+        if (!s_otherFound) {
+            if (!s_ownOnlyNoticeLogged) {
+                s_ownOnlyNoticeLogged = true;
+                core.GetNativeHud().AddSystemMessage(
+                    "Local position sync active; waiting for remote player...");
+                spdlog::info("shared_save_sync: OWN found; broadcasting local position "
+                             "while waiting for OTHER");
+            }
+        } else {
+            core.GetNativeHud().AddSystemMessage("Both players found! Position sync active.");
+            spdlog::info("shared_save_sync: BOTH CHARACTERS FOUND — sync active");
+        }
     } else {
         // Re-validate AnimClass pointers periodically — char_tracker may have
         // re-keyed the entry across a zone load, but the *character* pointer

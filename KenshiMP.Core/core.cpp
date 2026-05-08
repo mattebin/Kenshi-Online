@@ -15,6 +15,7 @@
 #include "hooks/faction_hooks.h"
 #include "hooks/building_hooks.h"
 #include "hooks/ai_hooks.h"
+#include "native/our_factory.h"
 #include "hooks/resource_hooks.h"
 #include "hooks/squad_spawn_hooks.h"
 #include "hooks/char_tracker_hooks.h"
@@ -217,107 +218,57 @@ static uintptr_t ScanForKenshiNullDerefSite() {
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
 
-    // ── Recovery: universal null-deref in game/Ogre/MyGUI ──
-    // Previously this was pattern-scanned to one specific RVA. That broke
-    // when the same `[reg+small_offset]` AV class fired at OTHER RVAs
-    // (e.g. game+0x644365 vs the scanned game+0x643AFB) — the rescue
-    // missed and the process terminated unhandled.
+    // ── Recovery: narrow engine null-deref ([rax+0x90] only) ──
+    // Earlier this was a "universal" rescue that fired on ANY read AV
+    // with target<0x10000 anywhere in game/Ogre/MyGUI and redirected
+    // a zero GPR to s_safeZeroBuf.  That was too greedy: the
+    // allocator code paths in game and Ogre transiently hold a
+    // register at 0 during normal allocation work, and redirecting
+    // it to safeZeroBuf made the allocator write its metadata to
+    // our 0x200-byte buffer.  Subsequent free of that "allocation"
+    // saw garbage metadata → STATUS_HEAP_CORRUPTION (CrashWatchdog
+    // confirmed exit code 0xC0000374 in PID 23012 on 2026-05-07).
     //
-    // Super-mode generalisation: any READ AV where the target address is
-    // in low memory (< 0x10000, classic null-or-near-null deref) AND RIP
-    // is inside game/Ogre/MyGUI, is by definition a null-pointer-deref
-    // bug in code we don't control. Find any GPR == 0 (other than RSP/
-    // RBP), redirect it to s_safeZeroBuf, and resume. The faulting
-    // function reads zeros and takes its null-handling branch.
+    // Tightened back to the original `bac5445` shape: only fire
+    // when ALL of these hold:
+    //   - read AV
+    //   - target is exactly 0x90 (the documented bug — see
+    //     KNOWN_ISSUES.md and the bac5445 commit message)
+    //   - RAX is the zero register (matches the disassembled
+    //     `movss xmm0, [rax+0x90]` site)
+    //   - RIP is inside the game module .text
     //
-    // No false positives possible: a GPR == 0 with target == GPR+offset
-    // means SOMEONE intended to read through that GPR as a pointer, and
-    // it was null. That's always a bug.
+    // This is conservative.  It will miss other null-deref AVs at
+    // different offsets, but it WILL NOT corrupt the heap by
+    // redirecting unrelated allocator code paths.  Other null-deref
+    // sites (if they appear) get their own tightened rescue arm
+    // each — never another wide net.
     if (g_kenshiCrashRecoveryEnabled.load(std::memory_order_relaxed) &&
         code == EXCEPTION_ACCESS_VIOLATION &&
         ep->ExceptionRecord->NumberParameters >= 2 &&
-        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */)
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */ &&
+        ep->ExceptionRecord->ExceptionInformation[1] == 0x90 &&
+        ep->ContextRecord->Rax == 0 &&
+        g_gameModuleBase != 0)
     {
-        uint64_t target = static_cast<uint64_t>(
-            ep->ExceptionRecord->ExceptionInformation[1]);
-        // Low-memory target = null + small offset.
-        if (target < 0x10000) {
-            // Resolve game/Ogre/MyGUI module bounds lazily once.
-            static uintptr_t s_nullDerefOgreBase = 0, s_nullDerefOgreEnd = 0;
-            static uintptr_t s_nullDerefMyguiBase = 0, s_nullDerefMyguiEnd = 0;
-            static bool s_nullDerefResolved = false;
-            if (!s_nullDerefResolved) {
-                s_nullDerefResolved = true;
-                auto resolveModuleLocal = [](const char* name,
-                                              uintptr_t& base, uintptr_t& end) {
-                    HMODULE h = GetModuleHandleA(name);
-                    if (h) {
-                        base = reinterpret_cast<uintptr_t>(h);
-                        auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(h);
-                        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-                            reinterpret_cast<const uint8_t*>(h) + dos->e_lfanew);
-                        end = base + nt->OptionalHeader.SizeOfImage;
-                    }
-                };
-                resolveModuleLocal("OgreMain_x64.dll",
-                                   s_nullDerefOgreBase, s_nullDerefOgreEnd);
-                resolveModuleLocal("MyGUIEngine_x64.dll",
-                                   s_nullDerefMyguiBase, s_nullDerefMyguiEnd);
+        uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+            ep->ExceptionRecord->ExceptionAddress);
+        bool inGame = (fault_rip >= g_gameModuleBase &&
+                       fault_rip <  g_gameModuleEnd);
+        if (inGame) {
+            ep->ContextRecord->Rax =
+                reinterpret_cast<DWORD64>(s_safeZeroBuf);
+            static volatile LONG s_recoverCount = 0;
+            LONG n = InterlockedIncrement(&s_recoverCount);
+            if (n == 1 || (n & (n - 1)) == 0) {
+                char buf[160];
+                sprintf_s(buf,
+                    "KMP RECOVER #%ld: game null-deref at +0x90, "
+                    "rip=game+0x%llX, redirected rax to safeZeroBuf\n",
+                    n, (unsigned long long)(fault_rip - g_gameModuleBase));
+                OutputDebugStringA(buf);
             }
-
-            uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
-                ep->ExceptionRecord->ExceptionAddress);
-            bool inGameModule = (g_gameModuleBase != 0 &&
-                                 fault_rip >= g_gameModuleBase &&
-                                 fault_rip <  g_gameModuleEnd);
-            bool inOgreModule = (s_nullDerefOgreBase != 0 &&
-                                 fault_rip >= s_nullDerefOgreBase &&
-                                 fault_rip <  s_nullDerefOgreEnd);
-            bool inMyGUIModule = (s_nullDerefMyguiBase != 0 &&
-                                  fault_rip >= s_nullDerefMyguiBase &&
-                                  fault_rip <  s_nullDerefMyguiEnd);
-
-            if (inGameModule || inOgreModule || inMyGUIModule) {
-                CONTEXT* ctx = ep->ContextRecord;
-                DWORD64* gprs[16] = {
-                    &ctx->Rax, &ctx->Rcx, &ctx->Rdx, &ctx->Rbx,
-                    &ctx->Rsp, &ctx->Rbp, &ctx->Rsi, &ctx->Rdi,
-                    &ctx->R8,  &ctx->R9,  &ctx->R10, &ctx->R11,
-                    &ctx->R12, &ctx->R13, &ctx->R14, &ctx->R15
-                };
-                const char* gprNames[16] = {
-                    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
-                    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
-                };
-                int matchIdx = -1;
-                for (int i = 0; i < 16; ++i) {
-                    if (i == 4 /*rsp*/ || i == 5 /*rbp*/) continue;
-                    if (*gprs[i] == 0) { matchIdx = i; break; }
-                }
-                if (matchIdx >= 0) {
-                    *gprs[matchIdx] = reinterpret_cast<DWORD64>(s_safeZeroBuf);
-                    static volatile LONG s_recoverCount = 0;
-                    LONG n = InterlockedIncrement(&s_recoverCount);
-                    if (n == 1 || (n & (n - 1)) == 0) {
-                        const char* mod = inGameModule ? "game"
-                                        : inOgreModule ? "Ogre"
-                                        : "MyGUI";
-                        uintptr_t modBase = inGameModule ? g_gameModuleBase
-                                          : inOgreModule ? s_nullDerefOgreBase
-                                          : s_nullDerefMyguiBase;
-                        char buf[256];
-                        sprintf_s(buf,
-                            "KMP RECOVER #%ld: %s null-deref at %s+0x%llX, "
-                            "%s=0 -> safeZeroBuf, target=0x%llX\n",
-                            n, mod, mod,
-                            (unsigned long long)(fault_rip - modBase),
-                            gprNames[matchIdx],
-                            (unsigned long long)target);
-                        OutputDebugStringA(buf);
-                    }
-                    return EXCEPTION_CONTINUE_EXECUTION;
-                }
-            }
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
 
@@ -1498,6 +1449,16 @@ bool Core::InitHooks() {
         }
     }
 
+    // OurFactory — KMP-owned character spawner (process()-based, see
+    // native/our_factory.cpp). Only requires resolving process() RVA from
+    // module base; donor-derived (Faction*, GameData*) get filled in later
+    // by Hook_AICreate as characters load.
+    if (our_factory::Init()) {
+        m_nativeHud.LogStep("OK", "OurFactory ready (process() resolved)");
+    } else {
+        m_nativeHud.LogStep("WARN", "OurFactory init failed");
+    }
+
     m_nativeHud.LogStep("OK", "All hooks installed");
 
     return allOk;
@@ -2325,6 +2286,11 @@ void Core::OnGameTick(float deltaTime) {
     //    This MUST run before any of the pipeline / connected-only short-circuits
     //    so the hook is always disabled promptly even during loading-only sessions.
     entity_hooks::PollDeferredHookState();
+
+    // Drive the GameWorld faction harvester. Cheap no-op once a faction is
+    // already published. Runs unconditionally — even when not connected — so
+    // faction is ready by the time the first remote spawn arrives.
+    entity_hooks::HarvestFactionFromGameWorld();
 
     if (!m_connected) return;
 
@@ -3415,6 +3381,20 @@ void Core::HandleSpawnQueue() {
             s_lastDirectAttempt = std::chrono::steady_clock::now();
             SpawnRequest spawnReq;
             if (m_spawnManager.PopNextSpawn(spawnReq)) {
+                if (spawnReq.owner == 0 || spawnReq.type != EntityType::PlayerCharacter) {
+                    spdlog::warn("Core: dropping unsafe spawn request entity {} owner={} type={} "
+                                 "(only remote PlayerCharacter owners are materialized)",
+                                 spawnReq.netId, spawnReq.owner,
+                                 static_cast<int>(spawnReq.type));
+                    m_entityRegistry.Unregister(spawnReq.netId);
+                    return;
+                }
+
+                if (spawnReq.owner == m_localPlayerId) {
+                    spdlog::debug("Core: dropping self-owned spawn request entity {} owner={}",
+                                  spawnReq.netId, spawnReq.owner);
+                    return;
+                }
                 // ── Per-player spawn cap ──
                 // Only spawn 1 character per remote player to prevent squad panel flooding.
                 // The remote player's primary character is sufficient for co-op gameplay.
@@ -3454,12 +3434,10 @@ void Core::HandleSpawnQueue() {
 
                 // ── PATH 2: createRandomChar (immediate fallback — wrong appearance) ──
                 if (!newChar) {
-                    spdlog::info("Core: createRandomChar FALLBACK for entity {} owner={} "
+                    spdlog::warn("Core: createRandomChar fallback disabled for entity {} owner={} "
                                  "(modTemplate {})",
                                  spawnReq.netId, spawnReq.owner,
                                  hasModTemplates ? "failed" : "not available");
-
-                    newChar = entity_hooks::CallFactoryCreateRandom(m_spawnManager.GetFactory());
                 }
 
                 uintptr_t newCharAddr = reinterpret_cast<uintptr_t>(newChar);

@@ -92,6 +92,59 @@ struct ClientConfig {
                                                          // notes/bind_crash_
                                                          // faction_0x250_
                                                          // signext.md.
+    bool        useNativeApplyDamage           = false; // When true,
+                                                         // PacketHandler::
+                                                         // HandleCombatHit
+                                                         // calls into the
+                                                         // game's resolved
+                                                         // ApplyDamage
+                                                         // function pointer
+                                                         // (RVA 0x7A33A0
+                                                         // via pattern
+                                                         // scan).  That
+                                                         // function's true
+                                                         // signature does
+                                                         // not match our
+                                                         // 6-arg
+                                                         // ApplyDamageFn
+                                                         // typedef on
+                                                         // 1.0.68 — calling
+                                                         // it via 6-arg
+                                                         // shim
+                                                         // corrupts the
+                                                         // heap (observed
+                                                         // STATUS_HEAP_
+                                                         // CORRUPTION
+                                                         // 0xC0000374
+                                                         // crash 2026-05-
+                                                         // 07 in PID
+                                                         // 22724).
+                                                         // Default false:
+                                                         // PacketHandler
+                                                         // takes the
+                                                         // direct-memory-
+                                                         // write health
+                                                         // fallback that
+                                                         // was already in
+                                                         // place for
+                                                         // this exact
+                                                         // case.  Flip
+                                                         // back to true
+                                                         // when the
+                                                         // correct
+                                                         // ApplyDamage
+                                                         // RVA + signature
+                                                         // are confirmed
+                                                         // (master_index
+                                                         // suggests
+                                                         // MedicalSystem::
+                                                         // applyDamage
+                                                         // at 0x64F300 is
+                                                         // the right
+                                                         // target, but
+                                                         // its signature
+                                                         // is also not
+                                                         // 6 ints+floats).
 
     bool Load(const std::string& path);
     bool Save(const std::string& path) const;

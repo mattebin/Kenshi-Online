@@ -58,6 +58,8 @@ bool ClientConfig::Load(const std::string& path) {
             safeModeFirstConnectedCreate = j["safeModeFirstConnectedCreate"].get<bool>();
         if (j.contains("factionSignExtRescue"))
             factionSignExtRescue = j["factionSignExtRescue"].get<bool>();
+        if (j.contains("useNativeApplyDamage"))
+            useNativeApplyDamage = j["useNativeApplyDamage"].get<bool>();
         return true;
     } catch (...) {
         return false;
@@ -80,6 +82,7 @@ bool ClientConfig::Save(const std::string& path) const {
     j["enableCharacterCreateHook"]    = enableCharacterCreateHook;
     j["safeModeFirstConnectedCreate"] = safeModeFirstConnectedCreate;
     j["factionSignExtRescue"]         = factionSignExtRescue;
+    j["useNativeApplyDamage"]         = useNativeApplyDamage;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;

@@ -2,12 +2,14 @@
 #include "../core.h"
 #include "../game/game_types.h"
 #include "../game/spawn_manager.h"
+#include "../native/our_factory.h"
 #include "kmp/hook_manager.h"
 #include "kmp/memory.h"
 #include <spdlog/spdlog.h>
 #include <Windows.h>
 #include <Psapi.h>
 #include <unordered_map>
+#include <limits>
 #include <mutex>
 
 #pragma comment(lib, "Psapi.lib")
@@ -346,6 +348,34 @@ uintptr_t ResolveFactionPtrByName(const std::string& name) {
     return 0;
 }
 
+const TrackedChar* FindEarliestUniqueNonPlaceholder(const std::string& placeholderA,
+                                                    const std::string& placeholderB) {
+    std::lock_guard lock(s_trackerMutex);
+
+    std::unordered_map<std::string, int> nameCounts;
+    nameCounts.reserve(s_trackedChars.size());
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.name.empty()) continue;
+        nameCounts[tc.name]++;
+    }
+
+    const TrackedChar* best = nullptr;
+    uint64_t bestTick = std::numeric_limits<uint64_t>::max();
+    for (auto& [key, tc] : s_trackedChars) {
+        if (!tc.characterPtr || !tc.animClassPtr || tc.factionPtr == 0) continue;
+        if (tc.name.empty() || tc.name == placeholderA || tc.name == placeholderB) continue;
+        auto countIt = nameCounts.find(tc.name);
+        if (countIt == nameCounts.end() || countIt->second != 1) continue;
+
+        uint64_t firstSeen = tc.firstSeenTick != 0 ? tc.firstSeenTick : tc.lastSeenTick;
+        if (firstSeen < bestTick) {
+            best = &tc;
+            bestTick = firstSeen;
+        }
+    }
+    return best;
+}
+
 void* GetLocalPlayerAnimClass() { return s_localPlayerAnimClass; }
 
 void* GetRemotePlayerAnimClass(const std::string& name) {
@@ -419,7 +449,8 @@ void ProcessDeferredDiscovery() {
         tc.name = name;
         tc.factionPtr = factionPtr;
         tc.position = accessor.GetPosition();
-        tc.lastSeenTick = GetTickCount64();
+        tc.firstSeenTick = GetTickCount64();
+        tc.lastSeenTick = tc.firstSeenTick;
 
         {
             std::lock_guard lock(s_trackerMutex);
@@ -430,6 +461,8 @@ void ProcessDeferredDiscovery() {
                      name, pending.charPtr,
                      reinterpret_cast<uintptr_t>(pending.animClassPtr),
                      factionPtr);
+
+        kmp::our_factory::RecordPlayerFactionFromCharacter(charKey);
 
         if (s_onNewChar) {
             s_onNewChar(tc);

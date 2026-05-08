@@ -19,6 +19,7 @@ struct TrackedChar {
                              // emits multiple characters all called "Player 1");
                              // the faction pointer does not.
     Vec3 position;
+    uint64_t firstSeenTick;
     uint64_t lastSeenTick;
 };
 
@@ -51,6 +52,12 @@ const TrackedChar* FindUniqueByFactionPtr(uintptr_t factionPtr,
 // becomes the authoritative identity marker for everyone in that faction.
 // Returns 0 if no tracked character carries that name yet.
 uintptr_t ResolveFactionPtrByName(const std::string& name);
+
+// Fallback for vanilla/single-player-start tests where the multiplayer
+// placeholder names are not present. Returns the earliest tracked character
+// whose name is unique and not one of the supplied placeholders.
+const TrackedChar* FindEarliestUniqueNonPlaceholder(const std::string& placeholderA,
+                                                    const std::string& placeholderB);
 
 void* GetLocalPlayerAnimClass();
 void* GetRemotePlayerAnimClass(const std::string& name);

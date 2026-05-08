@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 // Declared in core.cpp — updated here so VEH crash handler shows which create# crashed
@@ -27,6 +28,29 @@ namespace kmp::entity_hooks {
 // ── Function Types ──
 using CharacterCreateFn = void*(__fastcall*)(void* factory, void* templateData);
 using CharacterDestroyFn = void(__fastcall*)(void* character);
+
+// Ogre::Vector3 POD layout used for native ABI marshalling.
+// MSVC x64: aggregates >8B and not 1/2/4/8/16-byte sized are passed by hidden
+// pointer (caller-allocated copy). Vector3 (12B) → caller stack copy, register/stack
+// holds address. The compiler emits this for us when we declare the param by value.
+struct OgreVector3 { float x, y, z; };
+
+// RootObjectFactory::createRandomCharacter @ RVA 0x5836E0 (master_index #4767).
+// Real signature (BINDIFF_EXACT): (Faction*, Vector3 by-value, RootObjectContainer*,
+//                                  GameData*, Building*, float)
+// + implicit `this`. Total 7 params for __fastcall.
+//
+// HISTORICAL BUG (fixed 2026-05-07): the previous typedef declared only 2 params
+// → calling convention dropped R8/R9/stack args as garbage → factory dereferenced
+// uninitialized RootObjectContainer* → AV → STATUS_HEAP_CORRUPTION cascade.
+using FactoryCreateRandomCharacterFn = void* (__fastcall*)(
+    void* factory,         // RCX (this)
+    void* faction,         // RDX
+    OgreVector3 pos,       // R8 → hidden ptr to stack copy (12B aggregate)
+    void* container,       // R9
+    void* gameData,        // [rsp+0x28]
+    void* building,        // [rsp+0x30]
+    float scale);          // [rsp+0x38]
 
 // Store the ORIGINAL function addresses (NOT trampolines)
 static uintptr_t s_createTargetAddr = 0;
@@ -81,8 +105,9 @@ static std::atomic<bool> s_pendingCreateDisable{false};
 // RootObjectFactory::create (0x583400) — dispatches to process() but builds request struct internally.
 // Takes (factory, GameData*), not a raw request struct. This bypasses the stale-pointer problem.
 static CharacterCreateFn s_factoryCreate = nullptr;
-// RootObjectFactory::createRandomChar (0x5836E0) — creates a random NPC character.
-static CharacterCreateFn s_factoryCreateRandomChar = nullptr;
+// RootObjectFactory::createRandomCharacter (0x5836E0) — creates a procedural NPC.
+// Typed against the REAL 7-arg signature; calling as 2-arg corrupts the heap.
+static FactoryCreateRandomCharacterFn s_factoryCreateRandomChar = nullptr;
 
 // ── In-place replay tracking ──
 static std::atomic<int> s_inPlaceSpawnCount{0};
@@ -939,11 +964,11 @@ bool Install() {
                          createAddr);
         }
 
-        // RootObjectFactory::createRandomChar — creates random NPC character.
+        // RootObjectFactory::createRandomCharacter — creates random NPC character.
         uintptr_t createRandomAddr = modBase + 0x5836E0;
         if (validateFactoryFunc(createRandomAddr, "CreateRandomChar")) {
-            s_factoryCreateRandomChar = reinterpret_cast<CharacterCreateFn>(createRandomAddr);
-            spdlog::info("entity_hooks: CreateRandomChar VALIDATED at 0x{:X}", createRandomAddr);
+            s_factoryCreateRandomChar = reinterpret_cast<FactoryCreateRandomCharacterFn>(createRandomAddr);
+            spdlog::info("entity_hooks: CreateRandomChar VALIDATED at 0x{:X} (7-arg signature)", createRandomAddr);
         } else {
             spdlog::warn("entity_hooks: CreateRandomChar at 0x{:X} FAILED validation — "
                          "random char fallback disabled, will rely on NPC hijack only",
@@ -1181,47 +1206,89 @@ void* CallFactoryDirect(void* factory, void* requestStruct) {
     return result;
 }
 
-void* CallFactoryCreate(void* factory, void* gameData) {
-    // Call RootObjectFactory::create — the high-level dispatcher that builds
-    // a proper request struct from a GameData* and calls process() internally.
-    // This bypasses the stale-pointer problem entirely because create()
-    // constructs FRESH internal pointers (faction, squad, AI, etc.).
-    //
-    // NOT hooked by MinHook, so no trampoline/stub issues. The CPU naturally
-    // sets RAX = RSP after CALL pushes the return address, which is what the
-    // mov rax, rsp prologue expects.
-    if (!s_factoryCreate) {
-        spdlog::warn("entity_hooks: CallFactoryCreate — function not resolved");
+// Resolve a Faction* the engine will accept. Order: explicit param → early
+// player faction → fallback faction. Returns nullptr if no heap-resident
+// faction has been observed yet — in which case we defer rather than passing
+// a static-data or null pointer to createRandomCharacter (which SEHs).
+static void* ResolveSpawnFaction(void* explicitFaction) {
+    if (explicitFaction && IsHeapResidentPtr(reinterpret_cast<uintptr_t>(explicitFaction))) {
+        return explicitFaction;
+    }
+    uintptr_t f = GetEarlyPlayerFaction();
+    if (!IsHeapResidentPtr(f)) f = GetFallbackFaction();
+    if (!IsHeapResidentPtr(f)) return nullptr;
+    return reinterpret_cast<void*>(f);
+}
+
+void* CallFactoryCreate(void* factory, void* gameData, float x, float y, float z) {
+    // Single native call: RootObjectFactory::createRandomCharacter @ RVA 0x5836E0
+    // with its REAL 7-arg signature.
+    // Why createRandomCharacter and not create():
+    //   - create() takes 11 explicit args (GameData*, Vector3, bool, Faction*,
+    //     Quaternion, FactoryCallbackInterface*, RootObjectContainer*,
+    //     GameSaveState*, bool, Building*, float). Two of those (callback,
+    //     container) are non-trivial — passing nullptr for them risks the
+    //     factory walking through them.
+    //   - createRandomCharacter takes 6 explicit args. We have all of them.
+    //     The GameData* arg constrains the "random" choice to our CHARACTER
+    //     template (Wanderer/Drifter), so spawning is still deterministic-ish.
+    if (!s_factoryCreateRandomChar) {
+        spdlog::warn("entity_hooks: CallFactoryCreate — createRandomCharacter not resolved");
         return nullptr;
     }
+    void* faction = ResolveSpawnFaction(nullptr);
+    if (!faction) {
+        spdlog::warn("entity_hooks: CallFactoryCreate — no faction available yet "
+                     "(GetEarlyPlayerFaction=0, GetFallbackFaction=0); deferring");
+        return nullptr;
+    }
+    if (!factory) return nullptr;
 
+    OgreVector3 pos { x, y, z };
     s_directSpawnBypass.store(true, std::memory_order_release);
     void* result = nullptr;
     __try {
-        result = s_factoryCreate(factory, gameData);
+        result = s_factoryCreateRandomChar(
+            factory,
+            faction,
+            pos,
+            nullptr,        // RootObjectContainer* — null = global container
+            gameData,       // GameData* template (Wanderer/Drifter)
+            nullptr,        // Building* — not housed
+            1.0f);          // scale
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static int s_crashCount = 0;
         if (++s_crashCount <= 5) {
-            spdlog::error("entity_hooks: CallFactoryCreate CRASHED (SEH caught, attempt {})", s_crashCount);
+            spdlog::error("entity_hooks: CallFactoryCreate CRASHED (SEH caught, attempt {}) "
+                          "factory=0x{:X} faction=0x{:X} gd=0x{:X} pos=({:.1f},{:.1f},{:.1f})",
+                          s_crashCount,
+                          reinterpret_cast<uintptr_t>(factory),
+                          reinterpret_cast<uintptr_t>(faction),
+                          reinterpret_cast<uintptr_t>(gameData), x, y, z);
         }
     }
     s_directSpawnBypass.store(false, std::memory_order_release);
     return result;
 }
 
-void* CallFactoryCreateRandom(void* factory) {
-    // Call RootObjectFactory::createRandomChar — creates a random NPC.
-    // Takes just the factory pointer (RCX=factory, RDX=0).
-    // Useful as last-resort when mod templates fail.
+void* CallFactoryCreateRandom(void* factory, float x, float y, float z) {
+    // Same native call as CallFactoryCreate, but no GameData hint → fully random.
     if (!s_factoryCreateRandomChar) {
         spdlog::warn("entity_hooks: CallFactoryCreateRandom — function not resolved");
         return nullptr;
     }
+    void* faction = ResolveSpawnFaction(nullptr);
+    if (!faction) {
+        spdlog::warn("entity_hooks: CallFactoryCreateRandom — no faction available; deferring");
+        return nullptr;
+    }
+    if (!factory) return nullptr;
 
+    OgreVector3 pos { x, y, z };
     s_directSpawnBypass.store(true, std::memory_order_release);
     void* result = nullptr;
     __try {
-        result = s_factoryCreateRandomChar(factory, nullptr);
+        result = s_factoryCreateRandomChar(factory, faction, pos, nullptr, nullptr, nullptr, 1.0f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static int s_crashCount = 0;
         if (++s_crashCount <= 5) {
@@ -1238,6 +1305,153 @@ uintptr_t GetFallbackFaction() {
 
 uintptr_t GetEarlyPlayerFaction() {
     return s_earlyPlayerFaction.load(std::memory_order_relaxed);
+}
+
+void PublishFallbackFaction(uintptr_t faction) {
+    // Use IsValidVAPtr (NOT IsHeapResidentPtr): Kenshi's Faction objects live
+    // in the EXE's writable .data section, so they appear in the module range
+    // but ARE valid mutable Faction* values. Filtering them out as "static
+    // data" was wrong and starved the spawn pipeline (see test log 14:25).
+    if (!IsValidVAPtr(faction)) return;
+    uintptr_t prev = s_fallbackFaction.exchange(faction, std::memory_order_relaxed);
+    if (prev != faction) {
+        spdlog::info("entity_hooks: fallback faction published 0x{:X} (was 0x{:X})",
+                     faction, prev);
+    }
+}
+
+void PublishEarlyPlayerFaction(uintptr_t faction) {
+    if (!IsValidVAPtr(faction)) return;
+    uintptr_t expected = 0;
+    if (s_earlyPlayerFaction.compare_exchange_strong(expected, faction,
+                                                     std::memory_order_relaxed)) {
+        spdlog::info("entity_hooks: early player faction published 0x{:X}", faction);
+    }
+}
+
+// ── Donor character pool ──
+// Bounded ring buffer of every Character* observed by Hook_AICreate. The
+// spawn pipeline repurposes these (real, fully-loaded NPCs in GameWorld)
+// for remote characters instead of calling Kenshi's broken factory.
+namespace {
+constexpr size_t kDonorCapacity = 256;
+std::atomic<void*> s_donorPool[kDonorCapacity] = {};
+std::atomic<size_t> s_donorWriteIdx{0};
+std::atomic<size_t> s_donorReadIdx{0};
+
+// Claimed donors — marked by ClaimDonorCharacter, never re-picked.
+std::mutex s_claimedMutex;
+std::unordered_set<void*> s_claimedDonors;
+}
+
+void RecordDonorCharacter(void* character) {
+    if (!character) return;
+    if (!IsHeapResidentPtr(reinterpret_cast<uintptr_t>(character))) return;
+    size_t idx = s_donorWriteIdx.fetch_add(1, std::memory_order_relaxed) % kDonorCapacity;
+    s_donorPool[idx].store(character, std::memory_order_relaxed);
+}
+
+void* PickDonorCharacter() {
+    size_t writes = s_donorWriteIdx.load(std::memory_order_relaxed);
+    if (writes == 0) return nullptr;
+    size_t total = writes < kDonorCapacity ? writes : kDonorCapacity;
+    size_t pick  = s_donorReadIdx.fetch_add(1, std::memory_order_relaxed) % total;
+    return s_donorPool[pick].load(std::memory_order_relaxed);
+}
+
+void* PickFreshDonorCharacter() {
+    size_t writes = s_donorWriteIdx.load(std::memory_order_relaxed);
+    if (writes == 0) return nullptr;
+    size_t total = writes < kDonorCapacity ? writes : kDonorCapacity;
+    // Try every slot once before giving up.
+    for (size_t i = 0; i < total; ++i) {
+        size_t idx = (s_donorReadIdx.fetch_add(1, std::memory_order_relaxed)) % total;
+        void* candidate = s_donorPool[idx].load(std::memory_order_relaxed);
+        if (!candidate) continue;
+        std::lock_guard lock(s_claimedMutex);
+        if (s_claimedDonors.count(candidate) == 0) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+void ClaimDonorCharacter(void* character) {
+    if (!character) return;
+    std::lock_guard lock(s_claimedMutex);
+    s_claimedDonors.insert(character);
+}
+
+bool IsDonorClaimed(void* character) {
+    if (!character) return false;
+    std::lock_guard lock(s_claimedMutex);
+    return s_claimedDonors.count(character) > 0;
+}
+
+int DonorPoolSize() {
+    size_t writes = s_donorWriteIdx.load(std::memory_order_relaxed);
+    return static_cast<int>(writes < kDonorCapacity ? writes : kDonorCapacity);
+}
+
+int DonorPoolFree() {
+    int total = DonorPoolSize();
+    std::lock_guard lock(s_claimedMutex);
+    int claimed = static_cast<int>(s_claimedDonors.size());
+    return total - claimed > 0 ? total - claimed : 0;
+}
+
+// ── Tick-driven GameWorld faction harvester ──
+// Reads GameWorld+0x0888 (lektor<Character*>), picks the first Character
+// whose +0x10 owner is heap-resident, publishes it. Once a fallback faction
+// is already known, this is a no-op (cheap to call every tick).
+void HarvestFactionFromGameWorld() {
+    if (s_fallbackFaction.load(std::memory_order_relaxed) != 0) return;
+
+    auto& core = Core::Get();
+    auto& funcs = core.GetGameFunctions();
+    if (!funcs.GameWorldSingleton) return;
+
+    __try {
+        // Singleton slot can be either:
+        //  (a) ptr-to-ptr (GameWorld**) — common case
+        //  (b) the GameWorld object directly
+        uintptr_t singletonAddr = funcs.GameWorldSingleton;
+        uintptr_t gameWorld = *reinterpret_cast<uintptr_t*>(singletonAddr);
+        if (!IsHeapResidentPtr(gameWorld)) {
+            // Maybe the singleton slot IS the GameWorld object directly
+            gameWorld = singletonAddr;
+        }
+        if (!IsHeapResidentPtr(gameWorld)) return;
+
+        constexpr uintptr_t kCharListOff = 0x0888;
+        // Try lektor format 1: count at +0x00, array at +0x08
+        int count = *reinterpret_cast<int*>(gameWorld + kCharListOff);
+        uintptr_t arrayPtr = *reinterpret_cast<uintptr_t*>(gameWorld + kCharListOff + 0x08);
+        if (count <= 0 || count > 10000 || !IsHeapResidentPtr(arrayPtr)) {
+            // Try format 2: array first, count second
+            arrayPtr = *reinterpret_cast<uintptr_t*>(gameWorld + kCharListOff);
+            count    = *reinterpret_cast<int*>(gameWorld + kCharListOff + 0x08);
+            if (count <= 0 || count > 10000 || !IsHeapResidentPtr(arrayPtr)) return;
+        }
+
+        // Walk up to 32 entries looking for one with a heap-resident owner.
+        int limit = count < 32 ? count : 32;
+        auto* charArr = reinterpret_cast<uintptr_t*>(arrayPtr);
+        for (int i = 0; i < limit; ++i) {
+            uintptr_t character = charArr[i];
+            if (!IsHeapResidentPtr(character)) continue;
+            uintptr_t owner = *reinterpret_cast<uintptr_t*>(character + 0x10);
+            if (!IsHeapResidentPtr(owner)) continue;
+            PublishFallbackFaction(owner);
+            PublishEarlyPlayerFaction(owner);
+            spdlog::info("entity_hooks: GameWorld harvester published faction 0x{:X} "
+                         "(from char 0x{:X} idx {}/{})",
+                         owner, character, i, count);
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // GameWorld layout changed or character was unmapped — try again next tick.
+    }
 }
 
 int GetGameDataOffsetInStruct() {

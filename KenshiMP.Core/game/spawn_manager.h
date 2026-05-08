@@ -62,21 +62,37 @@ public:
     void* GetFactory() const { return m_factory; }
 
     // ── Hook-free factory discovery ────────────────────────────────
-    // Reads `GameWorld + 0x4A0` (theFactory per KenshiLib) and
-    // validates the candidate pointer's vtable against the recorded
-    // RootObjectFactory vtable RVA (`mod+0x16993B0`, see
-    // re_kenshi 2/manual_findings/notes/RootObjectFactory.vtable.md).
+    // Reads `kenshi_x64.exe + 0x21345B0` directly — the global
+    // pointer that Kenshi itself uses on every internal call to a
+    // RootObjectFactory method.  Verified deterministically by
+    // scripts/find_class_vtable.py + targeted disassembly:
+    // three independent callers of `RootObjectFactory::createItem`
+    // all load RCX from `mov rcx, [rip + disp32]` resolving to
+    // `mod + 0x21345B0`.  See re_kenshi 2/manual_findings/notes/
+    // RootObjectFactory.global.md.
     //
-    // Brainer-driven design: every entry-point in `RootObjectFactory`
-    // is hookBad (8/8 = 100% in cartographer_map.md), so the
-    // CharacterCreate-prologue path is permanently unsafe on this
-    // build.  Direct memory read avoids touching any function in that
-    // class entirely.
-    //
-    // Cheap to call — three pointer reads and a vtable comparison.
     // Returns true iff the factory was newly captured this call.
     // No-op when the factory is already set.
     bool TryDiscoverFactoryFromGameWorld();
+
+    // ── Hook-free template discovery ───────────────────────────────
+    // Once the factory is captured, populate `m_characterTemplates`
+    // by querying Kenshi's static `GameDataContainer` directly.
+    //
+    // The container is an in-binary static instance at
+    // `kenshi_x64.exe + 0x2134130` — found by the same static
+    // analysis as the factory (10 of 11 callers of
+    // `GameDataContainer::getDataByName` execute
+    // `lea rcx, [rip + disp32]` resolving to that exact address).
+    //
+    // For each known character template name (Wanderer, Drifter,
+    // Player 1, Player 2, etc.) we call native `getDataByName(
+    // container, name, CHARACTER)` and cache the resulting
+    // `GameData*`.  No hook, no heap scan, no GameDataManager
+    // pointer required.
+    //
+    // Returns the number of templates newly registered this call.
+    int DiscoverCharacterTemplatesViaContainer();
 
     // Get the number of known templates
     size_t GetTemplateCount() const;
