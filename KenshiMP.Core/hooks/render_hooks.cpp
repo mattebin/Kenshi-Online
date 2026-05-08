@@ -1,6 +1,8 @@
 #include "render_hooks.h"
 #include "../core.h"
 #include "entity_hooks.h"
+#include "../game/spawn_manager.h"
+#include "../ui/native_hud.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
 #include <d3d11.h>
@@ -78,14 +80,22 @@ static LRESULT WndProcInner(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     // F1 key: toggle native menu (ignore auto-repeat: bit 30 of lParam = previous key state)
     if (uMsg == WM_KEYDOWN && wParam == VK_F1 && !(lParam & 0x40000000)) {
-        auto& overlay = Core::Get().GetOverlay();
+        auto& core = Core::Get();
+        auto& overlay = core.GetOverlay();
         auto& nativeMenu = overlay.GetNativeMenu();
         if (nativeMenu.IsVisible()) {
             nativeMenu.Hide();
-        } else if (!Core::Get().IsGameLoaded() && !IsMainMenuReady()) {
+        } else if (!core.IsGameLoaded() && !IsMainMenuReady()) {
             OutputDebugStringA("KMP: F1 pressed too early (logo/splash) — ignoring\n");
         } else {
-            // Works on main menu AND in-game
+            // Always allow opening the menu — the Host/Join/Connect button handlers
+            // (NativeMenu::CanUseJoinFlow) are responsible for blocking unsafe spawn
+            // dispatches with a status message. A pre-emptive F1 block instead made
+            // the mod look unresponsive when the CharacterCreate hook never fired.
+            if (core.IsGameLoaded() && !core.GetSpawnManager().HasSpawnPathReady()) {
+                core.GetNativeHud().AddSystemMessage(
+                    "Multiplayer menu open — JOIN/HOST will be blocked until spawn path is ready.");
+            }
             nativeMenu.Show();
         }
         return 0; // consume the key

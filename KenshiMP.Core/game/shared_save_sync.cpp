@@ -3,6 +3,7 @@
 #include "../core.h"
 #include "../hooks/char_tracker_hooks.h"
 #include "../hooks/ai_hooks.h"
+#include "../sys/watcher.h"
 #include "kmp/protocol.h"
 #include "kmp/memory.h"
 #include <spdlog/spdlog.h>
@@ -26,7 +27,7 @@ namespace kmp::shared_save_sync {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── State ──
-static std::string s_ownCharName;
+static std::string s_ownCharName;     // bootstrap label only — see ResolveFactionPtrByName
 static std::string s_otherCharName;
 
 static void* s_ownAnimClass = nullptr;
@@ -34,9 +35,17 @@ static void* s_otherAnimClass = nullptr;
 static void* s_ownCharPtr = nullptr;
 static void* s_otherCharPtr = nullptr;
 
+// Pointer-based identity (preferred over name-based — names collide; the
+// kenshi-online.mod emits many characters all called "Player 1"). These
+// resolve once we observe at least one character with the bootstrap name,
+// after which everything matches by faction pointer instead.
+static uintptr_t s_ownFactionPtr   = 0;
+static uintptr_t s_otherFactionPtr = 0;
+
 static bool s_initialized = false;
 static bool s_ownFound = false;
 static bool s_otherFound = false;
+static bool s_ownOnlyNoticeLogged = false;
 
 // Position sending throttle
 static auto s_lastPosSend = std::chrono::steady_clock::time_point{};
@@ -54,15 +63,28 @@ static bool s_hasRemotePosition = false;
 static std::atomic<float> s_remoteGameSpeed{-1.f};
 
 // ── Faction string → character name mapping ──
+// Server sends faction strings with the originating mod's load-order prefix
+// (e.g. "10-kenshi-online.mod") because that is how Kenshi addresses faction
+// records internally. Strip the mod suffix and load-order prefix before
+// matching so any reasonable variant maps to the same player slot.
+static std::string NormalizeFactionKey(const std::string& faction) {
+    std::string s = faction;
+    auto dot = s.find('.');
+    if (dot != std::string::npos) s.resize(dot);
+    return s;
+}
+
 static std::string FactionToOwnName(const std::string& faction) {
-    if (faction == "10-kenshi-online") return "Player 1";
-    if (faction == "12-kenshi-online") return "Player 2";
+    const std::string s = NormalizeFactionKey(faction);
+    if (s == "10-kenshi-online") return "Player 1";
+    if (s == "12-kenshi-online") return "Player 2";
     return "";
 }
 
 static std::string FactionToOtherName(const std::string& faction) {
-    if (faction == "10-kenshi-online") return "Player 2";
-    if (faction == "12-kenshi-online") return "Player 1";
+    const std::string s = NormalizeFactionKey(faction);
+    if (s == "10-kenshi-online") return "Player 2";
+    if (s == "12-kenshi-online") return "Player 1";
     return "";
 }
 
@@ -78,13 +100,24 @@ void Init() {
     s_otherCharName = FactionToOtherName(faction);
 
     if (s_ownCharName.empty() || s_otherCharName.empty()) {
-        spdlog::error("shared_save_sync: Unknown faction '{}' — cannot determine character names", faction);
+        // This Init runs from Update() every tick until s_initialized flips, so
+        // a hard error here used to flood the log with tens of thousands of
+        // identical lines per minute. Log only on the first failure and on
+        // every transition (i.e. when the faction string changes).
+        static std::string s_lastWarnedFaction;
+        if (faction != s_lastWarnedFaction) {
+            s_lastWarnedFaction = faction;
+            spdlog::error("shared_save_sync: Unknown faction '{}' — cannot determine "
+                          "character names (suppressing further occurrences of this "
+                          "exact value)", faction);
+        }
         return;
     }
 
     s_initialized = true;
     s_ownFound = false;
     s_otherFound = false;
+    s_ownOnlyNoticeLogged = false;
     s_ownAnimClass = nullptr;
     s_otherAnimClass = nullptr;
     s_ownCharPtr = nullptr;
@@ -107,6 +140,7 @@ void Reset() {
     s_initialized = false;
     s_ownFound = false;
     s_otherFound = false;
+    s_ownOnlyNoticeLogged = false;
     s_ownAnimClass = nullptr;
     s_otherAnimClass = nullptr;
     s_ownCharPtr = nullptr;
@@ -121,7 +155,34 @@ void Reset() {
     spdlog::info("shared_save_sync: Reset");
 }
 
-// ── SEH-protected position read from AnimClass chain ──
+// ── SEH-protected position read from CharacterHuman directly ──
+// Uses the runtime-resolved character.position offset (Steam: +0x48 per
+// the install-time OFFSET DUMP). char_tracker_hooks already uses this path
+// via CharacterAccessor::GetPosition for every tracked character, so we
+// know it works on the live Steam build. SEH-wrapped because we can't
+// trust arbitrary heap reads not to fault during zone transitions.
+static bool SEH_ReadCharacterPosition(void* charPtr, Vec3& out) {
+    __try {
+        uintptr_t cp = reinterpret_cast<uintptr_t>(charPtr);
+        if (cp < 0x10000 || cp > 0x00007FFFFFFFFFFF) return false;
+        int posOff = game::GetOffsets().character.position;
+        if (posOff < 0) return false;
+        Memory::ReadVec3(cp + posOff, out.x, out.y, out.z);
+        return (out.x != 0.f || out.y != 0.f || out.z != 0.f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// ── SEH-protected position read from AnimClass chain (legacy/GOG) ──
+// Original upstream implementation. Walks animClass+0xC0 → charMovement+0x320
+// → posStruct+0x20 to reach the live position floats. Verified working on
+// GOG Kenshi by upstream; on Steam v1.0.65 the +0xC0 dereference returns
+// garbage and this silently fails.
+//
+// Kept as a fallback so a build that runs against GOG or any future Steam
+// version with the same anim layout can still broadcast positions even if
+// the CharacterHuman+offset path doesn't yield a sensible value.
 static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
     __try {
         uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClass);
@@ -145,7 +206,11 @@ static bool SEH_ReadAnimClassPosition(void* animClass, Vec3& out) {
     }
 }
 
-// ── SEH-protected position write to AnimClass chain ──
+// ── SEH-protected position write to AnimClass chain (legacy/GOG) ──
+// Symmetric to the read above; same offsets, same caveat. Kept as a
+// fallback for builds where the cached-position write to char+0x48 is
+// insufficient (e.g., the engine reads from the anim chain and ignores
+// the cached field).
 static bool SEH_WriteAnimClassPosition(void* animClass, const Vec3& pos) {
     __try {
         uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClass);
@@ -182,6 +247,21 @@ void Update(float deltaTime) {
     auto& core = Core::Get();
     if (!core.IsConnected() || !core.IsGameLoaded()) return;
 
+    // Watcher: throttled entry/exit so we know when shared_save_sync
+    // is mid-call vs. post-call when the process is silently terminated.
+    static int s_updateNum = 0;
+    s_updateNum++;
+    bool watch = kmp::watcher::IsEnabled() &&
+                 (s_updateNum <= 20 || s_updateNum % 200 == 0);
+    if (watch) {
+        spdlog::info("WATCH/SYNC: Update enter #{} (ownFound={}, otherFound={})",
+                     s_updateNum, s_ownFound, s_otherFound);
+        // Also dump char_tracker hook counters so we can see if the inline
+        // hook is firing at all and where calls are being filtered out.
+        char_tracker_hooks::DumpHookCounters();
+        spdlog::default_logger()->flush();
+    }
+
     // ── LAZY INIT: faction assignment arrives AFTER SetConnected(true) ──
     // Init() is called from SetConnected but faction isn't assigned yet.
     // Retry here every tick until the faction arrives.
@@ -193,25 +273,139 @@ void Update(float deltaTime) {
         if (!s_initialized) return;
     }
 
-    // ── STEP 1: Discover characters by name ──
+    // ── STEP 1: Discover characters by FACTION POINTER ──
+    // Bootstrap: convert the well-known Player 1 / Player 2 *names* into
+    // faction *pointers* the first time the tracker has any character with
+    // that name. After that, every match is pointer-based — names can
+    // collide (kenshi-online.mod has many "Player 1" characters), faction
+    // pointers do not.
     if (!s_ownFound || !s_otherFound) {
         s_discoveryAttempts++;
 
-        // Re-validate cached pointers on every discovery tick (handles zone changes)
-        if (!s_ownFound) {
-            auto* tc = char_tracker_hooks::FindByName(s_ownCharName);
+        // Bootstrap own faction pointer from any tracked character with the
+        // own name. Once we have it we stop using the name for own.
+        if (s_ownFactionPtr == 0) {
+            uintptr_t fp = char_tracker_hooks::ResolveFactionPtrByName(s_ownCharName);
+            if (fp != 0) {
+                s_ownFactionPtr = fp;
+                spdlog::info("shared_save_sync: Resolved OWN faction pointer 0x{:X} "
+                             "(via name '{}')", fp, s_ownCharName);
+            }
+        }
+        if (s_otherFactionPtr == 0) {
+            uintptr_t fp = char_tracker_hooks::ResolveFactionPtrByName(s_otherCharName);
+            if (fp != 0) {
+                s_otherFactionPtr = fp;
+                spdlog::info("shared_save_sync: Resolved OTHER faction pointer 0x{:X} "
+                             "(via name '{}')", fp, s_otherCharName);
+            }
+        }
+
+        // ── OWN selection: the LOCAL PLAYER controls whichever character
+        //    they custom-named at character creation, regardless of which
+        //    multiplayer "slot" the server assigned. The kenshi-online.mod
+        //    seeds the world with placeholder NPCs literally named
+        //    "Player 1" / "Player 2" — the only character with a unique
+        //    name in either kenshi-online faction is the user's PC.
+        //
+        //    Search both factions, prefer a unique-named hit. This makes
+        //    solo testing track the user's actual PC (e.g. "Kole") instead
+        //    of a stationary placeholder, and in 2-player co-op still picks
+        //    the local player's PC because it's the one named in *this*
+        //    machine's character-creation step. ──
+        if (!s_ownFound && (s_ownFactionPtr != 0 || s_otherFactionPtr != 0)) {
+            const char_tracker_hooks::TrackedChar* tc = nullptr;
+            const char* matchKind = nullptr;
+
+            // Stage 1: unique-named in own faction (real co-op host case).
+            if (s_ownFactionPtr != 0) {
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(s_ownFactionPtr, s_ownCharName);
+                if (tc) matchKind = "unique-name (own faction)";
+            }
+            // Stage 2: unique-named in OTHER faction (server-slot mismatch
+            // case — the local PC was created in the opposite faction, e.g.
+            // joining as Player 2 with a Player-1-faction PC like Kole).
+            if (!tc && s_otherFactionPtr != 0) {
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(s_otherFactionPtr, s_otherCharName);
+                if (tc) matchKind = "unique-name (other faction — slot mismatch)";
+            }
+            // Stage 3: faction-only fallback in own faction (no unique-named
+            // PC in either faction, e.g. fresh joiner with no character
+            // creation yet).
+            if (!tc && s_ownFactionPtr != 0) {
+                tc = char_tracker_hooks::FindByFactionPtr(s_ownFactionPtr);
+                if (tc) matchKind = "faction-only";
+            }
+
             if (tc && tc->animClassPtr) {
                 s_ownAnimClass = tc->animClassPtr;
                 s_ownCharPtr = tc->characterPtr;
                 s_ownFound = true;
-                spdlog::info("shared_save_sync: Found OWN character '{}' animClass=0x{:X}",
-                             s_ownCharName, reinterpret_cast<uintptr_t>(s_ownAnimClass));
-                core.GetNativeHud().AddSystemMessage("Found your character: " + s_ownCharName);
+                spdlog::info("shared_save_sync: Found OWN '{}' [{}] "
+                             "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
+                             tc->name, matchKind,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass),
+                             reinterpret_cast<uintptr_t>(s_ownCharPtr),
+                             tc->factionPtr);
+                core.GetNativeHud().AddSystemMessage(
+                    "Found your character: " + tc->name + " (" + matchKind + ")");
             }
         }
 
-        if (!s_otherFound) {
-            auto* tc = char_tracker_hooks::FindByName(s_otherCharName);
+        // Vanilla-start / solo fallback: if the multiplayer placeholder
+        // names never appear, still publish the earliest unique tracked
+        // character as OWN. This keeps position relay alive for tests that
+        // load a normal save instead of the kenshi-online shared-save preset.
+        if (!s_ownFound && s_ownFactionPtr == 0 && s_otherFactionPtr == 0) {
+            if (auto* tc = char_tracker_hooks::FindEarliestUniqueNonPlaceholder(
+                    s_ownCharName, s_otherCharName)) {
+                s_ownAnimClass = tc->animClassPtr;
+                s_ownCharPtr = tc->characterPtr;
+                s_ownFactionPtr = tc->factionPtr;
+                s_ownFound = true;
+                core.GetPlayerController().SetLocalFactionPtr(s_ownFactionPtr);
+                spdlog::info("shared_save_sync: Found OWN '{}' [earliest-unique fallback] "
+                             "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
+                             tc->name,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass),
+                             reinterpret_cast<uintptr_t>(s_ownCharPtr),
+                             tc->factionPtr);
+                core.GetNativeHud().AddSystemMessage(
+                    "Found your character: " + tc->name + " (fallback)");
+            }
+        }
+
+        if (!s_otherFound && s_ownFactionPtr != 0 && s_otherFactionPtr != 0) {
+            // OTHER must be in a *different* faction than OWN. Compute the
+            // expected other-faction from OWN's faction (which we now know
+            // for sure once OWN has been resolved).
+            uintptr_t expectedOtherFaction = 0;
+            if (s_ownFound && s_ownCharPtr) {
+                // OWN was found — pick whichever known faction is NOT OWN's.
+                uintptr_t ownFp = 0;
+                if (auto* ownTc = char_tracker_hooks::FindByPtr(s_ownCharPtr)) {
+                    ownFp = ownTc->factionPtr;
+                }
+                if (ownFp == s_ownFactionPtr)        expectedOtherFaction = s_otherFactionPtr;
+                else if (ownFp == s_otherFactionPtr) expectedOtherFaction = s_ownFactionPtr;
+            } else {
+                expectedOtherFaction = s_otherFactionPtr;
+            }
+
+            const char_tracker_hooks::TrackedChar* tc = nullptr;
+            const char* matchKind = nullptr;
+            if (expectedOtherFaction != 0) {
+                // Prefer unique-named (a real remote player has connected
+                // and their custom-named PC is now in the world).
+                tc = char_tracker_hooks::FindUniqueByFactionPtr(expectedOtherFaction, s_otherCharName);
+                if (tc) {
+                    matchKind = "unique-name";
+                } else {
+                    tc = char_tracker_hooks::FindByFactionPtr(expectedOtherFaction);
+                    if (tc) matchKind = "faction-only";
+                }
+            }
+
             if (tc && tc->animClassPtr) {
                 s_otherAnimClass = tc->animClassPtr;
                 s_otherCharPtr = tc->characterPtr;
@@ -221,9 +415,14 @@ void Update(float deltaTime) {
                     ai_hooks::MarkRemoteControlled(s_otherCharPtr);
                 }
 
-                spdlog::info("shared_save_sync: Found OTHER character '{}' animClass=0x{:X}",
-                             s_otherCharName, reinterpret_cast<uintptr_t>(s_otherAnimClass));
-                core.GetNativeHud().AddSystemMessage("Found remote player: " + s_otherCharName);
+                spdlog::info("shared_save_sync: Found OTHER '{}' [{}] "
+                             "animClass=0x{:X} char=0x{:X} faction=0x{:X}",
+                             tc->name, matchKind,
+                             reinterpret_cast<uintptr_t>(s_otherAnimClass),
+                             reinterpret_cast<uintptr_t>(s_otherCharPtr),
+                             tc->factionPtr);
+                core.GetNativeHud().AddSystemMessage(
+                    "Found remote player: " + tc->name + " (" + matchKind + ")");
             }
         }
 
@@ -239,28 +438,46 @@ void Update(float deltaTime) {
             }
         }
 
-        if (!s_ownFound || !s_otherFound) return;
+        if (!s_ownFound) return;
 
-        core.GetNativeHud().AddSystemMessage("Both players found! Position sync active.");
-        spdlog::info("shared_save_sync: BOTH CHARACTERS FOUND — sync active");
-    } else {
-        // Re-validate AnimClass pointers periodically (handles zone-load recreation)
-        static int s_revalidateCounter = 0;
-        if (++s_revalidateCounter % 300 == 0) { // Every ~5 seconds at 60fps
-            auto* tc = char_tracker_hooks::FindByName(s_ownCharName);
-            if (tc && tc->animClassPtr != s_ownAnimClass) {
-                s_ownAnimClass = tc->animClassPtr;
-                s_ownCharPtr = tc->characterPtr;
-                spdlog::debug("shared_save_sync: Own animClass updated to 0x{:X}",
-                              reinterpret_cast<uintptr_t>(s_ownAnimClass));
+        if (!s_otherFound) {
+            if (!s_ownOnlyNoticeLogged) {
+                s_ownOnlyNoticeLogged = true;
+                core.GetNativeHud().AddSystemMessage(
+                    "Local position sync active; waiting for remote player...");
+                spdlog::info("shared_save_sync: OWN found; broadcasting local position "
+                             "while waiting for OTHER");
             }
-            auto* tc2 = char_tracker_hooks::FindByName(s_otherCharName);
-            if (tc2 && tc2->animClassPtr != s_otherAnimClass) {
-                s_otherAnimClass = tc2->animClassPtr;
-                s_otherCharPtr = tc2->characterPtr;
-                if (s_otherCharPtr) ai_hooks::MarkRemoteControlled(s_otherCharPtr);
-                spdlog::debug("shared_save_sync: Other animClass updated to 0x{:X}",
-                              reinterpret_cast<uintptr_t>(s_otherAnimClass));
+        } else {
+            core.GetNativeHud().AddSystemMessage("Both players found! Position sync active.");
+            spdlog::info("shared_save_sync: BOTH CHARACTERS FOUND — sync active");
+        }
+    } else {
+        // Re-validate AnimClass pointers periodically — char_tracker may have
+        // re-keyed the entry across a zone load, but the *character* pointer
+        // and the identity (faction) are stable. Look up by the cached
+        // character pointer (NOT by name — name-based lookup matches NPC
+        // placeholders and silently swaps s_ownAnimClass to a stationary
+        // 'Player N' NPC, which is exactly the regression that produced the
+        // 4150-packet stuck-coordinates trail in test session 22004).
+        static int s_revalidateCounter = 0;
+        if (++s_revalidateCounter % 300 == 0) { // ~5 seconds at 60 fps
+            if (s_ownCharPtr) {
+                auto* tc = char_tracker_hooks::FindByPtr(s_ownCharPtr);
+                if (tc && tc->animClassPtr != s_ownAnimClass) {
+                    s_ownAnimClass = tc->animClassPtr;
+                    spdlog::debug("shared_save_sync: Own animClass refreshed to 0x{:X}",
+                                  reinterpret_cast<uintptr_t>(s_ownAnimClass));
+                }
+            }
+            if (s_otherCharPtr) {
+                auto* tc2 = char_tracker_hooks::FindByPtr(s_otherCharPtr);
+                if (tc2 && tc2->animClassPtr != s_otherAnimClass) {
+                    s_otherAnimClass = tc2->animClassPtr;
+                    if (s_otherCharPtr) ai_hooks::MarkRemoteControlled(s_otherCharPtr);
+                    spdlog::debug("shared_save_sync: Other animClass refreshed to 0x{:X}",
+                                  reinterpret_cast<uintptr_t>(s_otherAnimClass));
+                }
             }
         }
     }
@@ -271,11 +488,19 @@ void Update(float deltaTime) {
     // S2C_PositionUpdate to other clients.
     auto now = std::chrono::steady_clock::now();
     auto sinceSend = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPosSend);
-    if (sinceSend.count() >= POS_SEND_INTERVAL_MS && s_ownAnimClass) {
+    if (sinceSend.count() >= POS_SEND_INTERVAL_MS && s_ownCharPtr) {
         s_lastPosSend = now;
 
+        // Steam: prefer the CharacterHuman+offset read (verified working).
+        // GOG / other builds: fall back to the AnimClass-chain read if the
+        // primary path doesn't return a sensible value. Either succeeding
+        // is enough to broadcast — nothing here is platform-conditional.
         Vec3 myPos;
-        if (SEH_ReadAnimClassPosition(s_ownAnimClass, myPos)) {
+        bool gotPos = SEH_ReadCharacterPosition(s_ownCharPtr, myPos);
+        if (!gotPos && s_ownAnimClass) {
+            gotPos = SEH_ReadAnimClassPosition(s_ownAnimClass, myPos);
+        }
+        if (gotPos) {
             // Use the existing position update format — the server reads:
             // U32(sourcePlayer) [handled by server from peer], U8(count), then
             // CharacterPosition structs. We need to match this EXACTLY.
@@ -299,6 +524,20 @@ void Update(float deltaTime) {
             writer.WriteRaw(&cp, sizeof(cp));
 
             core.GetClient().SendUnreliable(writer.Data(), writer.Size());
+
+            // Watcher: throttled log of outbound position so we can confirm
+            // the broadcast is actually firing (the wire-level send isn't
+            // logged anywhere else). Every 50th send ≈ 2.5 seconds at the
+            // 50 ms cadence.
+            static int s_posSendCount = 0;
+            int n = ++s_posSendCount;
+            if (kmp::watcher::IsEnabled() && (n <= 5 || n % 50 == 0)) {
+                spdlog::info("WATCH/POS: sent #{} pos=({:.1f},{:.1f},{:.1f}) "
+                             "from animClass=0x{:X}",
+                             n, myPos.x, myPos.y, myPos.z,
+                             reinterpret_cast<uintptr_t>(s_ownAnimClass));
+                spdlog::default_logger()->flush();
+            }
         }
     }
 
@@ -311,9 +550,16 @@ void Update(float deltaTime) {
             remotePos = s_remotePosition;
             hasRemote = s_hasRemotePosition;
         }
-        if (hasRemote && s_otherAnimClass) {
-            SEH_WriteAnimClassPosition(s_otherAnimClass, remotePos);
+        if (hasRemote && s_otherCharPtr) {
+            // Apply via the cached-position write (works on Steam) AND the
+            // AnimClass-chain write (works on GOG/upstream-baseline). Both
+            // are SEH-wrapped no-ops if the offsets don't apply to the live
+            // build, so calling both is safe and gives us platform coverage
+            // without conditional logic.
             SEH_WriteCachedPosition(s_otherCharPtr, remotePos);
+            if (s_otherAnimClass) {
+                SEH_WriteAnimClassPosition(s_otherAnimClass, remotePos);
+            }
         }
     }
 
@@ -331,6 +577,15 @@ void Update(float deltaTime) {
             }
         }
         s_remoteGameSpeed.store(-1.f);
+    }
+
+    if (watch) {
+        spdlog::info("WATCH/SYNC: Update exit #{} (ownFound={}, otherFound={}, "
+                     "ownPtr=0x{:X}, otherPtr=0x{:X})",
+                     s_updateNum, s_ownFound, s_otherFound,
+                     reinterpret_cast<uintptr_t>(s_ownCharPtr),
+                     reinterpret_cast<uintptr_t>(s_otherCharPtr));
+        spdlog::default_logger()->flush();
     }
 }
 

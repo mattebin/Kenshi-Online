@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <Windows.h>
 
 namespace kmp::entity_hooks {
 
@@ -65,14 +66,16 @@ int GetCapturedModTemplates(void** outPtrs, int maxCount);
 // Returns the created character or nullptr.
 void* CallFactoryDirect(void* factory, void* requestStruct);
 
-// Call RootObjectFactory::create — the high-level dispatcher that builds a request
-// struct internally from a GameData* pointer. Bypasses stale-pointer struct clone issue.
-// Takes (factory, GameData*) and returns created character, or nullptr.
-void* CallFactoryCreate(void* factory, void* gameData);
+// Call RootObjectFactory::createRandomCharacter (RVA 0x5836E0) with the GameData*
+// template as a constraint hint. Internally invokes the native 7-arg function:
+//   (factory, faction, Vector3 pos, container=null, gameData, building=null, scale=1.0).
+// Faction is resolved from the early-captured player faction (set during savegame load)
+// or the last-seen fallback faction. Returns the created character or nullptr.
+void* CallFactoryCreate(void* factory, void* gameData, float x, float y, float z);
 
-// Call RootObjectFactory::createRandomChar — creates a random NPC character.
-// Takes just factory pointer. Last-resort fallback when templates fail.
-void* CallFactoryCreateRandom(void* factory);
+// Same native call with gameData=nullptr → fully random NPC. Position is required
+// because the native signature passes Vector3 by value.
+void* CallFactoryCreateRandom(void* factory, float x, float y, float z);
 
 // Get the fallback faction pointer (last valid faction seen from any character creation).
 // Used by SEH_FixUpFaction_Core when primary character faction isn't available.
@@ -86,11 +89,74 @@ uintptr_t GetFallbackFaction();
 // Validates the pointer before returning; returns 0 if stale.
 uintptr_t GetEarlyPlayerFaction();
 
-// Re-validate stored faction pointers. If all are stale (e.g., after a save/load),
-// re-scans the local squad to discover a fresh valid faction. Prioritizes
-// characters whose name matches config playerName and factions with isPlayerFaction.
-// Returns true if a valid faction is available after the call.
-bool RevalidateFaction();
+// Externally publish a faction observation. Safe to call from any thread.
+// Used by ai_hooks::Hook_AICreate after the CharBody::create 6-arg fix —
+// the 5th arg is a Character*, and Character.owner @ +0x10 is the Faction.
+// Without this path the spawn pipeline starves while waiting for a faction
+// that the disabled CharacterCreate hook will never produce.
+//
+// Both setters silently drop addresses that fail IsHeapResidentPtr — Kenshi
+// can leave Character.owner pointing into the EXE's static mod-data region
+// during the early phase of CharBody::create; that pointer is technically
+// non-null but createRandomCharacter SEHs when it tries to use it.
+void PublishFallbackFaction(uintptr_t faction);
+void PublishEarlyPlayerFaction(uintptr_t faction);
+
+// True if `val` is in user-mode VA space and properly aligned. Looser than
+// IsHeapResidentPtr — accepts pointers inside the game module's image range,
+// because some Kenshi globals (e.g. Faction objects) live in the writable
+// .data section. Use this when you need a validity check but the pointer
+// might legitimately point at module-mapped writable memory.
+inline bool IsValidVAPtr(uintptr_t val) {
+    if (val < 0x10000 || val >= 0x00007FFFFFFFFFFFull) return false;
+    if ((val & 0x7) != 0) return false;
+    return true;
+}
+
+// True if `val` is in user-mode VA space, properly aligned, AND outside the
+// game module's image range. The image-range check is what catches static
+// mod-data masquerading as a heap pointer (e.g. 0x7FF6510CBC08 in the
+// 12:57 test). Inlined header definition so every translation unit has it.
+inline bool IsHeapResidentPtr(uintptr_t val) {
+    if (val < 0x10000 || val >= 0x00007FFFFFFFFFFFull) return false;
+    if ((val & 0x7) != 0) return false;
+    HMODULE mod = ::GetModuleHandleW(nullptr);
+    if (!mod) return true; // can't check; trust the alignment/range tests
+    auto modBase = reinterpret_cast<uintptr_t>(mod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
+    auto* nt  = reinterpret_cast<IMAGE_NT_HEADERS*>(modBase + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return true;
+    uintptr_t modEnd = modBase + nt->OptionalHeader.SizeOfImage;
+    return !(val >= modBase && val < modEnd);
+}
+
+// ── Donor character pool ──
+// Hook_AICreate captures every observed Character* into a small ring so the
+// spawn pipeline can repurpose them for remote characters instead of calling
+// Kenshi's broken createRandomCharacter.
+// Thread-safe; no allocations on the hot path.
+void RecordDonorCharacter(void* character);
+// Returns one donor (round-robin) or nullptr if pool empty.
+void* PickDonorCharacter();
+// Returns one UNUSED donor (skip-already-claimed semantics). Caller is
+// expected to immediately ClaimDonorCharacter() on the result. Returns
+// nullptr if every donor is already claimed.
+void* PickFreshDonorCharacter();
+// Mark a donor as claimed — once claimed it will not be picked again.
+// The repurposed character is now logically "owned" by the spawn pipeline.
+void  ClaimDonorCharacter(void* character);
+bool  IsDonorClaimed(void* character);
+// Returns the count of donors currently in the pool (including claimed ones).
+int   DonorPoolSize();
+// Returns the count of donors not yet claimed.
+int   DonorPoolFree();
+
+// ── Tick-driven GameWorld faction harvester ──
+// Walks GameWorld+0x0888 character list, picks the first Character whose
+// +0x10 owner passes IsHeapResidentPtr, publishes it as the spawn pipeline's
+// faction. Cheap; safe to call every tick — bails out fast once a faction
+// has already been published.
+void HarvestFactionFromGameWorld();
 
 // Get the detected GameData pointer offset within the factory request struct.
 // Returns -1 if not yet detected.
@@ -99,5 +165,12 @@ int GetGameDataOffsetInStruct();
 // Get the detected position offset within the factory request struct.
 // Returns -1 if not yet detected.
 int GetPositionOffsetInStruct();
+
+// Process any pending hook-state changes that were queued from inside a hook
+// callback. Calling HookManager::Disable() while we are still on the hook's
+// own call stack puts the toggle on the same call frame as the active wrapper
+// invocation, which is fragile under racy thread scheduling. This poll runs
+// from a safe context (game tick / main loop) so the toggle happens cleanly.
+void PollDeferredHookState();
 
 } // namespace kmp::entity_hooks

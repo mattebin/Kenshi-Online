@@ -646,8 +646,11 @@ using BuyItemFn           = void(__fastcall*)(void* buyer, void* seller, void* i
 // Faction / Diplomacy
 using FactionRelationFn   = void(__fastcall*)(void* factionA, void* factionB, float relation);
 
-// AI
-using AICreateFn          = void*(__fastcall*)(void* character, void* faction);
+// AI — labeled "AICreate" historically; actually CharBody::create at RVA 0x621460.
+// 6-arg signature; see ai_hooks.cpp for the full bug/fix background.
+using AICreateFn          = void*(__fastcall*)(void* charBody, void* charMovement,
+                                               void* ai, void* animationClass,
+                                               void* character, void* charStats);
 using AIPackagesFn        = void(__fastcall*)(void* character, void* aiPackage);
 
 // Turret

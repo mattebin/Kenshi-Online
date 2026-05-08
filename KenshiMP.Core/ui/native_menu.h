@@ -56,6 +56,7 @@ private:
     void OnSettingsSaved();
     void OnServerBrowserClicked();
     void OnRefreshServersClicked();
+    bool CanUseJoinFlow(const char* action);
 
     // Attempt to resolve all widget pointers after layout is loaded
     bool CacheWidgets();

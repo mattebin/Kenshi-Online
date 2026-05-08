@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 // Declared in core.cpp — updated here so VEH crash handler shows which create# crashed
@@ -27,6 +28,29 @@ namespace kmp::entity_hooks {
 // ── Function Types ──
 using CharacterCreateFn = void*(__fastcall*)(void* factory, void* templateData);
 using CharacterDestroyFn = void(__fastcall*)(void* character);
+
+// Ogre::Vector3 POD layout used for native ABI marshalling.
+// MSVC x64: aggregates >8B and not 1/2/4/8/16-byte sized are passed by hidden
+// pointer (caller-allocated copy). Vector3 (12B) → caller stack copy, register/stack
+// holds address. The compiler emits this for us when we declare the param by value.
+struct OgreVector3 { float x, y, z; };
+
+// RootObjectFactory::createRandomCharacter @ RVA 0x5836E0 (master_index #4767).
+// Real signature (BINDIFF_EXACT): (Faction*, Vector3 by-value, RootObjectContainer*,
+//                                  GameData*, Building*, float)
+// + implicit `this`. Total 7 params for __fastcall.
+//
+// HISTORICAL BUG (fixed 2026-05-07): the previous typedef declared only 2 params
+// → calling convention dropped R8/R9/stack args as garbage → factory dereferenced
+// uninitialized RootObjectContainer* → AV → STATUS_HEAP_CORRUPTION cascade.
+using FactoryCreateRandomCharacterFn = void* (__fastcall*)(
+    void* factory,         // RCX (this)
+    void* faction,         // RDX
+    OgreVector3 pos,       // R8 → hidden ptr to stack copy (12B aggregate)
+    void* container,       // R9
+    void* gameData,        // [rsp+0x28]
+    void* building,        // [rsp+0x30]
+    float scale);          // [rsp+0x38]
 
 // Store the ORIGINAL function addresses (NOT trampolines)
 static uintptr_t s_createTargetAddr = 0;
@@ -82,12 +106,22 @@ static int s_gameDataDetectAttempts = 0;
 // ── Direct spawn bypass ──
 static std::atomic<bool> s_directSpawnBypass{false};
 
+// ── Deferred CharacterCreate-disable request ──
+// Set by Hook_CharacterCreate after the first capture. Polled from
+// PollDeferredHookState() which runs from OnGameTick (a safe context, not
+// nested inside the MovRaxRsp wrapper). Disabling the hook from inside its
+// own call stack works *most* of the time but races with concurrent hook
+// firings on other threads — by the time the bypass byte flips, our exit
+// path is still using the wrapper's per-hook globals.
+static std::atomic<bool> s_pendingCreateDisable{false};
+
 // ── Higher-level factory functions (resolved from known RVAs) ──
 // RootObjectFactory::create (0x583400) — dispatches to process() but builds request struct internally.
 // Takes (factory, GameData*), not a raw request struct. This bypasses the stale-pointer problem.
 static CharacterCreateFn s_factoryCreate = nullptr;
-// RootObjectFactory::createRandomChar (0x5836E0) — creates a random NPC character.
-static CharacterCreateFn s_factoryCreateRandomChar = nullptr;
+// RootObjectFactory::createRandomCharacter (0x5836E0) — creates a procedural NPC.
+// Typed against the REAL 7-arg signature; calling as 2-arg corrupts the heap.
+static FactoryCreateRandomCharacterFn s_factoryCreateRandomChar = nullptr;
 
 // ── In-place replay tracking ──
 static std::atomic<int> s_inPlaceSpawnCount{0};
@@ -477,27 +511,37 @@ static SEH_EntityInfo SEH_ReadAndRegisterEntity(void* character, void* templateD
     __try {
         auto& coreRef = Core::Get();
         info.charData = SEH_ReadCharacterData(character);
+        OutputDebugStringA("KMP: SEH_ReadAndRegisterEntity post-ReadCharacterData\n");
         if (!info.charData.valid) return info;
         if (info.charData.position.x == 0.f && info.charData.position.y == 0.f && info.charData.position.z == 0.f) return info;
 
         // ── Faction matching: only register entities that belong to the LOCAL player ──
-        // Priority chain: PlayerController → elected faction (multi-source voting) → fallback
+        // Priority chain: PlayerController → early loading capture (squad leader at load
+        // time) → runtime NPC fallback. The fallback can be ANY NPC the engine has spawned
+        // recently, so we deliberately do NOT promote it to PlayerController as the local
+        // faction — doing so previously locked the local player to e.g. a Slavemonger
+        // faction encountered post-zone-load, breaking every "mine vs theirs" check
+        // afterwards. The fallback is still consulted for the per-entity equality filter
+        // below so we can keep registering anything that happens to share that faction
+        // until the loading capture fires, but the authoritative slot only gets written
+        // from the loading capture (which is locked to the player's squad leader).
         uintptr_t playerFaction = coreRef.GetPlayerController().GetLocalFactionPtr();
+        bool earlyCaptureLocked = s_earlyFactionLocked.load(std::memory_order_relaxed);
 
-        if (playerFaction == 0) {
-            // Use faction elected during savegame loading (multi-source voting with name match)
+        if (playerFaction == 0 && earlyCaptureLocked) {
             playerFaction = s_earlyPlayerFaction.load(std::memory_order_relaxed);
-        }
-        if (playerFaction == 0) {
-            // Last resort: any valid faction seen from recent creates
-            playerFaction = s_fallbackFaction.load(std::memory_order_relaxed);
+            if (playerFaction != 0) {
+                const_cast<PlayerController&>(coreRef.GetPlayerController())
+                    .SetLocalFactionPtr(playerFaction);
+                spdlog::info("SEH_ReadAndRegisterEntity: Set local faction 0x{:X} "
+                             "from early loading capture (squad leader)", playerFaction);
+            }
         }
 
-        // If we found a faction from loading/fallback but PlayerController doesn't have it, set it
-        if (playerFaction != 0 && coreRef.GetPlayerController().GetLocalFactionPtr() == 0) {
-            const_cast<PlayerController&>(coreRef.GetPlayerController())
-                .SetLocalFactionPtr(playerFaction);
-            spdlog::info("SEH_ReadAndRegisterEntity: Set local faction 0x{:X} from early/fallback capture", playerFaction);
+        if (playerFaction == 0) {
+            // Best-effort filter for runtime registrations until the loading capture
+            // arrives. NOT promoted to PlayerController.
+            playerFaction = s_fallbackFaction.load(std::memory_order_relaxed);
         }
 
         // Must have a player faction AND entity must match it — prevents registering random NPCs/buildings
@@ -676,130 +720,76 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
     // the original function. Safe here because loading creates are sequential
     // (not reentrant), so the wrapper's global slots don't conflict.
     if (!coreRef.IsConnected()) {
-        // Capture pre-call data + factory from the FIRST call, then accumulate
-        // faction votes from the first FACTION_SCAN_WINDOW characters to handle
-        // the case where the first character is a hired NPC, not the squad leader.
-        // After the scan window closes, elect the best faction and DISABLE the hook.
-        if (!s_loadingCapturesDone) {
-            // Pre-call data + factory: capture once from the first character
-            if (templateData && !s_havePreCallData) {
-                if (SEH_MemcpySafe(s_preCallStruct, templateData, REQUEST_STRUCT_SIZE)) {
-                    s_havePreCallData = true;
-                    coreRef.GetSpawnManager().SetPreCallData(
-                        s_preCallStruct, REQUEST_STRUCT_SIZE,
-                        reinterpret_cast<uintptr_t>(templateData));
-                    coreRef.GetSpawnManager().SetSavedRequestStruct(
-                        s_preCallStruct, REQUEST_STRUCT_SIZE);
-                }
-            }
-            if (factory && !coreRef.GetSpawnManager().IsReady()) {
-                coreRef.GetSpawnManager().SetFactory(factory);
-            }
-
+        // ── SAFE-MODE: pure passthrough on the loading branch ──
+        // Empirical finding (KNOWN_ISSUES.md): the loading-branch first capture
+        // *also* triggers the silent termination. Default ON to keep sessions
+        // alive; flip safeModeFirstConnectedCreate=false to bypass and
+        // reproduce the underlying fault when investigating root cause.
+        if (Core::Get().GetConfig().safeModeFirstConnectedCreate) {
+            spdlog::info("entity_hooks: SAFE-MODE loading branch — pure passthrough "
+                         "(createNum={}, td=0x{:X})",
+                         createNum, reinterpret_cast<uintptr_t>(templateData));
+            spdlog::default_logger()->flush();
             void* r = CallOriginalCreate(factory, templateData);
-
-            // ── Multi-source faction voting ──
-            // Instead of trusting only the first character, accumulate votes
-            // from the first FACTION_SCAN_WINDOW characters. A character whose
-            // name matches the config playerName gets a large bonus.
-            if (r && !s_factionVotingDone) {
-                s_factionScanCount++;
-
-                uintptr_t fac = SEH_ReadFaction(r);
-                if (fac != 0) {
-                    UpdateFallbackFaction(fac);
-
-                    // Check if this character's name matches the config player name
-                    bool isNameMatch = false;
-                    char charName[64] = {};
-                    int nameLen = SEH_ReadCharName(r, charName, sizeof(charName));
-                    if (nameLen > 0) {
-                        const std::string& cfgName = coreRef.GetConfig().playerName;
-                        if (cfgName.size() > 0 && cfgName.size() == (size_t)nameLen &&
-                            _strnicmp(charName, cfgName.c_str(), nameLen) == 0) {
-                            isNameMatch = true;
-                        }
-                    }
-
-                    // Also check the isPlayerFaction flag on the faction object
-                    bool isFlaggedPlayer = SEH_CheckIsPlayerFaction(fac);
-                    if (isFlaggedPlayer) {
-                        // isPlayerFaction flag is a strong signal — boost score significantly
-                        RecordFactionVote(fac, false); // Extra vote
-                        RecordFactionVote(fac, false); // Extra vote (total +3 with the main one below)
-                    }
-
-                    RecordFactionVote(fac, isNameMatch);
-
-                    if (isNameMatch) {
-                        spdlog::info("entity_hooks: Loading char #{} NAME MATCH '{}' faction=0x{:X}",
-                                     s_factionScanCount, charName, fac);
-                    }
-                }
-
-                // Feed SpawnManager the first character with valid data
-                if (s_factionScanCount == 1) {
-                    SEH_FeedSpawnManager(factory, templateData, r);
-                }
-
-                // After scanning enough characters OR if a name match gave us certainty,
-                // elect the best faction and lock it.
-                bool haveNameMatch = false;
-                for (int i = 0; i < s_factionCandidateCount; i++) {
-                    if (s_factionCandidates[i].nameMatched) { haveNameMatch = true; break; }
-                }
-
-                if (s_factionScanCount >= FACTION_SCAN_WINDOW || haveNameMatch) {
-                    uintptr_t bestFac = ElectBestFaction();
-                    if (bestFac != 0) {
-                        s_earlyPlayerFaction.store(bestFac, std::memory_order_relaxed);
-                        s_earlyFactionLocked.store(true, std::memory_order_relaxed);
-                        spdlog::info("entity_hooks: Faction ELECTED 0x{:X} after {} chars ({} candidates, nameMatch={})",
-                                     bestFac, s_factionScanCount, s_factionCandidateCount, haveNameMatch);
-                        // Log all candidates for diagnostics
-                        for (int i = 0; i < s_factionCandidateCount; i++) {
-                            spdlog::info("  candidate[{}]: 0x{:X} score={} nameMatch={}",
-                                         i, s_factionCandidates[i].ptr, s_factionCandidates[i].score,
-                                         s_factionCandidates[i].nameMatched);
-                        }
-                    }
-                    s_factionVotingDone = true;
-                }
-            }
-
-            // DISABLE hook once we have pre-call data + factory AND faction voting is done.
-            // Safety: also disable after 2x the scan window to prevent hanging in the hook
-            // if characters consistently fail to create or have no factions.
-            bool safetyTimeout = (createNum > FACTION_SCAN_WINDOW * 2 + 2);
-            if (safetyTimeout && !s_factionVotingDone) {
-                // Force election with whatever we have
-                uintptr_t bestFac = ElectBestFaction();
-                if (bestFac != 0) {
-                    s_earlyPlayerFaction.store(bestFac, std::memory_order_relaxed);
-                    s_earlyFactionLocked.store(true, std::memory_order_relaxed);
-                    spdlog::warn("entity_hooks: Faction SAFETY ELECT 0x{:X} after {} creates (voting stalled)",
-                                 bestFac, createNum);
-                }
-                s_factionVotingDone = true;
-            }
-
-            // Switch to loading passthrough for remaining loads.
-            // This prevents 100+ calls through full hook body during savegame load.
-            if (s_havePreCallData && s_savedFactory && s_factionVotingDone) {
-                s_loadingCapturesDone = true;
-                s_loadingPassthrough.store(true, std::memory_order_release);
-                OutputDebugStringA("KMP: Loading passthrough re-enabled after faction voting\n");
-            }
-
+            spdlog::info("entity_hooks: SAFE-MODE loading branch returning r=0x{:X}",
+                         reinterpret_cast<uintptr_t>(r));
+            spdlog::default_logger()->flush();
             s_hookDepth--;
             return r;
+        }
+        // SAFE-MODE disabled — fall through to the (legacy GOG-baseline)
+        // capture path below. Triggers the silent termination on Steam, kept
+        // for upstream maintainer investigation.
+
+        // ── ORIGINAL CAPTURE PATH — runs only when SAFE-MODE is disabled ──
+        // This is the upstream-baseline capture flow (set factory pointer,
+        // copy the request struct for in-place replay, read the player's
+        // faction off the first character). Triggers a Kenshi-side fault on
+        // Steam soon after the first capture; useful for upstream
+        // maintainers reproducing the issue with a debugger attached.
+        {
+            if (!s_loadingCapturesDone) {
+                if (templateData && !s_havePreCallData) {
+                    if (SEH_MemcpySafe(s_preCallStruct, templateData, REQUEST_STRUCT_SIZE)) {
+                        s_havePreCallData = true;
+                        coreRef.GetSpawnManager().SetPreCallData(
+                            s_preCallStruct, REQUEST_STRUCT_SIZE,
+                            reinterpret_cast<uintptr_t>(templateData));
+                        coreRef.GetSpawnManager().SetSavedRequestStruct(
+                            s_preCallStruct, REQUEST_STRUCT_SIZE);
+                    }
+                }
+                if (factory && !coreRef.GetSpawnManager().IsReady()) {
+                    coreRef.GetSpawnManager().SetFactory(factory);
+                }
+
+                void* origR = CallOriginalCreate(factory, templateData);
+
+                if (origR) {
+                    uintptr_t fac = SEH_ReadFaction(origR);
+                    if (fac != 0) {
+                        s_earlyPlayerFaction.store(fac, std::memory_order_relaxed);
+                        s_earlyFactionLocked.store(true, std::memory_order_relaxed);
+                        UpdateFallbackFaction(fac);
+                    }
+                    SEH_FeedSpawnManager(factory, templateData, origR);
+                }
+
+                if (s_havePreCallData && s_savedFactory) {
+                    s_loadingCapturesDone = true;
+                    s_pendingCreateDisable.store(true, std::memory_order_release);
+                }
+
+                s_hookDepth--;
+                return origR;
+            }
         }
 
         // If we reach here, captures are done but hook is somehow still active.
         // Use CallOriginalCreate which prefers the MovRaxRsp wrapper (correct RSP).
-        void* r = CallOriginalCreate(factory, templateData);
+        void* tailR = CallOriginalCreate(factory, templateData);
         s_hookDepth--;
-        return r;
+        return tailR;
     }
 
     // Connected create counter (minimal logging to avoid heap pressure in MovRaxRsp context)
@@ -808,6 +798,34 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
         char dbgBuf[128];
         sprintf_s(dbgBuf, "KMP: Connected CharacterCreate #%d\n", connNum);
         OutputDebugStringA(dbgBuf);
+    }
+
+    // ── SAFETY: pure passthrough on the first connected create ──
+    // Empirical finding (KNOWN_ISSUES.md): the first connected CharacterCreate
+    // returns cleanly from our detour but Kenshi terminates with no exception
+    // record within milliseconds. Diagnostic markers proved every line of our
+    // post-spawn work executes; the fault is therefore in either the wrapper's
+    // exit assembly or Kenshi's caller of CharacterCreate immediately after we
+    // return — most likely heap corruption tripping HeapEnableTerminationOnCorruption,
+    // which bypasses VEH/UEF/CRT trip handlers.
+    //
+    // Default ON (safeModeFirstConnectedCreate=true): skip all post-spawn
+    // capture work for the first connected create — no struct copy, no offset
+    // detection, no spawn manager feed, no entity registration. Just
+    // CallOriginalCreate and return. We lose capture data for that one NPC
+    // but the session stays alive.
+    //
+    // Flip to false to bypass the workaround and reproduce the underlying
+    // fault — useful when investigating the root cause with a debugger.
+    if (connNum == 1 && Core::Get().GetConfig().safeModeFirstConnectedCreate) {
+        spdlog::info("entity_hooks: SAFE-MODE first connected create — pure passthrough (workaround)");
+        spdlog::default_logger()->flush();
+        void* r = CallOriginalCreate(factory, templateData);
+        spdlog::info("entity_hooks: SAFE-MODE first connected create returning r=0x{:X}",
+                     reinterpret_cast<uintptr_t>(r));
+        spdlog::default_logger()->flush();
+        s_hookDepth--;
+        return r;
     }
 
     // Rapid-fire detection: if >5 creates in 100ms, go lightweight (zone load burst)
@@ -972,15 +990,35 @@ static void* __fastcall Hook_CharacterCreate(void* factory, void* templateData) 
     // and SEH_ConnectedPostProcess would re-register as LOCAL and send a
     // spurious C2S_EntitySpawnReq to the server.
     if (!wasHijacked) {
+        // Diagnostic markers for the silent-termination on first connected
+        // CharacterCreate. Each line is followed by an explicit flush so we
+        // know exactly which boundary was reached when Kenshi terminates.
+        spdlog::info("entity_hooks: pre-FeedSpawnManager (createNum={}, char=0x{:X}, td=0x{:X})",
+                     s_connectedCreateNum.load(),
+                     reinterpret_cast<uintptr_t>(character),
+                     reinterpret_cast<uintptr_t>(templateData));
+        spdlog::default_logger()->flush();
+
         // Feed SpawnManager
         SEH_FeedSpawnManager(factory, templateData, character);
 
+        spdlog::info("entity_hooks: post-FeedSpawnManager returned (char=0x{:X})",
+                     reinterpret_cast<uintptr_t>(character));
+        spdlog::default_logger()->flush();
+
         // Register player faction characters in EntityRegistry (SEH-protected, no C++ objects)
         if (coreRef.IsGameLoaded()) {
+            spdlog::info("entity_hooks: pre-ConnectedPostProcess");
+            spdlog::default_logger()->flush();
             SEH_ConnectedPostProcess(character, templateData, s_connectedCreateNum);
+            spdlog::info("entity_hooks: post-ConnectedPostProcess (clean exit)");
+            spdlog::default_logger()->flush();
         }
     }
 
+    spdlog::info("entity_hooks: detour exit (createNum={}, hookDepth={}, wasHijacked={})",
+                 s_connectedCreateNum.load(), s_hookDepth, wasHijacked);
+    spdlog::default_logger()->flush();
     s_hookDepth--;
     return character;
 }
@@ -1133,11 +1171,11 @@ bool Install() {
                          createAddr);
         }
 
-        // RootObjectFactory::createRandomChar — creates random NPC character.
+        // RootObjectFactory::createRandomCharacter — creates random NPC character.
         uintptr_t createRandomAddr = modBase + 0x5836E0;
         if (validateFactoryFunc(createRandomAddr, "CreateRandomChar")) {
-            s_factoryCreateRandomChar = reinterpret_cast<CharacterCreateFn>(createRandomAddr);
-            spdlog::info("entity_hooks: CreateRandomChar VALIDATED at 0x{:X}", createRandomAddr);
+            s_factoryCreateRandomChar = reinterpret_cast<FactoryCreateRandomCharacterFn>(createRandomAddr);
+            spdlog::info("entity_hooks: CreateRandomChar VALIDATED at 0x{:X} (7-arg signature)", createRandomAddr);
         } else {
             spdlog::warn("entity_hooks: CreateRandomChar at 0x{:X} FAILED validation — "
                          "random char fallback disabled, will rely on NPC hijack only",
@@ -1159,6 +1197,29 @@ bool Install() {
                   (unsigned long long)s_createTargetAddr);
         OutputDebugStringA(buf);
 
+        // SAFE-PROCESS GATE.  When `enableCharacterCreateHook` is false we
+        // skip patching Kenshi's CharacterCreate prologue entirely.  Past
+        // test runs documented in re_kenshi 2/manual_findings showed that
+        // even a pure-passthrough trampoline destabilises Kenshi after
+        // connect — back-to-back PIDs (22468, 29744 on 2026-05-06) died
+        // silently via __fastfail/TerminateProcess, bypassing every
+        // user-mode handler.  Disabling at the bypass-flag level wasn't
+        // enough because the prologue was still patched and the
+        // MovRaxRsp wrapper's mov rax,rsp shim still ran on every call.
+        // Skipping InstallAt avoids touching the prologue at all, which
+        // empirically eliminates that crash class.
+        //
+        // Trade-off: with the hook off, factory pointer capture has to
+        // come from a different path (vtable scan, polling, etc.) — see
+        // the spawn_manager `TryDeriveFactoryFromGameWorld` helper.  The
+        // spawn pipeline runs in a degraded state until that lands.
+        if (!core.GetConfig().enableCharacterCreateHook) {
+            spdlog::info("entity_hooks: CharacterCreate prologue NOT patched "
+                         "(enableCharacterCreateHook=false) — safe-process mode");
+            OutputDebugStringA(
+                "KMP: entity_hooks — CharacterCreate prologue NOT patched "
+                "(safe-process mode)\n");
+        } else
         if (!hookMgr.InstallAt("CharacterCreate",
                                s_createTargetAddr,
                                &Hook_CharacterCreate, &s_origCreate)) {
@@ -1221,6 +1282,34 @@ void Uninstall() {
     }
 }
 
+// Leaf SEH wrapper — must contain no C++ objects with destructors so the
+// compiler accepts __try (otherwise C2712). The std::string is built by the
+// caller and passed by reference so its destructor is anchored outside.
+static int SEH_DisableHook(const std::string& name, bool* outOk) {
+    __try {
+        *outOk = HookManager::Get().Disable(name);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *outOk = false;
+        return static_cast<int>(GetExceptionCode());
+    }
+}
+
+void PollDeferredHookState() {
+    if (s_pendingCreateDisable.exchange(false, std::memory_order_acq_rel)) {
+        spdlog::info("entity_hooks: PollDeferredHookState — disabling CharacterCreate "
+                     "from safe context");
+        const std::string hookName = "CharacterCreate";
+        bool ok = false;
+        int sehCode = SEH_DisableHook(hookName, &ok);
+        if (sehCode != 0) {
+            spdlog::error("entity_hooks: Disable('CharacterCreate') threw SEH 0x{:08X}",
+                          static_cast<unsigned int>(sehCode));
+        }
+        spdlog::info("entity_hooks: PollDeferredHookState — Disable returned {}", ok);
+    }
+}
+
 void ResumeForNetwork() {
     // Reset per-player spawn caps for new connection
     {
@@ -1254,30 +1343,21 @@ void ResumeForNetwork() {
     s_earlyFactionLocked.store(false);
     s_earlyPlayerFaction.store(0);
 
-    // Reset multi-source faction voting state for next load
-    memset(s_factionCandidates, 0, sizeof(s_factionCandidates));
-    s_factionCandidateCount = 0;
-    s_factionScanCount = 0;
-    s_factionVotingDone = false;
-
-    // Disable loading passthrough — full hook body active for multiplayer.
-    // At this point loading is complete — only single/few runtime spawns will
-    // trigger the hook (new zone NPCs, remote player injection). MovRaxRsp
-    // handles single calls fine; it's only the 130+ loading burst that uses
-    // the lightweight passthrough path.
-    s_loadingPassthrough.store(false, std::memory_order_release);
-
-    // Ensure hook is enabled (should already be, but re-enable in case
-    // the loading capture code path disabled it via HookManager::Disable)
-    if (HookManager::Get().Enable("CharacterCreate")) {
-        spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate hook ENABLED (full mode)");
+    // CharacterCreate hook re-enable on connect — gated by the same config
+    // flag as Core::OnGameLoaded above. Default OFF; flip to test the spawn
+    // pipeline. See KNOWN_ISSUES.md for the connected-intercept fault.
+    if (Core::Get().GetConfig().enableCharacterCreateHook) {
+        if (HookManager::Get().Enable("CharacterCreate")) {
+            spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate ENABLED "
+                         "(experimental, earlyFaction=0x{:X})", earlyFac);
+        } else {
+            spdlog::warn("entity_hooks: ResumeForNetwork — Enable() returned false");
+        }
     } else {
-        spdlog::warn("entity_hooks: ResumeForNetwork — CharacterCreate Enable() returned false");
+        spdlog::info("entity_hooks: ResumeForNetwork — CharacterCreate left bypassed "
+                     "(default; earlyFaction=0x{:X}, fallback=0x{:X})",
+                     earlyFac, s_fallbackFaction.load(std::memory_order_relaxed));
     }
-
-    spdlog::info("entity_hooks: ResumeForNetwork — hook active for runtime spawns "
-                 "(earlyFaction=0x{:X}, fallback=0x{:X})", earlyFac,
-                 s_fallbackFaction.load(std::memory_order_relaxed));
 }
 
 void SuspendForDisconnect() {
@@ -1342,47 +1422,89 @@ void* CallFactoryDirect(void* factory, void* requestStruct) {
     return result;
 }
 
-void* CallFactoryCreate(void* factory, void* gameData) {
-    // Call RootObjectFactory::create — the high-level dispatcher that builds
-    // a proper request struct from a GameData* and calls process() internally.
-    // This bypasses the stale-pointer problem entirely because create()
-    // constructs FRESH internal pointers (faction, squad, AI, etc.).
-    //
-    // NOT hooked by MinHook, so no trampoline/stub issues. The CPU naturally
-    // sets RAX = RSP after CALL pushes the return address, which is what the
-    // mov rax, rsp prologue expects.
-    if (!s_factoryCreate) {
-        spdlog::warn("entity_hooks: CallFactoryCreate — function not resolved");
+// Resolve a Faction* the engine will accept. Order: explicit param → early
+// player faction → fallback faction. Returns nullptr if no heap-resident
+// faction has been observed yet — in which case we defer rather than passing
+// a static-data or null pointer to createRandomCharacter (which SEHs).
+static void* ResolveSpawnFaction(void* explicitFaction) {
+    if (explicitFaction && IsHeapResidentPtr(reinterpret_cast<uintptr_t>(explicitFaction))) {
+        return explicitFaction;
+    }
+    uintptr_t f = GetEarlyPlayerFaction();
+    if (!IsHeapResidentPtr(f)) f = GetFallbackFaction();
+    if (!IsHeapResidentPtr(f)) return nullptr;
+    return reinterpret_cast<void*>(f);
+}
+
+void* CallFactoryCreate(void* factory, void* gameData, float x, float y, float z) {
+    // Single native call: RootObjectFactory::createRandomCharacter @ RVA 0x5836E0
+    // with its REAL 7-arg signature.
+    // Why createRandomCharacter and not create():
+    //   - create() takes 11 explicit args (GameData*, Vector3, bool, Faction*,
+    //     Quaternion, FactoryCallbackInterface*, RootObjectContainer*,
+    //     GameSaveState*, bool, Building*, float). Two of those (callback,
+    //     container) are non-trivial — passing nullptr for them risks the
+    //     factory walking through them.
+    //   - createRandomCharacter takes 6 explicit args. We have all of them.
+    //     The GameData* arg constrains the "random" choice to our CHARACTER
+    //     template (Wanderer/Drifter), so spawning is still deterministic-ish.
+    if (!s_factoryCreateRandomChar) {
+        spdlog::warn("entity_hooks: CallFactoryCreate — createRandomCharacter not resolved");
         return nullptr;
     }
+    void* faction = ResolveSpawnFaction(nullptr);
+    if (!faction) {
+        spdlog::warn("entity_hooks: CallFactoryCreate — no faction available yet "
+                     "(GetEarlyPlayerFaction=0, GetFallbackFaction=0); deferring");
+        return nullptr;
+    }
+    if (!factory) return nullptr;
 
+    OgreVector3 pos { x, y, z };
     s_directSpawnBypass.store(true, std::memory_order_release);
     void* result = nullptr;
     __try {
-        result = s_factoryCreate(factory, gameData);
+        result = s_factoryCreateRandomChar(
+            factory,
+            faction,
+            pos,
+            nullptr,        // RootObjectContainer* — null = global container
+            gameData,       // GameData* template (Wanderer/Drifter)
+            nullptr,        // Building* — not housed
+            1.0f);          // scale
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static int s_crashCount = 0;
         if (++s_crashCount <= 5) {
-            spdlog::error("entity_hooks: CallFactoryCreate CRASHED (SEH caught, attempt {})", s_crashCount);
+            spdlog::error("entity_hooks: CallFactoryCreate CRASHED (SEH caught, attempt {}) "
+                          "factory=0x{:X} faction=0x{:X} gd=0x{:X} pos=({:.1f},{:.1f},{:.1f})",
+                          s_crashCount,
+                          reinterpret_cast<uintptr_t>(factory),
+                          reinterpret_cast<uintptr_t>(faction),
+                          reinterpret_cast<uintptr_t>(gameData), x, y, z);
         }
     }
     s_directSpawnBypass.store(false, std::memory_order_release);
     return result;
 }
 
-void* CallFactoryCreateRandom(void* factory) {
-    // Call RootObjectFactory::createRandomChar — creates a random NPC.
-    // Takes just the factory pointer (RCX=factory, RDX=0).
-    // Useful as last-resort when mod templates fail.
+void* CallFactoryCreateRandom(void* factory, float x, float y, float z) {
+    // Same native call as CallFactoryCreate, but no GameData hint → fully random.
     if (!s_factoryCreateRandomChar) {
         spdlog::warn("entity_hooks: CallFactoryCreateRandom — function not resolved");
         return nullptr;
     }
+    void* faction = ResolveSpawnFaction(nullptr);
+    if (!faction) {
+        spdlog::warn("entity_hooks: CallFactoryCreateRandom — no faction available; deferring");
+        return nullptr;
+    }
+    if (!factory) return nullptr;
 
+    OgreVector3 pos { x, y, z };
     s_directSpawnBypass.store(true, std::memory_order_release);
     void* result = nullptr;
     __try {
-        result = s_factoryCreateRandomChar(factory, nullptr);
+        result = s_factoryCreateRandomChar(factory, faction, pos, nullptr, nullptr, nullptr, 1.0f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static int s_crashCount = 0;
         if (++s_crashCount <= 5) {
@@ -1527,6 +1649,153 @@ bool RevalidateFaction() {
 
     spdlog::warn("entity_hooks: RevalidateFaction — FAILED to find any valid faction");
     return false;
+}
+
+void PublishFallbackFaction(uintptr_t faction) {
+    // Use IsValidVAPtr (NOT IsHeapResidentPtr): Kenshi's Faction objects live
+    // in the EXE's writable .data section, so they appear in the module range
+    // but ARE valid mutable Faction* values. Filtering them out as "static
+    // data" was wrong and starved the spawn pipeline (see test log 14:25).
+    if (!IsValidVAPtr(faction)) return;
+    uintptr_t prev = s_fallbackFaction.exchange(faction, std::memory_order_relaxed);
+    if (prev != faction) {
+        spdlog::info("entity_hooks: fallback faction published 0x{:X} (was 0x{:X})",
+                     faction, prev);
+    }
+}
+
+void PublishEarlyPlayerFaction(uintptr_t faction) {
+    if (!IsValidVAPtr(faction)) return;
+    uintptr_t expected = 0;
+    if (s_earlyPlayerFaction.compare_exchange_strong(expected, faction,
+                                                     std::memory_order_relaxed)) {
+        spdlog::info("entity_hooks: early player faction published 0x{:X}", faction);
+    }
+}
+
+// ── Donor character pool ──
+// Bounded ring buffer of every Character* observed by Hook_AICreate. The
+// spawn pipeline repurposes these (real, fully-loaded NPCs in GameWorld)
+// for remote characters instead of calling Kenshi's broken factory.
+namespace {
+constexpr size_t kDonorCapacity = 256;
+std::atomic<void*> s_donorPool[kDonorCapacity] = {};
+std::atomic<size_t> s_donorWriteIdx{0};
+std::atomic<size_t> s_donorReadIdx{0};
+
+// Claimed donors — marked by ClaimDonorCharacter, never re-picked.
+std::mutex s_claimedMutex;
+std::unordered_set<void*> s_claimedDonors;
+}
+
+void RecordDonorCharacter(void* character) {
+    if (!character) return;
+    if (!IsHeapResidentPtr(reinterpret_cast<uintptr_t>(character))) return;
+    size_t idx = s_donorWriteIdx.fetch_add(1, std::memory_order_relaxed) % kDonorCapacity;
+    s_donorPool[idx].store(character, std::memory_order_relaxed);
+}
+
+void* PickDonorCharacter() {
+    size_t writes = s_donorWriteIdx.load(std::memory_order_relaxed);
+    if (writes == 0) return nullptr;
+    size_t total = writes < kDonorCapacity ? writes : kDonorCapacity;
+    size_t pick  = s_donorReadIdx.fetch_add(1, std::memory_order_relaxed) % total;
+    return s_donorPool[pick].load(std::memory_order_relaxed);
+}
+
+void* PickFreshDonorCharacter() {
+    size_t writes = s_donorWriteIdx.load(std::memory_order_relaxed);
+    if (writes == 0) return nullptr;
+    size_t total = writes < kDonorCapacity ? writes : kDonorCapacity;
+    // Try every slot once before giving up.
+    for (size_t i = 0; i < total; ++i) {
+        size_t idx = (s_donorReadIdx.fetch_add(1, std::memory_order_relaxed)) % total;
+        void* candidate = s_donorPool[idx].load(std::memory_order_relaxed);
+        if (!candidate) continue;
+        std::lock_guard lock(s_claimedMutex);
+        if (s_claimedDonors.count(candidate) == 0) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+void ClaimDonorCharacter(void* character) {
+    if (!character) return;
+    std::lock_guard lock(s_claimedMutex);
+    s_claimedDonors.insert(character);
+}
+
+bool IsDonorClaimed(void* character) {
+    if (!character) return false;
+    std::lock_guard lock(s_claimedMutex);
+    return s_claimedDonors.count(character) > 0;
+}
+
+int DonorPoolSize() {
+    size_t writes = s_donorWriteIdx.load(std::memory_order_relaxed);
+    return static_cast<int>(writes < kDonorCapacity ? writes : kDonorCapacity);
+}
+
+int DonorPoolFree() {
+    int total = DonorPoolSize();
+    std::lock_guard lock(s_claimedMutex);
+    int claimed = static_cast<int>(s_claimedDonors.size());
+    return total - claimed > 0 ? total - claimed : 0;
+}
+
+// ── Tick-driven GameWorld faction harvester ──
+// Reads GameWorld+0x0888 (lektor<Character*>), picks the first Character
+// whose +0x10 owner is heap-resident, publishes it. Once a fallback faction
+// is already known, this is a no-op (cheap to call every tick).
+void HarvestFactionFromGameWorld() {
+    if (s_fallbackFaction.load(std::memory_order_relaxed) != 0) return;
+
+    auto& core = Core::Get();
+    auto& funcs = core.GetGameFunctions();
+    if (!funcs.GameWorldSingleton) return;
+
+    __try {
+        // Singleton slot can be either:
+        //  (a) ptr-to-ptr (GameWorld**) — common case
+        //  (b) the GameWorld object directly
+        uintptr_t singletonAddr = funcs.GameWorldSingleton;
+        uintptr_t gameWorld = *reinterpret_cast<uintptr_t*>(singletonAddr);
+        if (!IsHeapResidentPtr(gameWorld)) {
+            // Maybe the singleton slot IS the GameWorld object directly
+            gameWorld = singletonAddr;
+        }
+        if (!IsHeapResidentPtr(gameWorld)) return;
+
+        constexpr uintptr_t kCharListOff = 0x0888;
+        // Try lektor format 1: count at +0x00, array at +0x08
+        int count = *reinterpret_cast<int*>(gameWorld + kCharListOff);
+        uintptr_t arrayPtr = *reinterpret_cast<uintptr_t*>(gameWorld + kCharListOff + 0x08);
+        if (count <= 0 || count > 10000 || !IsHeapResidentPtr(arrayPtr)) {
+            // Try format 2: array first, count second
+            arrayPtr = *reinterpret_cast<uintptr_t*>(gameWorld + kCharListOff);
+            count    = *reinterpret_cast<int*>(gameWorld + kCharListOff + 0x08);
+            if (count <= 0 || count > 10000 || !IsHeapResidentPtr(arrayPtr)) return;
+        }
+
+        // Walk up to 32 entries looking for one with a heap-resident owner.
+        int limit = count < 32 ? count : 32;
+        auto* charArr = reinterpret_cast<uintptr_t*>(arrayPtr);
+        for (int i = 0; i < limit; ++i) {
+            uintptr_t character = charArr[i];
+            if (!IsHeapResidentPtr(character)) continue;
+            uintptr_t owner = *reinterpret_cast<uintptr_t*>(character + 0x10);
+            if (!IsHeapResidentPtr(owner)) continue;
+            PublishFallbackFaction(owner);
+            PublishEarlyPlayerFaction(owner);
+            spdlog::info("entity_hooks: GameWorld harvester published faction 0x{:X} "
+                         "(from char 0x{:X} idx {}/{})",
+                         owner, character, i, count);
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // GameWorld layout changed or character was unmapped — try again next tick.
+    }
 }
 
 int GetGameDataOffsetInStruct() {

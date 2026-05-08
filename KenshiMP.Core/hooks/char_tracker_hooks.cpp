@@ -2,12 +2,17 @@
 #include "../core.h"
 #include "../game/game_types.h"
 #include "../game/spawn_manager.h"
+#include "../native/our_factory.h"
 #include "kmp/hook_manager.h"
 #include "kmp/memory.h"
 #include <spdlog/spdlog.h>
 #include <Windows.h>
+#include <Psapi.h>
 #include <unordered_map>
+#include <limits>
 #include <mutex>
+
+#pragma comment(lib, "Psapi.lib")
 
 namespace kmp::char_tracker_hooks {
 
@@ -30,14 +35,140 @@ static PendingCharUpdate s_pendingRing[PENDING_RING_SIZE];
 static std::atomic<int> s_pendingWrite{0};
 static std::atomic<int> s_pendingRead{0};
 
-static void OnCharUpdate(void* animClassHuman) {
-    if (!animClassHuman) return;
-    uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClassHuman);
-    if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) return;
+// Diagnostic counters so we can tell whether the inline hook is even firing
+// in this Kenshi build (and if it is, where the calls are being filtered out).
+static std::atomic<uint64_t> s_hookCallCount{0};
+static std::atomic<uint64_t> s_rejectNullAnim{0};
+static std::atomic<uint64_t> s_rejectBadAnimPtr{0};
+static std::atomic<uint64_t> s_rejectReadFail{0};
+static std::atomic<uint64_t> s_rejectBadCharPtr{0};
+static std::atomic<uint64_t> s_passedFilter{0};
 
+void DumpHookCounters() {
+    spdlog::info("char_tracker: hook counters — calls={} (nullAnim={}, badAnimPtr={}, "
+                 "readFail={}, badCharPtr={}) passed={} tracked={}",
+                 s_hookCallCount.load(), s_rejectNullAnim.load(),
+                 s_rejectBadAnimPtr.load(), s_rejectReadFail.load(),
+                 s_rejectBadCharPtr.load(), s_passedFilter.load(),
+                 s_trackedChars.size());
+}
+
+static void OnCharUpdate(void* animClassHuman) {
+    uint64_t callNum = s_hookCallCount.fetch_add(1, std::memory_order_relaxed);
+    if (!animClassHuman) { s_rejectNullAnim.fetch_add(1); return; }
+    uintptr_t animPtr = reinterpret_cast<uintptr_t>(animClassHuman);
+    if (animPtr < 0x10000 || animPtr > 0x00007FFFFFFFFFFF) {
+        s_rejectBadAnimPtr.fetch_add(1); return;
+    }
+
+    // ── Auto-discovered CharacterHuman backpointer offset ──
+    // GOG had it at +0x2D8 but Steam has it elsewhere. We discover the
+    // right offset on the first call by walking candidate slots and
+    // picking the one whose value (when treated as a pointer) has a
+    // first qword that lies inside the host-process module range — i.e.
+    // it points at an object whose vtable belongs to Kenshi's .text.
+    // Once locked in, every subsequent call uses the cached offset.
+    static std::atomic<int> s_charPtrOffset{-1};
+    int discoveredOffset = s_charPtrOffset.load(std::memory_order_acquire);
+    if (discoveredOffset < 0) {
+        // Kenshi's module range. Cache once.
+        static uintptr_t s_modBase = 0, s_modEnd = 0;
+        if (s_modBase == 0) {
+            HMODULE h = GetModuleHandleA(nullptr); // host exe
+            if (h) {
+                MODULEINFO mi{};
+                if (GetModuleInformation(GetCurrentProcess(), h, &mi, sizeof(mi))) {
+                    s_modBase = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
+                    s_modEnd  = s_modBase + mi.SizeOfImage;
+                }
+            }
+        }
+        // Walk candidate offsets and probe each for a CharacterHuman shape.
+        // Heuristic: candidate must be a heap pointer (8-aligned, in user-mode
+        // range) whose own first qword (the vtable) is inside the host module.
+        char dbg[2048];
+        int pos = sprintf_s(dbg, sizeof(dbg),
+            "char_tracker: PROBING rbx=0x%llX modBase=0x%llX modEnd=0x%llX\n",
+            (unsigned long long)animPtr,
+            (unsigned long long)s_modBase, (unsigned long long)s_modEnd);
+        int chosen = -1;
+        // Most CharacterHuman objects live in their own heap allocation, far
+        // away from the AnimationClassHuman block. Sub-objects of the same
+        // animation tree have addresses within ~0x1000 bytes of animPtr.
+        // Use that as a fast pre-filter: a candidate within 4 KiB of animPtr
+        // is overwhelmingly likely to be a sub-object, not a separate Character.
+        const uintptr_t ANIM_BLOCK_HALF = 0x1000;
+        for (int off = 8; off <= 0x600; off += 8) {
+            uintptr_t v = 0;
+            if (!Memory::Read(animPtr + off, v)) continue;
+            if (v == animPtr) continue; // skip self-reference
+            if (v < 0x10000 || v > 0x00007FFFFFFFFFFF) continue;
+            if ((v & 0x7) != 0) continue;
+            // Candidate must be a HEAP pointer, not a static address inside
+            // Kenshi's binary.
+            if (s_modBase != 0 && v >= s_modBase && v < s_modEnd) continue;
+            // Skip sub-objects of the same animation block.
+            uintptr_t delta = (v > animPtr) ? (v - animPtr) : (animPtr - v);
+            if (delta < ANIM_BLOCK_HALF) continue;
+            uintptr_t vt = 0;
+            if (!Memory::Read(v, vt)) continue;
+            bool inModule = (s_modBase != 0 && vt >= s_modBase && vt < s_modEnd);
+            if (!inModule) continue;
+            // Final check: a real CharacterHuman has a std::string at +0x18
+            // (its name). The MSVC layout has size at strAddr+0x10. If size
+            // is non-zero and reasonable, this is a named game object —
+            // overwhelmingly likely to be the right backpointer. If we get
+            // a hit but size is zero (e.g. unnamed buildings), keep looking
+            // — the *next* candidate is more likely the player.
+            uint64_t nameSize = 0;
+            if (!Memory::Read(v + 0x18 + 0x10, nameSize)) continue;
+            if (nameSize == 0 || nameSize > 256) {
+                pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                                 "  candidate +0x%03X = 0x%llX (vtable in-module, "
+                                 "name size %llu — skip)\n",
+                                 off, (unsigned long long)v,
+                                 (unsigned long long)nameSize);
+                continue;
+            }
+            pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                             "  candidate +0x%03X = 0x%llX (vtable=0x%llX, "
+                             "nameSize=%llu) ACCEPTED\n",
+                             off, (unsigned long long)v, (unsigned long long)vt,
+                             (unsigned long long)nameSize);
+            if (chosen < 0) chosen = off;
+            if (pos > (int)sizeof(dbg) - 128) break;
+        }
+        if (chosen >= 0) {
+            s_charPtrOffset.store(chosen, std::memory_order_release);
+            pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                             "  CHOSEN offset: +0x%03X (auto-discovered)\n", chosen);
+        } else {
+            // No candidate validated. Fall back to the upstream GOG-baseline
+            // offset (+0x2D8). On Steam v1.0.65 this offset is wrong and
+            // every character will be tracked as 'Unknown' — but on GOG it's
+            // correct, and this fallback is what the upstream code relied
+            // on. Logged so the next session shows whether discovery
+            // succeeded or fell through.
+            s_charPtrOffset.store(0x2D8, std::memory_order_release);
+            pos += sprintf_s(dbg + pos, sizeof(dbg) - pos,
+                             "  NO valid candidate found — falling back to "
+                             "GOG-baseline +0x2D8\n");
+        }
+        OutputDebugStringA(dbg);
+        spdlog::info("{}", dbg);
+        spdlog::default_logger()->flush();
+        discoveredOffset = s_charPtrOffset.load(std::memory_order_acquire);
+    }
+
+    if (discoveredOffset <= 0) { s_rejectReadFail.fetch_add(1); return; }
     uintptr_t charPtr = 0;
-    if (!Memory::Read(animPtr + 0x2D8, charPtr) || charPtr == 0) return;
-    if (charPtr < 0x10000 || charPtr > 0x00007FFFFFFFFFFF) return;
+    if (!Memory::Read(animPtr + discoveredOffset, charPtr) || charPtr == 0) {
+        s_rejectReadFail.fetch_add(1); return;
+    }
+    if (charPtr < 0x10000 || charPtr > 0x00007FFFFFFFFFFF) {
+        s_rejectBadCharPtr.fetch_add(1); return;
+    }
+    s_passedFilter.fetch_add(1);
 
     void* charKey = reinterpret_cast<void*>(charPtr);
 
@@ -176,6 +307,75 @@ const TrackedChar* FindByPtr(void* characterPtr) {
     return (it != s_trackedChars.end()) ? &it->second : nullptr;
 }
 
+const TrackedChar* FindByFactionPtr(uintptr_t factionPtr) {
+    if (factionPtr == 0) return nullptr;
+    std::lock_guard lock(s_trackerMutex);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.factionPtr == factionPtr) return &tc;
+    }
+    return nullptr;
+}
+
+std::vector<TrackedChar> FindAllByFactionPtr(uintptr_t factionPtr) {
+    std::vector<TrackedChar> result;
+    if (factionPtr == 0) return result;
+    std::lock_guard lock(s_trackerMutex);
+    result.reserve(8);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.factionPtr == factionPtr) result.push_back(tc);
+    }
+    return result;
+}
+
+const TrackedChar* FindUniqueByFactionPtr(uintptr_t factionPtr,
+                                           const std::string& placeholder) {
+    if (factionPtr == 0) return nullptr;
+    std::lock_guard lock(s_trackerMutex);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.factionPtr != factionPtr) continue;
+        if (tc.name == placeholder) continue; // skip the NPC duplicates
+        if (tc.name.empty()) continue;
+        return &tc;
+    }
+    return nullptr;
+}
+
+uintptr_t ResolveFactionPtrByName(const std::string& name) {
+    std::lock_guard lock(s_trackerMutex);
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.name == name && tc.factionPtr != 0) return tc.factionPtr;
+    }
+    return 0;
+}
+
+const TrackedChar* FindEarliestUniqueNonPlaceholder(const std::string& placeholderA,
+                                                    const std::string& placeholderB) {
+    std::lock_guard lock(s_trackerMutex);
+
+    std::unordered_map<std::string, int> nameCounts;
+    nameCounts.reserve(s_trackedChars.size());
+    for (auto& [key, tc] : s_trackedChars) {
+        if (tc.name.empty()) continue;
+        nameCounts[tc.name]++;
+    }
+
+    const TrackedChar* best = nullptr;
+    uint64_t bestTick = std::numeric_limits<uint64_t>::max();
+    for (auto& [key, tc] : s_trackedChars) {
+        if (!tc.characterPtr || !tc.animClassPtr || tc.factionPtr == 0) continue;
+        if (tc.name.empty() || tc.name == placeholderA || tc.name == placeholderB) continue;
+        auto countIt = nameCounts.find(tc.name);
+        if (countIt == nameCounts.end() || countIt->second != 1) continue;
+
+        uint64_t firstSeen = tc.firstSeenTick != 0 ? tc.firstSeenTick : tc.lastSeenTick;
+        if (firstSeen < bestTick) {
+            best = &tc;
+            bestTick = firstSeen;
+        }
+    }
+    return best;
+}
+
 void* GetLocalPlayerAnimClass() { return s_localPlayerAnimClass; }
 
 void* GetRemotePlayerAnimClass(const std::string& name) {
@@ -232,20 +432,37 @@ void ProcessDeferredDiscovery() {
         std::string name = accessor.GetName();
         if (name.empty()) continue;
 
+        // Read the faction pointer at CharacterHuman+0x10. This is the
+        // identity marker we ultimately want to match on — names collide
+        // (kenshi-online.mod emits many "Player 1" / "Player 2" characters)
+        // but the faction pointer is unique per faction and stable for the
+        // lifetime of the character.
+        uintptr_t factionPtr = 0;
+        Memory::Read(pending.charPtr + 0x10, factionPtr);
+        if (factionPtr < 0x10000 || factionPtr > 0x00007FFFFFFFFFFF) {
+            factionPtr = 0; // sanitize bogus reads
+        }
+
         TrackedChar tc;
         tc.animClassPtr = pending.animClassPtr;
         tc.characterPtr = charKey;
         tc.name = name;
+        tc.factionPtr = factionPtr;
         tc.position = accessor.GetPosition();
-        tc.lastSeenTick = GetTickCount64();
+        tc.firstSeenTick = GetTickCount64();
+        tc.lastSeenTick = tc.firstSeenTick;
 
         {
             std::lock_guard lock(s_trackerMutex);
             s_trackedChars[charKey] = tc;
         }
 
-        spdlog::info("char_tracker: NEW character '{}' at 0x{:X} (animClass=0x{:X})",
-                     name, pending.charPtr, reinterpret_cast<uintptr_t>(pending.animClassPtr));
+        spdlog::info("char_tracker: NEW character '{}' at 0x{:X} (animClass=0x{:X}, faction=0x{:X})",
+                     name, pending.charPtr,
+                     reinterpret_cast<uintptr_t>(pending.animClassPtr),
+                     factionPtr);
+
+        kmp::our_factory::RecordPlayerFactionFromCharacter(charKey);
 
         if (s_onNewChar) {
             s_onNewChar(tc);

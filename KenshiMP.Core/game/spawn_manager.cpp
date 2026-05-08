@@ -3,6 +3,7 @@
 #include "../core.h"
 #include "../hooks/entity_hooks.h"
 #include "../hooks/ai_hooks.h"
+#include "../native/our_factory.h"
 #include "../sync/pipeline_state.h"
 #include "kmp/hook_manager.h"
 #include <spdlog/spdlog.h>
@@ -88,6 +89,314 @@ void SpawnManager::SetSavedRequestStruct(const uint8_t* data, size_t size) {
     m_savedRequestStruct.assign(data, data + size);
     m_hasRequestStruct = true;
     spdlog::info("SpawnManager: Saved request struct ({} bytes)", size);
+}
+
+// ── Hook-free factory discovery via GameWorld + 0x4A0 ─────────────
+// Why this exists
+// ---------------
+// The CharacterCreate hook used to capture the factory for us, but
+// `KenshiMP.Cartographer` (the SpeshimenQursiveBrainer) showed that
+// 8/8 entry points in `RootObjectFactory` have unsafe prologues
+// (`mov rax,rsp` or `mov [rsp+...],reg`).  Patching any one of them
+// triggers the recurring `__fastfail`/`TerminateProcess` we saw in
+// PIDs 22468 and 29744 right after the first post-connect
+// CharacterCreate fired through a passthrough hook.  The brainer's
+// recommendation: don't hook anywhere in this class — read the
+// factory pointer directly from the GameWorld struct.
+//
+// Layout per KenshiLib `GameWorld.h`:
+//   class GameWorld {
+//     ...
+//     RootObjectFactory* theFactory;  // 0x4A0 Member
+//     ...
+//   };
+//
+// Validation
+// ----------
+// We don't blindly trust whatever happens to live at +0x4A0 on the
+// resolved GameWorld* — we validate the candidate pointer's vtable
+// against the recorded `RootObjectFactory` vtable RVA
+// (`mod+0x16993B0`, recorded in re_kenshi 2/manual_findings/
+// notes/RootObjectFactory.vtable.md).  If the first qword of the
+// candidate doesn't match that RVA, we leave m_factory unset.
+//
+// Cost
+// ----
+// Three pointer reads + one comparison per call.  Safe to invoke
+// every game tick from `Core::HandleSpawnQueue` while m_factory is
+// still null.
+bool SpawnManager::TryDiscoverFactoryFromGameWorld() {
+    if (m_factory != nullptr) return false;       // already captured
+
+    // ── Deterministic factory discovery via direct global read ──
+    //
+    // RootObjectFactory has no virtual methods (verified by static
+    // analysis: no `.?AVRootObjectFactory@@` RTTI string in the
+    // binary, and no .rdata qword references any of the class's
+    // known method RVAs).  The vtable-match approach we tried
+    // before was based on a wrong premise — there is no vtable.
+    //
+    // The factory pointer is stored at a SINGLE GLOBAL LOCATION in
+    // the binary.  Verified deterministically by scripts/find_class
+    // _vtable.py + targeted disassembly:
+    //
+    //   Three independent callers of `RootObjectFactory::createItem`
+    //   (RVAs 0xD045B, 0x36FA29, 0x557006) all load RCX (the `this`
+    //   pointer) via `mov rcx, [rip + disp32]` from the same target:
+    //   kenshi_x64.exe + 0x21345B0.
+    //
+    // That global lives in the `.data` section (BSS-style — value
+    // 0 in the file, populated by the game on startup).  Once the
+    // game has constructed the factory, every internal callsite
+    // reads it from this exact location — there is no other path.
+    //
+    // Implementation: read the qword at `modBase + 0x21345B0`.  When
+    // it's non-zero and looks like a heap pointer, that's the
+    // RootObjectFactory instance.  No scanning, no vtable check, no
+    // GameWorld traversal — exactly the operation Kenshi itself does
+    // before every factory member-function call.
+    //
+    // Provenance is preserved in re_kenshi 2/scripts/find_class
+    // _vtable.py (the one-shot tool that found this RVA) and in
+    // re_kenshi 2/manual_findings/notes/RootObjectFactory.global.md
+    // (the human-readable analysis).
+    constexpr uintptr_t kRootObjectFactoryGlobalRva = 0x21345B0;
+
+    HMODULE host = GetModuleHandleA(nullptr);
+    if (host == nullptr) return false;
+    uintptr_t moduleBase = reinterpret_cast<uintptr_t>(host);
+
+    uintptr_t globalAddr = moduleBase + kRootObjectFactoryGlobalRva;
+    uintptr_t factoryPtr = 0;
+    if (!Memory::Read(globalAddr, factoryPtr) || factoryPtr == 0) {
+        // The global is still zero — game hasn't constructed the
+        // factory yet (very early in boot).  Throttled diagnostic so
+        // we know the poll is running.
+        static std::atomic<int64_t> s_lastWaitLog{0};
+        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        int64_t prev = s_lastWaitLog.load();
+        if (now - prev > 5LL * 1000000000LL) {
+            s_lastWaitLog.store(now);
+            spdlog::debug(
+                "SpawnManager: TryDiscover — factory global "
+                "at mod+0x{:X} (=0x{:X}) is still 0 (waiting for "
+                "Kenshi to construct the factory)",
+                kRootObjectFactoryGlobalRva, globalAddr);
+        }
+        return false;
+    }
+
+    // Sanity: the populated value must look like a heap pointer
+    // (not a small integer left over from initialisation, not
+    // pointing into the kenshi_x64.exe image itself).  These
+    // checks are cheap and catch the case where the game writes a
+    // sentinel value briefly during teardown.
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(host);
+    auto* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        reinterpret_cast<const uint8_t*>(host) + dos->e_lfanew);
+    size_t imageSize = nt->OptionalHeader.SizeOfImage;
+
+    if (factoryPtr < 0x10000ULL || factoryPtr >= 0x00007FFFFFFFFFFFULL ||
+        (factoryPtr >= moduleBase && factoryPtr < moduleBase + imageSize)) {
+        return false;
+    }
+
+    m_factory = reinterpret_cast<void*>(factoryPtr);
+    spdlog::info(
+        "SpawnManager: TryDiscover — captured RootObjectFactory at "
+        "0x{:X} via direct global read (mod+0x{:X}, deterministic)",
+        factoryPtr, kRootObjectFactoryGlobalRva);
+
+    // Now that the factory is reachable, immediately populate the
+    // character-template cache via the static GameDataContainer
+    // (see DiscoverCharacterTemplatesViaContainer).  This used to
+    // depend on the CharacterCreate hook firing during world load
+    // — that hook is permanently disabled (the prologue patch
+    // crashes 1.0.68's mov-rax-rsp prologue), so we now populate
+    // templates by direct deterministic lookup instead.
+    int n = DiscoverCharacterTemplatesViaContainer();
+    if (n > 0) {
+        spdlog::info(
+            "SpawnManager: TryDiscover — also populated {} character "
+            "template(s) via mod+0x2134130 container",
+            n);
+    } else {
+        spdlog::warn(
+            "SpawnManager: TryDiscover — factory captured but "
+            "container lookup returned 0 templates; native "
+            "getDataByName may have failed (std::string ABI "
+            "mismatch, container not yet populated by Kenshi, "
+            "etc.)");
+    }
+    return true;
+}
+
+// ── Native getDataByName invocation ─────────────────────────────────
+// Function: GameDataContainer::getDataByName(const std::string& name,
+//                                             enum itemType)
+// Static container instance: kenshi_x64.exe + 0x2134130
+// Function RVA:               kenshi_x64.exe + 0x6BFDA0
+//
+// We construct a local std::string holding the name, then call the
+// native function via a typed function-pointer.  Both our DLL and
+// Kenshi's main module are built with `_ITERATOR_DEBUG_LEVEL=0`
+// (Release-mode containers, no debug-iterator overhead) — that
+// matters for std::string layout compatibility across the call.
+//
+// Wrapped in __try/__except.  A failure (heap fault inside the
+// call, or container in a weird state during init) returns nullptr
+// rather than propagating.
+
+namespace {
+    using GetDataByNameFn = void* (__fastcall*)(void* /*container*/,
+                                                 const std::string& /*name*/,
+                                                 int /*itemType*/);
+
+    constexpr uintptr_t kGameDataContainerRva = 0x2134130;
+    constexpr uintptr_t kGetDataByNameRva     = 0x6BFDA0;
+
+    // itemType enum values from KenshiLib Enums.h (see
+    // re_kenshi 2/reference/RE_Kenshi/KenshiLib/Include/kenshi/
+    // Enums.h).  CHARACTER is the canonical one for spawning, but
+    // some templates the server streams (Greenlander, Squad_X)
+    // resolve under RACE or SQUAD_TEMPLATE instead — we probe all
+    // three.
+    enum KenshiItemType {
+        IT_BUILDING        = 0,
+        IT_CHARACTER       = 1,
+        IT_WEAPON          = 2,
+        IT_ARMOUR          = 3,
+        IT_ITEM            = 4,
+        IT_RACE            = 7,
+        IT_SQUAD_TEMPLATE  = 53,
+    };
+
+    // SEH-guarded wrapper.  Lives in the unnamed namespace so the
+    // C++ unwinder doesn't see __try (avoids C2712).
+    static void* SehCallGetDataByName(void* fn, void* container,
+                                       const std::string& name,
+                                       int itemType) {
+        __try {
+            auto typed = reinterpret_cast<GetDataByNameFn>(fn);
+            return typed(container, name, itemType);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+    }
+}
+
+int SpawnManager::DiscoverCharacterTemplatesViaContainer() {
+    HMODULE host = GetModuleHandleA(nullptr);
+    if (!host) return 0;
+    uintptr_t base = reinterpret_cast<uintptr_t>(host);
+
+    void* container = reinterpret_cast<void*>(base + kGameDataContainerRva);
+    void* fn        = reinterpret_cast<void*>(base + kGetDataByNameRva);
+
+    // Names worth probing across multiple itemTypes.  Spawning a
+    // remote character only needs a single working CHARACTER
+    // template (any one suffices as the GameData* arg to the
+    // factory call), but we cast a wide net so when a name does
+    // exist we cache it under all of its valid itemTypes.
+    //
+    // Trailing space on "Drifter " is intentional — kenshi-online.
+    // mod identifies its drifter slot template that way.
+    static const char* kProbeNames[] = {
+        // Vanilla character templates (highest-confidence — always
+        // present in a clean Kenshi install)
+        "Wanderer",
+        "Drifter ",
+
+        // Mod-defined player slot templates (kenshi-online.mod;
+        // may not be present if the mod isn't loaded yet at probe
+        // time — graceful fallback below covers that case)
+        "Player 1", "Player 2", "Player 3", "Player 4",
+        "Player 5", "Player 6", "Player 7", "Player 8",
+
+        // Common race / faction names the server streams for
+        // remote-entity spawn requests on this build
+        "Greenlander", "Hiver", "Skeleton", "Shek", "Scorchlander",
+        "Holy Nation",
+
+        // Squad templates the server streams for grouped entities
+        "Squad_0", "Squad_1", "Squad_2",
+    };
+
+    // Each probe: try CHARACTER first, then RACE, then
+    // SQUAD_TEMPLATE.  Whichever finds a result wins.  We don't
+    // enumerate every itemType — those three are the only ones
+    // useful as factory templates for remote-character spawning.
+    static const int kProbeItemTypes[] = {
+        IT_CHARACTER, IT_RACE, IT_SQUAD_TEMPLATE
+    };
+
+    int registered = 0;
+    std::lock_guard lock(m_templateMutex);
+
+    for (const char* cname : kProbeNames) {
+        std::string name(cname);
+        void* gd = nullptr;
+        int   foundAs = -1;
+        for (int it : kProbeItemTypes) {
+            gd = SehCallGetDataByName(fn, container, name, it);
+            if (gd) { foundAs = it; break; }
+        }
+        if (!gd) continue;
+
+        m_templates[name]              = gd;
+        m_factoryInputTemplates[name]  = gd;
+        // Only register as a CHARACTER template when itemType=CHARACTER
+        // resolved.  Race / Squad GameData blobs are NOT valid
+        // arguments to RootObjectFactory's character-creation path
+        // (would crash the factory).
+        if (foundAs == IT_CHARACTER) {
+            m_characterTemplates[name]     = gd;
+            m_lastCharacterTemplate        = gd;
+            m_lastCharacterTemplateName    = name;
+        }
+        ++registered;
+
+        const char* itName =
+            foundAs == IT_CHARACTER     ? "CHARACTER"
+          : foundAs == IT_RACE          ? "RACE"
+          : foundAs == IT_SQUAD_TEMPLATE? "SQUAD_TEMPLATE"
+          : "?";
+        spdlog::info(
+            "SpawnManager: DiscoverCharacterTemplatesViaContainer — "
+            "'{}' -> 0x{:X} as {} (mod+0x{:X} container lookup)",
+            name, reinterpret_cast<uintptr_t>(gd), itName,
+            kGameDataContainerRva);
+    }
+
+    // ── Mirror found CHARACTER templates into m_modPlayerTemplates ──
+    //
+    // The HandleSpawnQueue gate is `m_modTemplateCount.load() <= 0`
+    // — even with `factoryReady=true` and `m_characterTemplates`
+    // populated, the loop bails out unless we publish at least one
+    // mod-slot template.  That field used to be filled by
+    // FindModTemplates() which depends on the CharacterCreate hook
+    // having fired (it didn't, by design — that hook is unsafe on
+    // 1.0.68 / mov rax,rsp).
+    //
+    // Fix: copy the CHARACTER templates we found into the
+    // m_modPlayerTemplates array (slots 0..N-1) and bump
+    // m_modTemplateCount.  SpawnWithModTemplate() can now pull a
+    // valid GameData* per slot and dispatch to the factory.
+    int slot = 0;
+    for (auto& kv : m_characterTemplates) {
+        if (slot >= MAX_MOD_TEMPLATES) break;
+        m_modPlayerTemplates[slot++] = kv.second;
+    }
+    m_modTemplateCount.store(slot);
+    if (slot > 0) {
+        spdlog::info(
+            "SpawnManager: DiscoverCharacterTemplatesViaContainer — "
+            "mirrored {} CHARACTER template(s) into m_modPlayerTemplates "
+            "(m_modTemplateCount = {})",
+            slot, slot);
+    }
+
+    return registered;
 }
 
 void SpawnManager::SetPreCallData(const uint8_t* data, size_t size, uintptr_t origAddr) {
@@ -253,6 +562,9 @@ void SpawnManager::OnGameCharacterCreated(void* factory, void* gameData, void* c
                     m_managerPointer = candidateMgr;
                     spdlog::info("SpawnManager: VALIDATED template '{}' from char+0x{:X} = 0x{:X} (mgr=0x{:X})",
                                  name, offset, candidateGD, candidateMgr);
+                    spdlog::default_logger()->flush();
+                    spdlog::info("SpawnManager: VALIDATED first-capture path complete (post-flush marker)");
+                    spdlog::default_logger()->flush();
                 } else {
                     spdlog::debug("SpawnManager: Additional template '{}' at 0x{:X} (factoryTotal={}, charTotal={})",
                                   name, candidateGD, m_factoryInputTemplates.size(),
@@ -274,6 +586,18 @@ void SpawnManager::OnGameCharacterCreated(void* factory, void* gameData, void* c
 }
 
 void SpawnManager::QueueSpawn(const SpawnRequest& request) {
+    if (request.owner == 0 || request.type != EntityType::PlayerCharacter) {
+        static volatile LONG s_droppedUnsafeRequests = 0;
+        LONG n = InterlockedIncrement(&s_droppedUnsafeRequests);
+        if (n <= 10 || n % 100 == 0) {
+            spdlog::warn("SpawnManager: dropping non-player/server-owned spawn request "
+                         "entity={} owner={} type={} template='{}'",
+                         request.netId, request.owner,
+                         static_cast<int>(request.type), request.templateName);
+        }
+        return;
+    }
+
     std::lock_guard lock(m_queueMutex);
     m_spawnQueue.push(request);
     spdlog::info("SpawnManager: Queued spawn for entity {} (template: '{}')",
@@ -364,6 +688,20 @@ int SpawnManager::ProcessSpawnQueueFromHook(void* factory) {
 
         // ═══ FALLBACK: Original template search and spawn ═══
         if (!character) {
+            static volatile bool s_disableNativeTemplateFallback = true;
+            if (s_disableNativeTemplateFallback) {
+                spdlog::warn("SpawnManager: [FROM HOOK] native template fallback disabled "
+                             "for entity {}; retrying proven path only", req.netId);
+                req.retryCount++;
+                if (req.retryCount < MAX_SPAWN_RETRIES) {
+                    retryQueue.push(req);
+                } else {
+                    spdlog::error("SpawnManager: [FROM HOOK] DROPPING entity {} after {} retries",
+                                  req.netId, MAX_SPAWN_RETRIES);
+                }
+                continue;
+            }
+
             void* templateData = nullptr;
             std::string templateSource;
 
@@ -775,48 +1113,118 @@ void SpawnManager::FindModTemplates() {
 
 void* SpawnManager::SpawnWithModTemplate(int playerSlot, const Vec3& position) {
     if (playerSlot < 0 || playerSlot >= MAX_MOD_TEMPLATES) return nullptr;
-    void* modGD = m_modPlayerTemplates[playerSlot];
-    if (!modGD) return nullptr;
-    // Only m_factory is needed — CallFactoryCreate uses its own function pointer
-    // (RVA 0x583400), not m_origProcess (the process trampoline).
-    if (!m_factory) return nullptr;
+    static volatile bool s_disableUnsafeFallbacks = true;
 
-    spdlog::info("SpawnManager: SpawnWithModTemplate slot={} factory=0x{:X} modGD=0x{:X} "
-                 "pos=({:.0f},{:.0f},{:.0f})",
-                 playerSlot, reinterpret_cast<uintptr_t>(m_factory),
-                 reinterpret_cast<uintptr_t>(modGD),
-                 position.x, position.y, position.z);
-
-    // ═══ SINGLE PATH: RootObjectFactory::create ═══
-    // The `create` function (RVA 0x583400) is the HIGH-LEVEL dispatcher called by
-    // 11 game systems. It takes (factory, GameData*) and INTERNALLY builds a fresh
-    // request struct with live pointers (faction, squad, AI), then calls process().
-    // This completely bypasses the stale-pointer struct clone crash.
-    //
-    // REMOVED: Approaches 1-3 (raw GameData to process, struct clone, createRandomChar)
-    // were crash-prone — stale faction pointers, broken self-refs, wrong appearance.
-    // FactoryCreate is the ONLY safe path because it constructs fresh internal state.
-    {
-        void* character = entity_hooks::CallFactoryCreate(m_factory, modGD);
-        if (character) {
-            uintptr_t charAddr = reinterpret_cast<uintptr_t>(character);
-            if (charAddr > 0x10000 && charAddr < 0x00007FFFFFFFFFFF && (charAddr & 0x7) == 0) {
-                spdlog::info("SpawnManager: SpawnWithModTemplate SUCCESS — char 0x{:X}", charAddr);
-                game::CharacterAccessor accessor(character);
-                accessor.WritePosition(position);
-                // DO NOT call ApplyFactionFix here — mod template characters have
-                // persistent factions from kenshi-online.mod ("Player 1"/"Player 2").
-                // Writing the LOCAL player's faction causes them to appear in the
-                // squad panel, flooding it with remote characters and crashing.
-                // Mod factions are always loaded (in GameDataManager), so no use-after-free.
-                return character;
-            }
+    // ═══ OUR FACTORY v2 — process()-based primary path ═══
+    // Construct a CreatelistItem with our network position + a donor-derived
+    // Faction*/GameData* tuple, then call RootObjectFactory::process(). The
+    // 2-arg internal dispatcher all higher-level create* paths funnel into.
+    // No 11-arg create(), no createRandomCharacter, no template-size guesswork.
+    void* modTemplate = m_modPlayerTemplates[playerSlot];
+    if (our_factory::CanCreateWithGameData() && modTemplate) {
+        void* built = our_factory::CreateRemoteCharacterFromGameData(position, modTemplate);
+        if (built) {
+            spdlog::info("SpawnManager: OurFactory SUCCESS slot={} char=0x{:X} "
+                         "(remote count = {})",
+                         playerSlot, reinterpret_cast<uintptr_t>(built),
+                         our_factory::RemoteCharacterCount());
+            return built;
         }
-        spdlog::warn("SpawnManager: FactoryCreate returned null/invalid for slot {}", playerSlot);
+        spdlog::warn("SpawnManager: OurFactory returned null for slot {} — "
+                     "unsafe donor/native fallbacks are disabled (modGD=0x{:X})",
+                     playerSlot, reinterpret_cast<uintptr_t>(modTemplate));
+        if (s_disableUnsafeFallbacks) return nullptr;
+    } else {
+        spdlog::debug("SpawnManager: OurFactory not ready ({}) — "
+                      "unsafe donor/native fallbacks are disabled (modGD=0x{:X})",
+                      our_factory::StatusString(),
+                      reinterpret_cast<uintptr_t>(modTemplate));
+        if (s_disableUnsafeFallbacks) return nullptr;
     }
 
-    spdlog::warn("SpawnManager: SpawnWithModTemplate failed for slot {}", playerSlot);
+    // ═══ DONOR-REPURPOSE PATH (Phase 3 aggressive rewrite) ═══
+    // We don't call Kenshi's factory anymore. Reasoning:
+    //   - createRandomCharacter (RVA 0x5836E0) requires a heap-resident
+    //     Faction*. Hook_AICreate's owner@+0x10 reads consistently land in
+    //     EXE static-data (0x7FF6510CBC08 in 12:57 test) and the GameWorld
+    //     +0x0888 harvester didn't surface a real faction across the 5-min
+    //     13:36 session either. Native path is structurally unreliable.
+    //   - User directive 2026-05-07: "if its not working dont patch but
+    //     rewrite aggresively" → abandon native call, repurpose real NPCs
+    //     we already observed in GameWorld via the AICreate hook.
+    //
+    // Mechanics:
+    //   - Hook_AICreate records every Character* it sees into the donor pool.
+    //   - Pick an UNCLAIMED donor (real NPC: valid Faction, CharBody, AI).
+    //   - Mark remote-controlled (suppresses local AI decisions).
+    //   - WritePosition to network coords via existing CharacterAccessor.
+    //   - Claim it so it's not picked again.
+    //
+    // Trade-off: NPCs get repurposed out of the world. Acceptable for an
+    // MVP. Phase 4 will memcpy-clone donors into a private heap so the
+    // originals stay intact.
+    void* donor = entity_hooks::PickFreshDonorCharacter();
+    if (donor) {
+        uintptr_t donorAddr = reinterpret_cast<uintptr_t>(donor);
+        spdlog::info("SpawnManager: donor-repurpose slot={} donor=0x{:X} "
+                     "pos=({:.0f},{:.0f},{:.0f}) (pool size={} free={})",
+                     playerSlot, donorAddr, position.x, position.y, position.z,
+                     entity_hooks::DonorPoolSize(), entity_hooks::DonorPoolFree());
+        entity_hooks::ClaimDonorCharacter(donor);
+        ai_hooks::MarkRemoteControlled(donor);
+        __try {
+            game::CharacterAccessor accessor(donor);
+            accessor.WritePosition(position);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            spdlog::error("SpawnManager: donor-repurpose WritePosition crashed for 0x{:X}",
+                          donorAddr);
+            return nullptr;
+        }
+        spdlog::info("SpawnManager: donor-repurpose SUCCESS — char 0x{:X}", donorAddr);
+        return donor;
+    }
+
+    // ── Fallback: native factory call (only when donor pool is empty) ──
+    // With validated heap-resident faction this should be safe; if not the
+    // validators in CallFactoryCreate defer cleanly without crashing.
+    void* modGD = m_modPlayerTemplates[playerSlot];
+    if (!modGD || !m_factory) {
+        spdlog::warn("SpawnManager: no donor + native factory unavailable "
+                     "(modGD=0x{:X} factory=0x{:X})",
+                     reinterpret_cast<uintptr_t>(modGD),
+                     reinterpret_cast<uintptr_t>(m_factory));
+        return nullptr;
+    }
+    spdlog::info("SpawnManager: donor pool empty — falling back to native "
+                 "(slot={} factory=0x{:X} modGD=0x{:X})",
+                 playerSlot, reinterpret_cast<uintptr_t>(m_factory),
+                 reinterpret_cast<uintptr_t>(modGD));
+    void* character = entity_hooks::CallFactoryCreate(m_factory, modGD,
+                                                      position.x, position.y, position.z);
+    if (character) {
+        uintptr_t charAddr = reinterpret_cast<uintptr_t>(character);
+        if (charAddr > 0x10000 && charAddr < 0x00007FFFFFFFFFFF && (charAddr & 0x7) == 0) {
+            spdlog::info("SpawnManager: native fallback SUCCESS — char 0x{:X}", charAddr);
+            game::CharacterAccessor accessor(character);
+            accessor.WritePosition(position);
+            return character;
+        }
+    }
+    spdlog::warn("SpawnManager: native fallback failed for slot {}", playerSlot);
     return nullptr;
+}
+
+bool SpawnManager::HasSpawnPathReady() const {
+    bool hasFactory = (m_factory != nullptr);
+    bool hasOrigProcess = (m_origProcess != nullptr);
+    bool hasPreCall = m_hasPreCallData;
+    int modCount = m_modTemplateCount.load();
+
+    bool inPlacePath = hasFactory && hasOrigProcess && hasPreCall;
+    bool directPath = hasOrigProcess && hasPreCall;
+    bool modTemplatePath = (modCount > 0) && hasFactory && hasOrigProcess;
+
+    return inPlacePath || directPath || modTemplatePath;
 }
 
 bool SpawnManager::VerifyReadiness() const {
@@ -871,7 +1279,7 @@ bool SpawnManager::VerifyReadiness() const {
         spdlog::warn("  This means the CharacterCreate hook did not fire during loading.");
     }
 
-    return inPlacePath || directPath || modTemplatePath;
+    return HasSpawnPathReady();
 }
 
 } // namespace kmp

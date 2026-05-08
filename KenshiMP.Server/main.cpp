@@ -1,5 +1,6 @@
 #include "server.h"
 #include "kmp/config.h"
+#include "kmp/logtail_launcher.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -39,6 +40,11 @@ int main(int argc, char* argv[]) {
     spdlog::info("|    Kenshi-Online Dedicated Server     |");
     spdlog::info("|         v0.1.0 - Up to 16 Players    |");
     spdlog::info("+======================================+");
+
+    // Spin up the live log-tail viewer if it isn't already running.  The
+    // injector also calls this; whichever fires first wins, the other
+    // becomes a no-op.  Honours KMP_NO_LOGTAIL=1 for unattended runs.
+    kmp::LaunchLogTailIfAbsent();
 
     // Load server config
     kmp::ServerConfig config;

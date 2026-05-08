@@ -218,10 +218,23 @@ void PatternOrchestrator::RegisterBuiltinPatterns(GameFunctions& funcs) {
     // Character animation update — fires for EVERY character each frame.
     // Research mod uses this to track all characters by name in real time.
     // Pattern from GOG: mov rcx,[rbx+320]; mov [rbx+37C],sil
-    reg("CharAnimUpdate", "entity", "Character animation update tick",
-        "48 8B 8B 20 03 00 00 40 88 B3 7C 03 00 00",
-        nullptr, 0,
-        0x0065F6C7, &funcs.CharAnimUpdate);
+    //
+    // NOTE: this pattern is intentionally MID-FUNCTION (it targets a specific
+    // instruction sequence inside the body of CharAnimUpdate, not the function
+    // prologue), so the resolved address will not be 16-byte aligned. The
+    // standard alignment-rejection in ResolveEntry would otherwise drop this
+    // match — flag the entry with allowUnaligned to disable that check.
+    {
+        PatternEntry e;
+        e.id = "CharAnimUpdate";
+        e.category = "entity";
+        e.description = "Character animation update tick";
+        e.pattern = "48 8B 8B 20 03 00 00 40 88 B3 7C 03 00 00";
+        e.hardcodedRVA = 0x0065F6C7;
+        e.targetPtr = &funcs.CharAnimUpdate;
+        e.allowUnaligned = true;
+        Register(std::move(e));
+    }
 
     // ── Game Loop / Time ── (CRITICAL for multiplayer tick)
     reg("GameFrameUpdate", "core", "Main game frame tick",
@@ -510,7 +523,13 @@ void PatternOrchestrator::ResolveEntry(PatternEntry& entry, uintptr_t address,
     // MSVC x64 functions are 16-byte aligned. A non-aligned address from pattern scan
     // or string xref is a mid-function hit (SEH handler block etc.) — reject it so
     // later phases (vtable resolution, call graph) can still try.
-    if (!entry.isGlobalPointer && (address & 0xF) != 0 &&
+    //
+    // Exception: entries flagged allowUnaligned bypass the rejection. CharAnimUpdate's
+    // pattern intentionally targets an instruction *inside* the function (its mid-body
+    // mov sequence), and char_tracker_hooks installs an inline hook there rather than
+    // a function-prologue hook via MinHook — so a non-aligned address is correct, not
+    // a mistake.
+    if (!entry.isGlobalPointer && !entry.allowUnaligned && (address & 0xF) != 0 &&
         (method == ResolutionMethod::PatternScan || method == ResolutionMethod::StringXref ||
          method == ResolutionMethod::HardcodedOffset)) {
         spdlog::warn("  Rejecting '{}' = 0x{:X} via {} — NOT 16-byte aligned (0x{:X}), "

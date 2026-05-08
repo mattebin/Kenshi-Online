@@ -9,6 +9,7 @@
 #include "../hooks/combat_hooks.h"
 #include "../hooks/time_hooks.h"
 #include "../hooks/squad_hooks.h"
+#include "../sys/watcher.h"
 #include "../hooks/faction_hooks.h"
 #include "../hooks/ai_hooks.h"
 #include "kmp/protocol.h"
@@ -16,10 +17,81 @@
 #include "kmp/memory.h"
 #include "kmp/string_convert.h"
 #include <spdlog/spdlog.h>
-#include <cmath>
+#include <unordered_map>
 #include <unordered_set>
+#include <mutex>
 
 namespace kmp {
+
+namespace {
+std::mutex s_primaryRemoteSpawnMutex;
+std::unordered_map<PlayerID, EntityID> s_primaryRemoteEntityByOwner;
+
+bool ShouldMaterializeRemoteSpawn(EntityID entityId,
+                                  EntityType type,
+                                  PlayerID ownerId,
+                                  const std::string& templateName,
+                                  const char* source) {
+    auto& core = Core::Get();
+
+    if (ownerId == 0) {
+        static volatile LONG s_droppedServerOwned = 0;
+        LONG n = InterlockedIncrement(&s_droppedServerOwned);
+        if (n <= 10 || n % 100 == 0) {
+            spdlog::warn("PacketHandler: ignoring {} entity {} owner=0 type={} template='{}' "
+                         "(server-owned/world entity; not a remote player)",
+                         source, entityId, static_cast<int>(type), templateName);
+        }
+        return false;
+    }
+
+    if (ownerId == core.GetLocalPlayerId()) {
+        return false;
+    }
+
+    if (type != EntityType::PlayerCharacter) {
+        static volatile LONG s_droppedNonPlayer = 0;
+        LONG n = InterlockedIncrement(&s_droppedNonPlayer);
+        if (n <= 10 || n % 100 == 0) {
+            spdlog::debug("PacketHandler: ignoring {} entity {} owner={} type={} template='{}' "
+                          "(non-player materialization disabled)",
+                          source, entityId, ownerId, static_cast<int>(type), templateName);
+        }
+        return false;
+    }
+
+    std::lock_guard lock(s_primaryRemoteSpawnMutex);
+    auto it = s_primaryRemoteEntityByOwner.find(ownerId);
+    if (it != s_primaryRemoteEntityByOwner.end()) {
+        if (it->second != entityId) {
+            spdlog::debug("PacketHandler: ignoring extra remote player entity {} for owner {} "
+                          "(primary entity is {})",
+                          entityId, ownerId, it->second);
+        } else {
+            spdlog::debug("PacketHandler: ignoring duplicate remote player spawn entity {} "
+                          "for owner {}",
+                          entityId, ownerId);
+        }
+        return false;
+    }
+
+    s_primaryRemoteEntityByOwner.emplace(ownerId, entityId);
+    spdlog::info("PacketHandler: accepting primary remote player entity {} owner={} "
+                 "type={} template='{}' source={}",
+                 entityId, ownerId, static_cast<int>(type), templateName, source);
+    return true;
+}
+
+void ForgetPrimaryRemoteSpawn(PlayerID ownerId) {
+    std::lock_guard lock(s_primaryRemoteSpawnMutex);
+    s_primaryRemoteEntityByOwner.erase(ownerId);
+}
+
+void ClearPrimaryRemoteSpawns() {
+    std::lock_guard lock(s_primaryRemoteSpawnMutex);
+    s_primaryRemoteEntityByOwner.clear();
+}
+} // namespace
 
 // Forward declarations for game function call types
 // NOTE: CharacterMoveTo removed — pattern scanner found mid-function address, not safe to call
@@ -53,6 +125,14 @@ public:
         if (s_packetNum <= 100 || s_packetNum % 50 == 0) {
             spdlog::debug("PacketHandler: pkt #{} type={} size={} ch={}",
                           s_packetNum, static_cast<int>(header.type), size, channel);
+        }
+        // Watcher: log packet dispatch at info level + flush, so the
+        // last packet processed before a silent termination is recoverable.
+        // Off by default — flip verboseWatchLog in client.json to enable.
+        if (kmp::watcher::IsEnabled()) {
+            spdlog::info("WATCH/PKT: dispatch #{} type={} size={} ch={}",
+                         s_packetNum, static_cast<int>(header.type), size, channel);
+            spdlog::default_logger()->flush();
         }
 
         // ── SAFE messages (work without game world) ──
@@ -232,6 +312,14 @@ public:
             spdlog::debug("PacketHandler: Unknown message type 0x{:02X}", static_cast<uint8_t>(header.type));
             break;
         }
+        // Watcher: dispatch returned cleanly. If a session log truncates with
+        // a "WATCH/PKT: dispatch ..." line but no matching "completed" line,
+        // the handler for that specific packet type is the crash trigger.
+        if (kmp::watcher::IsEnabled()) {
+            spdlog::info("WATCH/PKT: dispatch #{} type={} completed",
+                         s_packetNum, static_cast<int>(header.type));
+            spdlog::default_logger()->flush();
+        }
     }
 
 private:
@@ -240,6 +328,7 @@ private:
         if (!reader.ReadRaw(&msg, sizeof(msg))) return;
 
         auto& core = Core::Get();
+        ClearPrimaryRemoteSpawns();
         core.SetLocalPlayerId(msg.playerId);
         core.SetConnected(true);
         core.TransitionTo(ClientPhase::Connected);
@@ -357,6 +446,7 @@ private:
         core.GetNativeHud().AddSystemMessage(leftName + " left the game");
         core.GetOverlay().RemovePlayer(msg.playerId);
         core.GetPlayerController().RemoveRemotePlayer(msg.playerId);
+        ForgetPrimaryRemoteSpawn(msg.playerId);
 
         // Notify sync orchestrator engines
         if (auto* so = core.GetSyncOrchestrator()) {
@@ -478,13 +568,40 @@ private:
             return; // Don't spawn — we already have the character in-game
         }
 
+        EntityType entityType = static_cast<EntityType>(type);
+        if (!ShouldMaterializeRemoteSpawn(entityId, entityType, ownerId, templateName, "spawn")) {
+            return;
+        }
+
         spdlog::info("PacketHandler: Entity spawn id={} type={} owner={} template='{}' at ({:.1f}, {:.1f}, {:.1f})",
                      entityId, type, ownerId, templateName, px, py, pz);
 
-        // Log to HUD for visibility
-        core.GetNativeHud().LogStep("NET", "Remote entity spawn: id=" + std::to_string(entityId)
-                              + " owner=" + std::to_string(ownerId)
-                              + " '" + templateName + "'");
+        // Throttle HUD spam during connect-time entity floods. The server
+        // can dump 100+ entity spawns in a single millisecond on connect,
+        // and even with the LogStep dedupe the per-spawn LogStep call is
+        // pure noise. Show first 3 then a period summary; spdlog above
+        // captures every single one for debugging.
+        {
+            static volatile LONG s_spawnLogCount = 0;
+            static volatile LONG s_spawnLogSilenced = 0;
+            static thread_local std::chrono::steady_clock::time_point s_lastSummary{};
+            LONG n = InterlockedIncrement(&s_spawnLogCount);
+            if (n <= 3) {
+                core.GetNativeHud().LogStep("NET",
+                    "Remote entity spawn: id=" + std::to_string(entityId)
+                  + " owner=" + std::to_string(ownerId)
+                  + " '" + templateName + "'");
+            } else {
+                LONG silenced = InterlockedIncrement(&s_spawnLogSilenced);
+                auto nowTp = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        nowTp - s_lastSummary).count() > 1000) {
+                    s_lastSummary = nowTp;
+                    core.GetNativeHud().LogStep("NET",
+                        "+ " + std::to_string(silenced) + " more entity spawns");
+                }
+            }
+        }
 
         // Save the first remote player character's position as host spawn point.
         // When a joiner receives entity spawns from the host, they'll teleport there.
@@ -499,7 +616,7 @@ private:
         }
 
         // Register in entity registry as remote (gameObject=nullptr until spawned)
-        registry.RegisterRemote(entityId, static_cast<EntityType>(type), ownerId, spawnPos);
+        registry.RegisterRemote(entityId, entityType, ownerId, spawnPos);
 
         // Add initial interpolation snapshot
         float now = SessionTime();
@@ -538,7 +655,8 @@ private:
             SpawnRequest req;
             req.netId        = entityId;
             req.owner        = ownerId;
-            req.type         = static_cast<EntityType>(type);
+            req.type         = entityType;
+            // Convert UTF-8 template name back to local ANSI for SpawnManager cache matching
             req.templateName = Utf8ToAnsi(templateName.c_str(), (int)templateName.size());
             req.position     = spawnPos;
             req.rotation     = rot;
@@ -551,13 +669,36 @@ private:
             }
             spawnMgr.QueueSpawn(req);
 
-            auto* rp = core.GetPlayerController().GetRemotePlayer(ownerId);
-            std::string ownerName = rp ? rp->playerName : ("Player_" + std::to_string(ownerId));
-            if (spawnMgr.IsReady()) {
-                core.GetNativeHud().AddSystemMessage("Spawning " + ownerName + "'s character...");
-            } else {
-                core.GetNativeHud().AddSystemMessage("Queued " + ownerName + "'s character (waiting for game event)...");
-                spdlog::info("PacketHandler: SpawnManager not ready yet — entity {} queued for deferred spawn", entityId);
+            // Notify on HUD — throttled so connect-time floods don't slam
+            // MyGUI. Same architecture as the entity-spawn LogStep above:
+            // first few go through, rest get periodic summaries. spdlog
+            // line below still fires for every queue (debug visibility).
+            spdlog::info("PacketHandler: SpawnManager{} — entity {} queued for spawn",
+                         spawnMgr.IsReady() ? " ready" : " not ready yet",
+                         entityId);
+            {
+                static volatile LONG s_queueLogCount = 0;
+                static volatile LONG s_queueLogSilenced = 0;
+                static thread_local std::chrono::steady_clock::time_point s_lastSummary{};
+                LONG n = InterlockedIncrement(&s_queueLogCount);
+                if (n <= 3) {
+                    auto* rp = core.GetPlayerController().GetRemotePlayer(ownerId);
+                    std::string ownerName = rp ? rp->playerName : ("Player_" + std::to_string(ownerId));
+                    if (spawnMgr.IsReady()) {
+                        core.GetNativeHud().AddSystemMessage("Spawning " + ownerName + "'s character...");
+                    } else {
+                        core.GetNativeHud().AddSystemMessage("Queued " + ownerName + "'s character (waiting for game event)...");
+                    }
+                } else {
+                    LONG silenced = InterlockedIncrement(&s_queueLogSilenced);
+                    auto nowTp = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                            nowTp - s_lastSummary).count() > 1000) {
+                        s_lastSummary = nowTp;
+                        core.GetNativeHud().AddSystemMessage(
+                            "Queued + " + std::to_string(silenced) + " more characters");
+                    }
+                }
             }
         }
     }
@@ -697,7 +838,18 @@ private:
 
         // Try to apply damage via the game's native damage function.
         // ApplyDamage dereferences attacker, so only call with a valid attacker.
-        if (funcs.ApplyDamage) {
+        //
+        // Gated by ClientConfig::useNativeApplyDamage (default false on
+        // 1.0.68).  The pattern-resolved RVA (0x7A33A0) doesn't match
+        // the master_index entries for either applyDamage variant
+        // (MedicalSystem::applyDamage 0x64F300 / HealthPartStatus::
+        // applyDamage 0x644A70) — calling it via our 6-arg shim
+        // corrupted the heap during combat tests (CrashWatchdog
+        // STATUS_HEAP_CORRUPTION 0xC0000374, PID 22724 on 2026-05-07).
+        // The direct-memory-write fallback below is sufficient to
+        // sync health across the network without touching the
+        // potentially-mismatched native function.
+        if (funcs.ApplyDamage && core.GetConfig().useNativeApplyDamage) {
             void* attackerObj = (msg.attackerId != INVALID_ENTITY)
                 ? registry.GetGameObject(msg.attackerId) : nullptr;
             if (attackerObj) {
@@ -1068,6 +1220,7 @@ private:
 
             Vec3 pos(px, py, pz);
             Quat rot = Quat::Decompress(compQuat);
+            EntityType entityType = static_cast<EntityType>(type);
 
             // Skip our own entities — they already exist in-game.
             // Remap local ID to server ID if needed.
@@ -1080,6 +1233,10 @@ private:
                 continue;
             }
 
+            if (!ShouldMaterializeRemoteSpawn(entityId, entityType, ownerId, templateName, "snapshot")) {
+                continue;
+            }
+
             // Save host spawn point from first remote entity in world snapshot
             if (!core.HasHostSpawnPoint() && pos.x != 0.f && pos.z != 0.f) {
                 core.SetHostSpawnPoint(pos);
@@ -1088,7 +1245,7 @@ private:
             }
 
             // Register as remote entity
-            registry.RegisterRemote(entityId, static_cast<EntityType>(type), ownerId, pos);
+            registry.RegisterRemote(entityId, entityType, ownerId, pos);
             core.GetInterpolation().AddSnapshot(entityId, now, pos, rot);
 
             // ALWAYS queue spawn — even if SpawnManager isn't ready yet.
@@ -1098,7 +1255,7 @@ private:
                 SpawnRequest req;
                 req.netId        = entityId;
                 req.owner        = ownerId;
-                req.type         = static_cast<EntityType>(type);
+                req.type         = entityType;
                 // Convert UTF-8 template name back to local ANSI for SpawnManager cache matching
                 req.templateName = Utf8ToAnsi(templateName.c_str(), (int)templateName.size());
                 req.position     = pos;

@@ -59,14 +59,16 @@ bool ClientConfig::Load(const std::string& path) {
         if (j.contains("masterServer")) masterServer = j["masterServer"].get<std::string>();
         if (j.contains("masterPort"))   masterPort   = j["masterPort"].get<uint16_t>();
         if (j.contains("useSyncOrchestrator")) useSyncOrchestrator = j["useSyncOrchestrator"].get<bool>();
-
-        // ── Validate loaded values ──
-        if (playerName.size() > KMP_MAX_NAME_LENGTH)
-            playerName.resize(KMP_MAX_NAME_LENGTH);
-        lastPort    = Clamp<uint16_t>(lastPort, 1024, 65535);
-        overlayScale = Clamp(overlayScale, 0.1f, 10.0f);
-        masterPort  = Clamp<uint16_t>(masterPort, 1024, 65535);
-
+        if (j.contains("verboseWatchLog"))     verboseWatchLog     = j["verboseWatchLog"].get<bool>();
+        if (j.contains("kenshiCrashRecovery")) kenshiCrashRecovery = j["kenshiCrashRecovery"].get<bool>();
+        if (j.contains("enableCharacterCreateHook"))
+            enableCharacterCreateHook = j["enableCharacterCreateHook"].get<bool>();
+        if (j.contains("safeModeFirstConnectedCreate"))
+            safeModeFirstConnectedCreate = j["safeModeFirstConnectedCreate"].get<bool>();
+        if (j.contains("factionSignExtRescue"))
+            factionSignExtRescue = j["factionSignExtRescue"].get<bool>();
+        if (j.contains("useNativeApplyDamage"))
+            useNativeApplyDamage = j["useNativeApplyDamage"].get<bool>();
         return true;
     } catch (...) {
         return false;
@@ -84,6 +86,12 @@ bool ClientConfig::Save(const std::string& path) const {
     j["masterServer"] = masterServer;
     j["masterPort"]   = masterPort;
     j["useSyncOrchestrator"] = useSyncOrchestrator;
+    j["verboseWatchLog"]              = verboseWatchLog;
+    j["kenshiCrashRecovery"]          = kenshiCrashRecovery;
+    j["enableCharacterCreateHook"]    = enableCharacterCreateHook;
+    j["safeModeFirstConnectedCreate"] = safeModeFirstConnectedCreate;
+    j["factionSignExtRescue"]         = factionSignExtRescue;
+    j["useNativeApplyDamage"]         = useNativeApplyDamage;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;
@@ -108,6 +116,7 @@ bool ServerConfig::Load(const std::string& path) {
         if (j.contains("tickRate"))   tickRate   = j["tickRate"].get<int>();
         if (j.contains("pvpEnabled")) pvpEnabled = j["pvpEnabled"].get<bool>();
         if (j.contains("gameSpeed"))  gameSpeed  = j["gameSpeed"].get<float>();
+        if (j.contains("enablePortForwarding")) enablePortForwarding = j["enablePortForwarding"].get<bool>();
         if (j.contains("masterServer")) masterServer = j["masterServer"].get<std::string>();
         if (j.contains("masterPort"))   masterPort   = j["masterPort"].get<uint16_t>();
 
@@ -136,6 +145,7 @@ bool ServerConfig::Save(const std::string& path) const {
     j["tickRate"]   = tickRate;
     j["pvpEnabled"] = pvpEnabled;
     j["gameSpeed"]  = gameSpeed;
+    j["enablePortForwarding"] = enablePortForwarding;
     j["masterServer"] = masterServer;
     j["masterPort"]   = masterPort;
 

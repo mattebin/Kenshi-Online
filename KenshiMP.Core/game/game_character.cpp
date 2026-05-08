@@ -172,9 +172,29 @@ static void ProbeEquipmentOffset(uintptr_t charPtr) {
 
 Vec3 CharacterAccessor::GetPosition() const {
     Vec3 pos;
-    int offset = GetOffsets().character.position;
-    if (offset >= 0) {
-        Memory::ReadVec3(m_ptr + offset, pos.x, pos.y, pos.z);
+    auto& offsets = GetOffsets().character;
+    // Primary: cached position at character + 0x48 (KServerMod-verified).
+    // This is populated frame 1 after savegame load.
+    if (offsets.position >= 0) {
+        Memory::ReadVec3(m_ptr + offsets.position, pos.x, pos.y, pos.z);
+        if (pos.x != 0.0f || pos.y != 0.0f || pos.z != 0.0f) return pos;
+    }
+    // Fallback: walk the AnimationClass→CharMovement→writable Vec3 chain.
+    // Borrowed from andperks6 commit e903674: the cached position stays at
+    // origin briefly during world load if Kenshi hasn't ticked the character
+    // yet; the writable chain has the real value sooner. Without this, the
+    // first network position broadcast is (0,0,0) and the server interprets
+    // it as a teleport.
+    if (offsets.animClassOffset >= 0) {
+        uintptr_t animClass = 0;
+        if (Memory::Read(m_ptr + offsets.animClassOffset, animClass) && animClass) {
+            uintptr_t charMov = 0;
+            if (Memory::Read(animClass + offsets.charMovementOffset, charMov) && charMov) {
+                Memory::ReadVec3(charMov + offsets.writablePosOffset
+                                          + offsets.writablePosVecOffset,
+                                 pos.x, pos.y, pos.z);
+            }
+        }
     }
     return pos;
 }

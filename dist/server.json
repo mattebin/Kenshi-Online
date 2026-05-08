@@ -1,7 +1,8 @@
 {
   "gameSpeed": 1.0,
+  "enablePortForwarding": false,
   "masterPort": 27801,
-  "masterServer": "162.248.94.149",
+  "masterServer": "",
   "maxPlayers": 16,
   "password": "",
   "port": 27800,

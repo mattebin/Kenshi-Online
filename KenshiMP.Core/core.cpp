@@ -3,6 +3,7 @@
 #include "hooks/render_hooks.h"
 #include "hooks/input_hooks.h"
 #include "hooks/entity_hooks.h"
+#include "sys/watcher.h"
 #include "hooks/movement_hooks.h"
 #include "hooks/combat_hooks.h"
 #include "hooks/world_hooks.h"
@@ -14,6 +15,7 @@
 #include "hooks/faction_hooks.h"
 #include "hooks/building_hooks.h"
 #include "hooks/ai_hooks.h"
+#include "native/our_factory.h"
 #include "hooks/resource_hooks.h"
 #include "hooks/squad_spawn_hooks.h"
 #include "hooks/char_tracker_hooks.h"
@@ -62,13 +64,15 @@ volatile int g_lastCharacterCreateNum = 0;
 // __fastfail, TerminateProcess, or any uncatchable exception, the file shows
 // the last known step. Uses direct C I/O with fflush for immediate write.
 static void WriteBreadcrumb(const char* step, int tickNum = 0, int extra = 0) {
-    // Write every Nth tick to avoid excessive I/O, PLUS always write the first 50
+    // Cwd-relative — works for any Kenshi install path. Single-line file
+    // continuously rewritten so the *last surviving step* is always readable
+    // even if the spdlog buffer is mid-flight when the process is terminated.
     static int s_writeCount = 0;
-    if (tickNum > 50 && tickNum % 10 != 0) return; // Skip most ticks after warmup
+    if (tickNum > 50 && tickNum % 10 != 0) return;
     s_writeCount++;
 
     FILE* f = nullptr;
-    fopen_s(&f, "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Kenshi\\KenshiOnline_BREADCRUMB.txt", "w");
+    fopen_s(&f, "KenshiOnline_BREADCRUMB.txt", "w");
     if (f) {
         fprintf(f, "tick=%d step=%s extra=%d charCreate=#%d writes=%d\n",
                 tickNum, step, extra, g_lastCharacterCreateNum, s_writeCount);
@@ -93,8 +97,392 @@ static int SEH_DumpStack(char* outBuf, int outBufSize, uint64_t rsp) {
     return pos;
 }
 
+// ── Static zero buffer for the engine null-deref recovery ──
+// The recurring engine crash at the discovered RVA reads two floats from
+// rax+0x90 and rax+0x34 when rax is null. We can't fix the underlying bug
+// (some periodic AI/animation calc finds a null target pointer in slot
+// +0x1A8 of the caller's `this`), but we can supply a safe zero-filled
+// buffer at the moment of fault, redirect rax to it, and continue. The
+// instructions then read 0.0f, the function multiplies through to 0.0f,
+// returns "false", and the game continues as if the calc didn't fire this
+// frame.
+//
+// 0x200 bytes is overkill — the disassembled instructions only deref +0x90
+// and +0x34 — but the margin protects against any compiler-emitted prefetch
+// or look-ahead reads we can't see at this offset.
+alignas(16) static const uint8_t s_safeZeroBuf[0x200] = {0};
+
+// Pattern-discovered RVA of the engine null-deref site. Set once at
+// Core::Initialize via a scan of kenshi_x64.exe's .text section for the
+// instruction signature `movss xmm0,[rax+0x90]; mulss xmm0,[rax+0x34]`
+// (bytes F3 0F 10 80 90 00 00 00 F3 0F 59 40 34). Zero means "didn't find
+// the pattern" — recovery handler stays dormant in that case so we never
+// redirect rax in a context where the bug isn't the one we know.
+//
+// Atomic because the VEH callback can fire from any thread; the scan
+// runs serially during init.
+static std::atomic<uintptr_t> g_kenshiNullDerefRVA{0};
+
+// Master gate from ClientConfig::kenshiCrashRecovery. Default off until
+// Core::Initialize sees the config; once on, every fault that matches the
+// scanned RVA gets redirected. Same atomic-bool reasoning as above.
+static std::atomic<bool> g_kenshiCrashRecoveryEnabled{false};
+
+// Master gate from ClientConfig::factionSignExtRescue. Default off until
+// Core::Initialize sees the config. When enabled, the VEH rescue catches
+// access violations whose target address is of the form 0xFFFFFFFF<low>
+// (high 32 bits all 1s = sign-extended from a negative int32) — the
+// signature of the recurring Faction*+0x250 crash documented in
+// re_kenshi 2/manual_findings/notes/bind_crash_faction_0x250_signext.md.
+//
+// On match, the handler iterates the 16 GPRs to find the one whose
+// upper 32 bits are 0xFFFFFFFF and whose value is within a small
+// struct-offset window of the AV target, masks that register's upper
+// bits to 0, and resumes. Same idea as the engine null-deref redirect:
+// don't fix the bug, supply a sane register at the moment of fault and
+// let the game's per-tick code paths drain naturally.
+static std::atomic<bool> g_factionSignExtRescueEnabled{false};
+
+// Scan helper — runs on the kenshi_x64.exe module loaded into the host
+// process. We're looking for the specific function context where Kenshi
+// dereferences a null pointer at +0x90:
+//
+//     mov  rax, [rcx+0x1A8]          ; 7 bytes  (load potentially-null ptr)
+//     movss xmm2, [rip+disp32]       ; 8 bytes  (RIP-rel, varies per build)
+//     movss xmm1, [rip+disp32]       ; 8 bytes  (RIP-rel, varies per build)
+//     movss xmm0, [rax+0x90]         ; 8 bytes  ← FAULT SITE
+//     mulss xmm0, [rax+0x34]         ; 5 bytes
+//
+// Earlier scanner matched only the last 13 bytes (`F3 0F 10 80 90 00 00 00
+// F3 0F 59 40 34`) which collided with another function in test session
+// 27036 — armed at game+0x643AFB while the actual fault was at +0x644365.
+//
+// The two flanking RIP-relative loads have build-varying disp32, but the
+// `mov rax, [rcx+0x1A8]` (`48 8B 81 A8 01 00 00`) and the fault+mulss bytes
+// are stable. We anchor on `mov rax, [rcx+0x1A8]` and require the fault
+// bytes to live exactly 23 bytes after it (7 + 8 + 8 = 23). That two-piece
+// match is the function we want — if more than one match exists, log all
+// and pick the first; the recovery handler only redirects rax when the
+// faulting RIP equals the chosen RVA so a wrong pick stays inert.
+static uintptr_t ScanForKenshiNullDerefSite() {
+    HMODULE host = GetModuleHandleA(nullptr);
+    if (!host) return 0;
+    auto* dosH = reinterpret_cast<const IMAGE_DOS_HEADER*>(host);
+    auto* ntH  = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                    reinterpret_cast<const uint8_t*>(host) + dosH->e_lfanew);
+    auto* sec  = IMAGE_FIRST_SECTION(ntH);
+    const uint8_t* textBase = nullptr;
+    size_t textSize = 0;
+    for (unsigned i = 0; i < ntH->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (memcmp(sec->Name, ".text", 5) == 0) {
+            textBase = reinterpret_cast<const uint8_t*>(host) + sec->VirtualAddress;
+            textSize = sec->Misc.VirtualSize;
+            break;
+        }
+    }
+    if (!textBase) return 0;
+
+    static constexpr uint8_t kAnchor[] = {
+        0x48, 0x8B, 0x81, 0xA8, 0x01, 0x00, 0x00     // mov rax, [rcx+0x1A8]
+    };
+    static constexpr uint8_t kFault[] = {
+        0xF3, 0x0F, 0x10, 0x80, 0x90, 0x00, 0x00, 0x00, // movss xmm0,[rax+0x90]
+        0xF3, 0x0F, 0x59, 0x40, 0x34                    // mulss xmm0,[rax+0x34]
+    };
+    constexpr size_t kAnchorLen = sizeof(kAnchor);
+    constexpr size_t kFaultLen  = sizeof(kFault);
+    constexpr size_t kAnchorToFault = 23; // bytes from anchor start to fault
+    constexpr size_t kFullLen = kAnchorToFault + kFaultLen;
+    if (textSize < kFullLen) return 0;
+
+    uintptr_t firstMatch = 0;
+    int matches = 0;
+    for (size_t i = 0; i + kFullLen <= textSize; ++i) {
+        if (memcmp(textBase + i, kAnchor, kAnchorLen) != 0) continue;
+        if (memcmp(textBase + i + kAnchorToFault, kFault, kFaultLen) != 0) continue;
+        // Match — RVA of the FAULT instruction (where the AV will fire).
+        uintptr_t rva = static_cast<uintptr_t>(
+            (textBase + i + kAnchorToFault) - reinterpret_cast<const uint8_t*>(host));
+        if (matches == 0) firstMatch = rva;
+        ++matches;
+        spdlog::info("Core: ScanForKenshiNullDerefSite — match #{} at game+0x{:X}",
+                     matches, rva);
+        if (matches >= 8) break; // safety cap on logging
+    }
+    if (matches == 0) {
+        spdlog::warn("Core: ScanForKenshiNullDerefSite — no match in .text "
+                     "(0x{:X} bytes scanned)", textSize);
+    }
+    return firstMatch;
+}
+
 static LONG CALLBACK VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // ── Recovery: narrow engine null-deref ([rax+0x90] only) ──
+    // Earlier this was a "universal" rescue that fired on ANY read AV
+    // with target<0x10000 anywhere in game/Ogre/MyGUI and redirected
+    // a zero GPR to s_safeZeroBuf.  That was too greedy: the
+    // allocator code paths in game and Ogre transiently hold a
+    // register at 0 during normal allocation work, and redirecting
+    // it to safeZeroBuf made the allocator write its metadata to
+    // our 0x200-byte buffer.  Subsequent free of that "allocation"
+    // saw garbage metadata → STATUS_HEAP_CORRUPTION (CrashWatchdog
+    // confirmed exit code 0xC0000374 in PID 23012 on 2026-05-07).
+    //
+    // Tightened back to the original `bac5445` shape: only fire
+    // when ALL of these hold:
+    //   - read AV
+    //   - target is exactly 0x90 (the documented bug — see
+    //     KNOWN_ISSUES.md and the bac5445 commit message)
+    //   - RAX is the zero register (matches the disassembled
+    //     `movss xmm0, [rax+0x90]` site)
+    //   - RIP is inside the game module .text
+    //
+    // This is conservative.  It will miss other null-deref AVs at
+    // different offsets, but it WILL NOT corrupt the heap by
+    // redirecting unrelated allocator code paths.  Other null-deref
+    // sites (if they appear) get their own tightened rescue arm
+    // each — never another wide net.
+    if (g_kenshiCrashRecoveryEnabled.load(std::memory_order_relaxed) &&
+        code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */ &&
+        ep->ExceptionRecord->ExceptionInformation[1] == 0x90 &&
+        ep->ContextRecord->Rax == 0 &&
+        g_gameModuleBase != 0)
+    {
+        uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+            ep->ExceptionRecord->ExceptionAddress);
+        bool inGame = (fault_rip >= g_gameModuleBase &&
+                       fault_rip <  g_gameModuleEnd);
+        if (inGame) {
+            ep->ContextRecord->Rax =
+                reinterpret_cast<DWORD64>(s_safeZeroBuf);
+            static volatile LONG s_recoverCount = 0;
+            LONG n = InterlockedIncrement(&s_recoverCount);
+            if (n == 1 || (n & (n - 1)) == 0) {
+                char buf[160];
+                sprintf_s(buf,
+                    "KMP RECOVER #%ld: game null-deref at +0x90, "
+                    "rip=game+0x%llX, redirected rax to safeZeroBuf\n",
+                    n, (unsigned long long)(fault_rip - g_gameModuleBase));
+                OutputDebugStringA(buf);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+
+    // ── Recovery: sign-extended Faction* dereference (bind-path crash) ──
+    // The recurring crash blocking remote-character rendering AVs at an
+    // address of the form 0xFFFFFFFF<low>, which is a 32-bit value
+    // sign-extended to 64 bits and then treated as a pointer. The
+    // canonical site is `cmp [reg+0x250], 0` after `getFaction()`
+    // returns, but the same shape recurs at multiple call sites and
+    // possibly inside other DLLs. See manual_findings/notes/
+    // bind_crash_faction_0x250_signext.md for the full Ghidra recon.
+    //
+    // Rather than patching each producer of the bad value (some of which
+    // live outside kenshi_x64.exe), catch the AV here, find the GPR
+    // whose value is 0xFFFFFFFF<gpr_low> and within a small struct-offset
+    // window of the fault target, mask its upper 32 bits to 0, and
+    // resume. Re-execution then dereferences a valid heap pointer.
+    if (g_factionSignExtRescueEnabled.load(std::memory_order_relaxed) &&
+        code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */)
+    {
+        uint64_t target = static_cast<uint64_t>(
+            ep->ExceptionRecord->ExceptionInformation[1]);
+        // Only act on AV targets that are in the kernel-form sign-ext
+        // shape: upper 32 bits all 1s. Real kernel addresses on Windows
+        // x64 user-mode never appear in user-mode code paths, and a
+        // negative-int sign-extended user pointer is exactly this shape.
+        const uint64_t kHighMask = 0xFFFFFFFF00000000ULL;
+        if ((target & kHighMask) == kHighMask) {
+            CONTEXT* ctx = ep->ContextRecord;
+            DWORD64* gprs[16] = {
+                &ctx->Rax, &ctx->Rcx, &ctx->Rdx, &ctx->Rbx,
+                &ctx->Rsp, &ctx->Rbp, &ctx->Rsi, &ctx->Rdi,
+                &ctx->R8,  &ctx->R9,  &ctx->R10, &ctx->R11,
+                &ctx->R12, &ctx->R13, &ctx->R14, &ctx->R15
+            };
+            const char* gprNames[16] = {
+                "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
+            };
+            // Find a GPR with the same sign-ext shape AND whose value
+            // is within 0x1000 bytes BELOW the fault target (i.e. the
+            // offset (target - gpr) is a small struct field offset).
+            // 0x1000 covers the documented +0x250 case plus headroom for
+            // other field offsets that could trigger the same shape.
+            int matchIdx = -1;
+            int matchCount = 0;
+            uint64_t fieldOffset = 0;
+            for (int i = 0; i < 16; ++i) {
+                uint64_t v = static_cast<uint64_t>(*gprs[i]);
+                if ((v & kHighMask) != kHighMask) continue;
+                if (target < v) continue;
+                uint64_t off = target - v;
+                if (off > 0x1000) continue;
+                ++matchCount;
+                if (matchIdx < 0) {
+                    matchIdx = i;
+                    fieldOffset = off;
+                }
+            }
+            // Skip RSP — never mask the stack pointer even if it
+            // happens to match. RSP being in kernel-form would be a
+            // genuinely fatal stack-corruption crash.
+            if (matchIdx == 4 /* rsp */) {
+                matchIdx = -1;
+                matchCount = 0;
+            }
+            if (matchIdx >= 0) {
+                uint64_t before = static_cast<uint64_t>(*gprs[matchIdx]);
+                uint64_t after  = before & 0x00000000FFFFFFFFULL;
+                *gprs[matchIdx] = static_cast<DWORD64>(after);
+
+                static volatile LONG s_signExtCount = 0;
+                LONG n = InterlockedIncrement(&s_signExtCount);
+                // Power-of-two throttle: log #1, #2, #4, #8, ...
+                if (n == 1 || (n & (n - 1)) == 0) {
+                    char buf[256];
+                    uintptr_t fault_rip = reinterpret_cast<uintptr_t>(
+                        ep->ExceptionRecord->ExceptionAddress);
+                    uint64_t rva = (g_gameModuleBase != 0 &&
+                                    fault_rip >= g_gameModuleBase &&
+                                    fault_rip < g_gameModuleEnd)
+                                   ? (fault_rip - g_gameModuleBase)
+                                   : 0;
+                    sprintf_s(buf,
+                        "KMP RESCUE #%ld: sign-ext Faction-deref at "
+                        "rip=0x%llX (game+0x%llX), %s=0x%llX -> 0x%llX, "
+                        "+0x%llX (%d GPR matches)\n",
+                        n,
+                        (unsigned long long)fault_rip,
+                        (unsigned long long)rva,
+                        gprNames[matchIdx],
+                        (unsigned long long)before,
+                        (unsigned long long)after,
+                        (unsigned long long)fieldOffset,
+                        matchCount);
+                    OutputDebugStringA(buf);
+                }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+    }
+
+    // ── Recovery: MyGUI use-after-free dereference ──
+    // The recurring connect-time crash documented in
+    // `KenshiOnline_CRASH.log` lands at `[reg+0x46C]` with `inMyGUI=1`.
+    // Root cause is a stale Widget pointer that's been freed and its
+    // memory recycled — the AV target `0x...920 + 0x46C = 0x...D8C` is
+    // a heap-form address whose page no longer maps a valid widget.
+    //
+    // Strategy: when an AV fires inside the MyGUIEngine_x64.dll address
+    // range AND it's a READ AV with target shape `[gpr + small offset]`,
+    // redirect that GPR to a static zero buffer (`s_safeZeroBuf`, the
+    // same one the engine null-deref rescue uses) and resume. The MyGUI
+    // function reads zeros, returns "no widget here" or its equivalent
+    // null-handling branch, and the process keeps running.
+    //
+    // This is a hammer — it doesn't fix the use-after-free, just makes
+    // the dereference harmless. Trade-off: a repeated UAF on the same
+    // widget will re-fire every frame and we'll catch it every frame,
+    // logging once per power-of-two. That's acceptable; the alternative
+    // is process termination during connect-time entity floods.
+    //
+    // Only fires for READ AVs. WRITE AVs to a stale pointer would
+    // silently corrupt the zero buffer and could mask real bugs in our
+    // own code, so writes still propagate.
+    if (code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 0 /* read */)
+    {
+        // Resolve MyGUI module bounds once. Lazy because the module loads
+        // after our DllMain — by the time any VEH fires, it's there.
+        static uintptr_t s_myguiResRescueBase = 0, s_myguiResRescueEnd = 0;
+        static bool s_myguiResolved = false;
+        if (!s_myguiResolved) {
+            s_myguiResolved = true;
+            HMODULE h = GetModuleHandleA("MyGUIEngine_x64.dll");
+            if (h) {
+                s_myguiResRescueBase = reinterpret_cast<uintptr_t>(h);
+                auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(h);
+                auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                    reinterpret_cast<const uint8_t*>(h) + dos->e_lfanew);
+                s_myguiResRescueEnd = s_myguiResRescueBase +
+                                       nt->OptionalHeader.SizeOfImage;
+            }
+        }
+
+        uintptr_t rescue_rip = reinterpret_cast<uintptr_t>(
+            ep->ExceptionRecord->ExceptionAddress);
+        bool inMyGUIRescue = (s_myguiResRescueBase != 0 &&
+                              rescue_rip >= s_myguiResRescueBase &&
+                              rescue_rip <  s_myguiResRescueEnd);
+
+        if (inMyGUIRescue) {
+            uint64_t target = static_cast<uint64_t>(
+                ep->ExceptionRecord->ExceptionInformation[1]);
+            CONTEXT* ctx = ep->ContextRecord;
+            DWORD64* gprs[16] = {
+                &ctx->Rax, &ctx->Rcx, &ctx->Rdx, &ctx->Rbx,
+                &ctx->Rsp, &ctx->Rbp, &ctx->Rsi, &ctx->Rdi,
+                &ctx->R8,  &ctx->R9,  &ctx->R10, &ctx->R11,
+                &ctx->R12, &ctx->R13, &ctx->R14, &ctx->R15
+            };
+            const char* gprNames[16] = {
+                "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
+            };
+            // Find a GPR whose value is within 0x2000 bytes BELOW the
+            // fault target. 0x2000 covers MyGUI Widget which is ~0x500
+            // bytes plus subskin/parent pointer chains. Skip RSP/RBP
+            // since masking those would corrupt the call frame.
+            int matchIdx = -1;
+            int matchCount = 0;
+            uint64_t fieldOffset = 0;
+            for (int i = 0; i < 16; ++i) {
+                if (i == 4 /*rsp*/ || i == 5 /*rbp*/) continue;
+                uint64_t v = static_cast<uint64_t>(*gprs[i]);
+                if (v == 0) continue;          // null is a different bug
+                if (target < v) continue;
+                uint64_t off = target - v;
+                if (off > 0x2000) continue;
+                ++matchCount;
+                if (matchIdx < 0) {
+                    matchIdx = i;
+                    fieldOffset = off;
+                }
+            }
+            if (matchIdx >= 0) {
+                uint64_t before = static_cast<uint64_t>(*gprs[matchIdx]);
+                *gprs[matchIdx] = reinterpret_cast<DWORD64>(s_safeZeroBuf);
+
+                static volatile LONG s_myguiCount = 0;
+                LONG n = InterlockedIncrement(&s_myguiCount);
+                if (n == 1 || (n & (n - 1)) == 0) {
+                    char buf[256];
+                    sprintf_s(buf,
+                        "KMP RESCUE #%ld: MyGUI UAF deref at rip=0x%llX "
+                        "(MyGUI+0x%llX), %s=0x%llX -> safeZeroBuf, "
+                        "+0x%llX (%d GPR matches)\n",
+                        n,
+                        (unsigned long long)rescue_rip,
+                        (unsigned long long)(rescue_rip - s_myguiResRescueBase),
+                        gprNames[matchIdx],
+                        (unsigned long long)before,
+                        (unsigned long long)fieldOffset,
+                        matchCount);
+                    OutputDebugStringA(buf);
+                }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+    }
 
     // Handle fatal exception types + heap/C++ exceptions for crash diagnosis.
     // 0xC0000374 = STATUS_HEAP_CORRUPTION, 0xC0000602 = STATUS_FAIL_FAST_EXCEPTION,
@@ -410,9 +798,10 @@ bool Core::Initialize() {
             g_lastStepName ? g_lastStepName : "?");
         OutputDebugStringA(buf);
 
-        // Write to crash log
+        // Write to crash log next to the host process (Kenshi folder), not a
+        // hardcoded Steam path — the user may have Kenshi in any Steam library.
         FILE* f = nullptr;
-        fopen_s(&f, "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Kenshi\\KenshiOnline_CRASH.log", "a");
+        fopen_s(&f, "KenshiOnline_CRASH.log", "a");
         if (f) {
             fprintf(f, "\n%s", buf);
             auto* ctx = ep->ContextRecord;
@@ -421,9 +810,53 @@ bool Core::Initialize() {
             fprintf(f, "  RAX=0x%016llX RBX=0x%016llX RCX=0x%016llX RDX=0x%016llX\n",
                     (unsigned long long)ctx->Rax, (unsigned long long)ctx->Rbx,
                     (unsigned long long)ctx->Rcx, (unsigned long long)ctx->Rdx);
+            fprintf(f, "  R8 =0x%016llX R9 =0x%016llX R10=0x%016llX R11=0x%016llX\n",
+                    (unsigned long long)ctx->R8, (unsigned long long)ctx->R9,
+                    (unsigned long long)ctx->R10, (unsigned long long)ctx->R11);
+            fprintf(f, "  Source: SetUnhandledExceptionFilter (caught what VEH missed)\n");
             fclose(f);
         }
         return EXCEPTION_CONTINUE_SEARCH;
+    });
+
+    // RaiseFailFastException / __fastfail bypass both VEH and the unhandled
+    // exception filter on Win10+. Hook the C runtime's invalid-parameter,
+    // pure-call, and abort handlers so we get *some* trace before the process
+    // hard-exits via fast-fail.
+    _set_invalid_parameter_handler(
+        [](const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+            FILE* f = nullptr;
+            fopen_s(&f, "KenshiOnline_CRASH.log", "a");
+            if (f) {
+                fprintf(f, "\nKMP CRT TRIP: invalid_parameter_handler fired "
+                           "(LastCreate=#%d, tick=#%d, step=%d %s)\n",
+                        g_lastCharacterCreateNum, g_tickNumber, g_lastTickStep,
+                        g_lastStepName ? g_lastStepName : "?");
+                fclose(f);
+            }
+            OutputDebugStringA("KMP CRT TRIP: invalid_parameter_handler\n");
+        });
+    _set_purecall_handler([]() {
+        FILE* f = nullptr;
+        fopen_s(&f, "KenshiOnline_CRASH.log", "a");
+        if (f) {
+            fprintf(f, "\nKMP CRT TRIP: pure virtual call (LastCreate=#%d, tick=#%d, step=%d %s)\n",
+                    g_lastCharacterCreateNum, g_tickNumber, g_lastTickStep,
+                    g_lastStepName ? g_lastStepName : "?");
+            fclose(f);
+        }
+        OutputDebugStringA("KMP CRT TRIP: purecall\n");
+    });
+    signal(SIGABRT, [](int) {
+        FILE* f = nullptr;
+        fopen_s(&f, "KenshiOnline_CRASH.log", "a");
+        if (f) {
+            fprintf(f, "\nKMP CRT TRIP: SIGABRT (LastCreate=#%d, tick=#%d, step=%d %s)\n",
+                    g_lastCharacterCreateNum, g_tickNumber, g_lastTickStep,
+                    g_lastStepName ? g_lastStepName : "?");
+            fclose(f);
+        }
+        OutputDebugStringA("KMP CRT TRIP: SIGABRT\n");
     });
 
     OutputDebugStringA("KMP: === Kenshi-Online v0.1.0 Initializing ===\n");
@@ -457,6 +890,45 @@ bool Core::Initialize() {
     std::string configPath = ClientConfig::GetDefaultPath();
     m_config.Load(configPath);
     m_nativeHud.LogStep("INIT", "Config loaded");
+
+    // Apply experimental flags from config to their runtime sinks. Doing it
+    // once here keeps the call sites cheap (single atomic load instead of
+    // routing through Core::GetConfig() on every emit).
+    kmp::watcher::SetEnabled(m_config.verboseWatchLog);
+    g_kenshiCrashRecoveryEnabled.store(m_config.kenshiCrashRecovery,
+                                       std::memory_order_relaxed);
+
+    // Pattern-scan kenshi_x64.exe for the engine null-deref site so the
+    // VEH recovery handler arms with a build-correct RVA instead of a
+    // hardcoded one. Skip the scan entirely when the recovery is disabled
+    // by config — wasted work otherwise.
+    if (m_config.kenshiCrashRecovery) {
+        uintptr_t rva = ScanForKenshiNullDerefSite();
+        g_kenshiNullDerefRVA.store(rva, std::memory_order_relaxed);
+        if (rva != 0) {
+            spdlog::info("Core: kenshi-crash-recovery armed at game+0x{:X}", rva);
+        } else {
+            spdlog::warn("Core: kenshi-crash-recovery enabled but pattern not "
+                         "found in this build — recovery handler dormant");
+        }
+    } else {
+        spdlog::info("Core: kenshi-crash-recovery disabled by config");
+    }
+
+    // Arm the sign-extended Faction*+0x250 rescue. Independent of the
+    // null-deref recovery — different fault shape, different gate. No
+    // pattern scan needed; the rescue triggers on the AV target shape
+    // (upper 32 bits == 0xFFFFFFFF) regardless of which call site
+    // produced it.
+    g_factionSignExtRescueEnabled.store(m_config.factionSignExtRescue,
+                                        std::memory_order_relaxed);
+    if (m_config.factionSignExtRescue) {
+        spdlog::info("Core: faction-signext-rescue armed (catches AVs "
+                     "at 0xFFFFFFFF<low> and masks the offending GPR's "
+                     "high bits)");
+    } else {
+        spdlog::info("Core: faction-signext-rescue disabled by config");
+    }
 
     // Initialize game offsets (CE fallbacks)
     game::InitOffsetsFromScanner();
@@ -1007,6 +1479,16 @@ bool Core::InitHooks() {
         } else {
             m_nativeHud.LogStep("WARN", "AI hooks FAILED");
         }
+    }
+
+    // OurFactory — KMP-owned character spawner (process()-based, see
+    // native/our_factory.cpp). Only requires resolving process() RVA from
+    // module base; donor-derived (Faction*, GameData*) get filled in later
+    // by Hook_AICreate as characters load.
+    if (our_factory::Init()) {
+        m_nativeHud.LogStep("OK", "OurFactory ready (process() resolved)");
+    } else {
+        m_nativeHud.LogStep("WARN", "OurFactory init failed");
     }
 
     m_nativeHud.LogStep("OK", "All hooks installed");
@@ -1565,29 +2047,37 @@ void Core::OnGameLoaded() {
         }
     }
 
-    // Disable loading passthrough — CharacterCreate hook now runs full body.
-    // Loading is complete, so runtime NPC spawns (single/few at a time) go through
-    // the full hook for entity registration, faction capture, and NPC hijack.
-    entity_hooks::SetLoadingPassthrough(false);
-
-    // Log mod template characters captured during loading passthrough
-    {
-        void* modTemplates[16] = {};
-        int modCount = entity_hooks::GetCapturedModTemplates(modTemplates, 16);
-        if (modCount > 0) {
-            spdlog::info("Core::OnGameLoaded — {} mod template characters captured during loading", modCount);
-            m_nativeHud.LogStep("MOD", "Captured " + std::to_string(modCount) + " mod templates during load");
+    // CharacterCreate hook re-enable, gated by config.
+    //
+    // Empirical (test session 31640): every session that re-enabled this hook
+    // post-load silently terminated within milliseconds of the first runtime
+    // NPC create, regardless of what the detour did (including pure
+    // passthrough). The fault path is outside VEH/UEF/CRT coverage. Until a
+    // debugger pins down what specifically about the intercept corrupts
+    // engine state, the default is OFF — the wrapper's bypass-flag path
+    // becomes a single JMP to the raw trampoline (no global slot writes, no
+    // C++ detour entry, no stack-gap allocation). That matches "no hook at
+    // all" for runtime safety while keeping the hook *installed* so this
+    // flag can flip and the spawn pipeline re-arm cleanly.
+    //
+    // Trade-off when disabled: SpawnManager never gets factory data, so
+    // server-driven remote-player spawning won't work. shared_save_sync
+    // still locates existing in-world Player 1 / Player 2 via char_tracker
+    // — that is enough for two players sharing the same save world to see
+    // each other.
+    if (m_config.enableCharacterCreateHook) {
+        if (HookManager::Get().Enable("CharacterCreate")) {
+            spdlog::info("Core::OnGameLoaded — CharacterCreate hook ENABLED "
+                         "(experimental, may trip the Kenshi-side intercept fault)");
+            m_nativeHud.LogStep("HOOK", "CharacterCreate enabled (post-load, experimental)");
+        } else {
+            spdlog::warn("Core::OnGameLoaded — CharacterCreate Enable() returned false");
+            m_nativeHud.LogStep("WARN", "CharacterCreate enable failed");
         }
-    }
-
-    // Ensure CharacterCreate hook is enabled (it should already be from install,
-    // but re-enable in case it was disabled by the loading capture code path).
-    if (HookManager::Get().Enable("CharacterCreate")) {
-        spdlog::info("Core::OnGameLoaded — CharacterCreate hook ENABLED (full mode for runtime spawns)");
-        m_nativeHud.LogStep("HOOK", "CharacterCreate enabled (post-load)");
     } else {
-        spdlog::warn("Core::OnGameLoaded — CharacterCreate Enable() returned false");
-        m_nativeHud.LogStep("WARN", "CharacterCreate enable failed");
+        spdlog::info("Core::OnGameLoaded — CharacterCreate hook STAYS DISABLED "
+                     "(default; flip enableCharacterCreateHook to test)");
+        m_nativeHud.LogStep("HOOK", "CharacterCreate stays disabled (safety)");
     }
 
     // ═══ DUMP ALL FUNCTIONS AND OFFSETS ═══
@@ -2039,6 +2529,17 @@ void Core::OnGameTick(float deltaTime) {
         OutputDebugStringA(buf);
     }
 
+    // ── Process any pending hook-state changes queued from inside a hook
+    //    callback (e.g. CharacterCreate self-disable after first capture).
+    //    This MUST run before any of the pipeline / connected-only short-circuits
+    //    so the hook is always disabled promptly even during loading-only sessions.
+    entity_hooks::PollDeferredHookState();
+
+    // Drive the GameWorld faction harvester. Cheap no-op once a faction is
+    // already published. Runs unconditionally — even when not connected — so
+    // faction is ready by the time the first remote spawn arrives.
+    entity_hooks::HarvestFactionFromGameWorld();
+
     if (!m_connected) return;
 
     // ── Per-frame dedup guard ──
@@ -2434,6 +2935,17 @@ void Core::OnGameTick(float deltaTime) {
 
     g_lastTickStep = 15; g_lastStepName = "tick_complete";
     WriteBreadcrumb("tick_complete", s_tickCallCount, 15);
+
+    // Watcher: every Nth tick, write a "tick_complete EXIT" so we can tell
+    // whether OnGameTick returned cleanly or terminated mid-step. Throttled
+    // because OnGameTick fires hundreds of times per second. Disabled by
+    // default — flip verboseWatchLog in client.json to enable.
+    if (kmp::watcher::IsEnabled() && (s_tickCallCount <= 30 || s_tickCallCount % 100 == 0)) {
+        spdlog::info("WATCH/TICK: tick_complete EXIT (call #{}, dt={:.4f})",
+                     s_tickCallCount, deltaTime);
+        auto logger = spdlog::default_logger();
+        if (logger) logger->flush();
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3020,6 +3532,21 @@ void Core::HandleSpawnQueue() {
     static int64_t s_lastNotReadyLog = 0;
     static auto s_lastDirectAttempt = std::chrono::steady_clock::time_point{};
 
+    // ── Brainer-guided hook-free factory discovery ──
+    // Cartographer/SpeshimenQursiveBrainer reported every entry in
+    // RootObjectFactory as hookBad (8/8 = 100%), so we don't depend
+    // on the CharacterCreate hook to capture the factory anymore.
+    // Read GameWorld+0x4A0 directly each tick the spawn manager is
+    // still un-ready.  Validates against the vtable RVA recorded in
+    // re_kenshi 2/manual_findings/notes/RootObjectFactory.vtable.md;
+    // bad reads return false silently and keep retrying next tick.
+    if (!m_spawnManager.IsReady()) {
+        if (m_spawnManager.TryDiscoverFactoryFromGameWorld()) {
+            m_nativeHud.LogStep("SPAWN",
+                "Factory captured via GameWorld+0x4A0 (hook-free)");
+        }
+    }
+
     if (m_needSpawnQueueReset) {
         m_needSpawnQueueReset = false;
         heapScanned = false;
@@ -3134,6 +3661,20 @@ void Core::HandleSpawnQueue() {
             s_lastDirectAttempt = std::chrono::steady_clock::now();
             SpawnRequest spawnReq;
             if (m_spawnManager.PopNextSpawn(spawnReq)) {
+                if (spawnReq.owner == 0 || spawnReq.type != EntityType::PlayerCharacter) {
+                    spdlog::warn("Core: dropping unsafe spawn request entity {} owner={} type={} "
+                                 "(only remote PlayerCharacter owners are materialized)",
+                                 spawnReq.netId, spawnReq.owner,
+                                 static_cast<int>(spawnReq.type));
+                    m_entityRegistry.Unregister(spawnReq.netId);
+                    return;
+                }
+
+                if (spawnReq.owner == m_localPlayerId) {
+                    spdlog::debug("Core: dropping self-owned spawn request entity {} owner={}",
+                                  spawnReq.netId, spawnReq.owner);
+                    return;
+                }
                 // ── Per-player spawn cap ──
                 // Only spawn 1 character per remote player to prevent squad panel flooding.
                 // The remote player's primary character is sufficient for co-op gameplay.
@@ -3173,12 +3714,10 @@ void Core::HandleSpawnQueue() {
 
                 // ── PATH 2: createRandomChar (immediate fallback — wrong appearance) ──
                 if (!newChar) {
-                    spdlog::info("Core: createRandomChar FALLBACK for entity {} owner={} "
+                    spdlog::warn("Core: createRandomChar fallback disabled for entity {} owner={} "
                                  "(modTemplate {})",
                                  spawnReq.netId, spawnReq.owner,
                                  hasModTemplates ? "failed" : "not available");
-
-                    newChar = entity_hooks::CallFactoryCreateRandom(m_spawnManager.GetFactory());
                 }
 
                 uintptr_t newCharAddr = reinterpret_cast<uintptr_t>(newChar);

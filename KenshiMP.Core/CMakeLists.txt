@@ -64,6 +64,8 @@ add_library(KenshiMP.Core SHARED
     ui/mygui_bridge.cpp
     ui/native_menu.cpp
     ui/native_hud.cpp
+    # Native KMP-owned character construction
+    native/our_factory.cpp
 )
 
 target_include_directories(KenshiMP.Core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

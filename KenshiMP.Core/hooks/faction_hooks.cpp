@@ -5,6 +5,7 @@
 #include "kmp/messages.h"
 #include "../core.h"
 #include "../game/game_types.h"
+#include "../sys/watcher.h"
 #include "kmp/memory.h"
 #include <atomic>
 #include <spdlog/spdlog.h>
@@ -35,6 +36,12 @@ static bool SEH_FactionRelation(void* factionA, void* factionB, float relation) 
 
 static void __fastcall Hook_FactionRelation(void* factionA, void* factionB, float relation) {
     s_relationChangeCount++;
+    if (kmp::watcher::IsEnabled()) {
+        spdlog::info("WATCH/HOOK: FactionRelation enter (A=0x{:X}, B=0x{:X}, rel={:.2f})",
+                     reinterpret_cast<uintptr_t>(factionA),
+                     reinterpret_cast<uintptr_t>(factionB), relation);
+        spdlog::default_logger()->flush();
+    }
 
     if (!SEH_FactionRelation(factionA, factionB, relation)) {
         spdlog::error("faction_hooks: FactionRelation crashed");

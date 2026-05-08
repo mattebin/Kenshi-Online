@@ -30,8 +30,9 @@ bool GameServer::Start(const ServerConfig& config) {
 
     // ── UPnP / Firewall: do this BEFORE listening ──
     // The server doesn't accept any connections until the port is mapped.
-    spdlog::info("GameServer: Setting up port forwarding for port {}...", config.port);
-    if (m_upnp.AddMapping(config.port, config.port, "UDP", "KenshiMP Server")) {
+    if (config.enablePortForwarding) {
+        spdlog::info("GameServer: Setting up port forwarding for port {}...", config.port);
+        if (m_upnp.AddMapping(config.port, config.port, "UDP", "KenshiMP Server")) {
         std::string extIP = m_upnp.GetExternalIP();
         if (!extIP.empty()) {
             spdlog::info("GameServer: UPnP mapped! Others can join at {}:{}", extIP, config.port);
@@ -56,6 +57,10 @@ bool GameServer::Start(const ServerConfig& config) {
     }
 
     // ── Now start listening — port is mapped (or we tried our best) ──
+    } else {
+        spdlog::info("GameServer: Port forwarding disabled; listening locally/LAN only on UDP {}", config.port);
+    }
+
     ENetAddress address;
     address.host = ENET_HOST_ANY;
     address.port = config.port;
@@ -750,6 +755,7 @@ void GameServer::HandlePositionUpdate(ConnectedPlayer& player, PacketReader& rea
     if (!reader.ReadU8(count)) return;
 
     bool playerPosUpdated = false;
+    std::vector<CharacterPosition> sharedSavePositions;
     for (uint8_t i = 0; i < count; i++) {
         CharacterPosition pos;
         if (!reader.ReadRaw(&pos, sizeof(pos))) break;
@@ -761,6 +767,16 @@ void GameServer::HandlePositionUpdate(ConnectedPlayer& player, PacketReader& rea
             std::abs(pos.posZ) > 1000000.f) {
             spdlog::warn("GameServer: Rejected invalid position from '{}' entity {} ({},{},{})",
                          player.name, pos.entityId, pos.posX, pos.posY, pos.posZ);
+            continue;
+        }
+
+        if (pos.entityId == 0) {
+            player.position = Vec3(pos.posX, pos.posY, pos.posZ);
+            player.zone = ZoneCoord::FromWorldPos(player.position);
+            playerPosUpdated = true;
+            if (sharedSavePositions.size() < 255) {
+                sharedSavePositions.push_back(pos);
+            }
             continue;
         }
 
@@ -780,6 +796,30 @@ void GameServer::HandlePositionUpdate(ConnectedPlayer& player, PacketReader& rea
                 player.zone = ZoneCoord::FromWorldPos(player.position);
                 playerPosUpdated = true;
             }
+        }
+    }
+
+    if (!sharedSavePositions.empty()) {
+        PacketWriter writer;
+        writer.WriteHeader(MessageType::S2C_PositionUpdate);
+        writer.WriteU32(player.id);
+        writer.WriteU8(static_cast<uint8_t>(sharedSavePositions.size()));
+        for (const auto& pos : sharedSavePositions) {
+            writer.WriteRaw(&pos, sizeof(pos));
+        }
+
+        int relayedTo = 0;
+        for (auto& [id, other] : m_players) {
+            if (id == player.id || !other.peer) continue;
+            ENetPacket* pkt = enet_packet_create(writer.Data(), writer.Size(), 0);
+            enet_peer_send(other.peer, KMP_CHANNEL_UNRELIABLE_SEQ, pkt);
+            relayedTo++;
+        }
+
+        static int s_sharedRelayLogCount = 0;
+        if (++s_sharedRelayLogCount <= 5 || s_sharedRelayLogCount % 100 == 0) {
+            spdlog::debug("GameServer: Relayed {} shared-save position(s) from '{}' (playerId={}) to {} peer(s)",
+                          sharedSavePositions.size(), player.name, player.id, relayedTo);
         }
     }
 }
@@ -962,7 +1002,9 @@ void GameServer::BroadcastPositions() {
         // zone mismatch was preventing players from ever seeing each other).
         std::vector<const ServerEntity*> nearby;
         for (auto& [entityId, entity] : m_entities) {
+            if (entity.owner == 0) continue;
             if (entity.owner == playerId) continue; // Don't send own entities back
+            if (!GetPlayer(entity.owner)) continue;
             nearby.push_back(&entity);
         }
 
@@ -1222,9 +1264,25 @@ void GameServer::HandleZoneRequest(ConnectedPlayer& player, PacketReader& reader
 
     ZoneCoord requestedZone(zoneX, zoneY);
 
-    // Send all entities in the requested zone (and adjacent zones) to this player
+    int sent = 0;
+    int skippedServerOwned = 0;
+    int skippedOwn = 0;
+    int skippedOrphan = 0;
+
+    // Send player-owned remote entities in the requested zone (and adjacent zones) to this player.
     for (auto& [entityId, entity] : m_entities) {
-        if (entity.owner == player.id) continue; // Don't send own entities
+        if (entity.owner == 0) {
+            skippedServerOwned++;
+            continue;
+        }
+        if (entity.owner == player.id) {
+            skippedOwn++;
+            continue;
+        }
+        if (!GetPlayer(entity.owner)) {
+            skippedOrphan++;
+            continue;
+        }
         if (!requestedZone.IsAdjacent(entity.zone) && !(entity.zone.x == zoneX && entity.zone.y == zoneY))
             continue;
 
@@ -1257,17 +1315,37 @@ void GameServer::HandleZoneRequest(ConnectedPlayer& player, PacketReader& reader
             continue;
         }
         enet_peer_send(player.peer, KMP_CHANNEL_RELIABLE_ORDERED, pkt);
+        sent++;
+    }
+
+    if (skippedServerOwned > 0 || skippedOwn > 0 || skippedOrphan > 0) {
+        spdlog::debug("GameServer: Zone request for '{}' sent {} remote entities (filtered serverOwned={}, own={}, orphan={})",
+                      player.name, sent, skippedServerOwned, skippedOwn, skippedOrphan);
     }
 }
 
 void GameServer::SendWorldSnapshot(ConnectedPlayer& player) {
     int sent = 0;
+    int skippedServerOwned = 0;
+    int skippedOwn = 0;
     int skippedOrphan = 0;
     int skippedPosition = 0;
 
     for (auto& [entityId, entity] : m_entities) {
-        // Skip entities owned by disconnected players (orphans from stale saves)
-        if (entity.owner != 0 && !GetPlayer(entity.owner)) {
+        // Owner 0 is server/NPC world state; do not materialize it as a remote co-op player.
+        if (entity.owner == 0) {
+            skippedServerOwned++;
+            continue;
+        }
+
+        // A joining client should not receive stale copies of its own previously published entity.
+        if (entity.owner == player.id) {
+            skippedOwn++;
+            continue;
+        }
+
+        // Skip entities owned by disconnected players (orphans from stale saves).
+        if (!GetPlayer(entity.owner)) {
             skippedOrphan++;
             continue;
         }
@@ -1334,11 +1412,12 @@ void GameServer::SendWorldSnapshot(ConnectedPlayer& player) {
         sent++;
     }
 
-    if (skippedOrphan > 0 || skippedPosition > 0) {
-        spdlog::warn("GameServer: SendWorldSnapshot filtered {}/{} entities (orphan={}, badPos={})",
-                     skippedOrphan + skippedPosition, m_entities.size(), skippedOrphan, skippedPosition);
+    if (skippedServerOwned > 0 || skippedOwn > 0 || skippedOrphan > 0 || skippedPosition > 0) {
+        spdlog::warn("GameServer: SendWorldSnapshot filtered {}/{} entities (serverOwned={}, own={}, orphan={}, badPos={})",
+                     skippedServerOwned + skippedOwn + skippedOrphan + skippedPosition, m_entities.size(),
+                     skippedServerOwned, skippedOwn, skippedOrphan, skippedPosition);
     }
-    spdlog::info("GameServer: Sent {} valid entities to player '{}'", sent, player.name);
+    spdlog::info("GameServer: Sent {} valid remote entities to player '{}'", sent, player.name);
 }
 
 // ── Broadcasting ──

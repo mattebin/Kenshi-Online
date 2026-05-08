@@ -1557,7 +1557,8 @@ void CommandRegistry::RegisterBuiltins() {
                 newChar = sm.SpawnCharacterDirect(&req.position, modSlot);
             }
             if (!newChar) {
-                newChar = entity_hooks::CallFactoryCreateRandom(sm.GetFactory());
+                newChar = entity_hooks::CallFactoryCreateRandom(
+                    sm.GetFactory(), req.position.x, req.position.y, req.position.z);
             }
 
             uintptr_t addr = reinterpret_cast<uintptr_t>(newChar);
