@@ -212,24 +212,24 @@ if exist "%~dp0server.json" (
 echo  [8/9] Writing default client config...
 set "CLIENT_CFG_DIR=%APPDATA%\KenshiMP"
 if not exist "%CLIENT_CFG_DIR%" mkdir "%CLIENT_CFG_DIR%"
-if not exist "%CLIENT_CFG_DIR%\client.json" (
-    > "%CLIENT_CFG_DIR%\client.json" (
-        echo {
-        echo   "autoConnect": true,
-        echo   "favoriteServers": ["31.208.67.17:27802"],
-        echo   "lastPort": 27802,
-        echo   "lastServer": "31.208.67.17",
-        echo   "masterPort": 27801,
-        echo   "masterServer": "127.0.0.1",
-        echo   "overlayScale": 1.0,
-        echo   "playerName": "Player",
-        echo   "useSyncOrchestrator": false
-        echo }
-    )
-    echo         %CLIENT_CFG_DIR%\client.json
-) else (
-    echo         client.json already exists, leaving as-is
+if exist "%CLIENT_CFG_DIR%\client.json" (
+    copy /Y "%CLIENT_CFG_DIR%\client.json" "%CLIENT_CFG_DIR%\client.json.before-kenshimp-%STAMP%" >nul
+    echo         backed up existing client.json
 )
+> "%CLIENT_CFG_DIR%\client.json" (
+    echo {
+    echo   "autoConnect": true,
+    echo   "favoriteServers": ["31.208.67.17:27802"],
+    echo   "lastPort": 27802,
+    echo   "lastServer": "31.208.67.17",
+    echo   "masterPort": 27801,
+    echo   "masterServer": "127.0.0.1",
+    echo   "overlayScale": 1.0,
+    echo   "playerName": "Player",
+    echo   "useSyncOrchestrator": false
+    echo }
+)
+echo         %CLIENT_CFG_DIR%\client.json
 
 echo  [9/9] Final checks...
 if exist "%KENSHI_DIR%\KenshiMP.Core.dll" ( echo         Core DLL installed )

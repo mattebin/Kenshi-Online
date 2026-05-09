@@ -4,7 +4,8 @@ Use this for the first real multiplayer spawn test.
 
 This package includes the shared test save `123`. The installer copies it to
 `%LOCALAPPDATA%\kenshi\save\123` and backs up any existing save with that name.
-Autoconnect is enabled by default for the current public test server.
+Autoconnect is enabled by default for the current public test server. The installer
+backs up and rewrites `%APPDATA%\KenshiMP\client.json` for this test.
 
 ## Host
 

@@ -11,9 +11,10 @@ This is a test build, not a finished co-op release. Connection, server join, UI,
 3. Run `install.bat`.
 4. Let it auto-detect Kenshi, or paste the Kenshi folder path when asked.
 5. The installer also copies the shared test save to `%LOCALAPPDATA%\kenshi\save\123`.
-6. Start `KenshiMP.Server.exe`.
-7. Launch Kenshi from Steam.
-8. Use **Load Game** with save `123` and wait for autoconnect after the save loads.
+6. The installer backs up and rewrites `%APPDATA%\KenshiMP\client.json` for this autoconnect test.
+7. Start `KenshiMP.Server.exe`.
+8. Launch Kenshi from Steam.
+9. Use **Load Game** with save `123` and wait for autoconnect after the save loads.
 
 The installer backs up changed files to:
 
