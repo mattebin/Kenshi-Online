@@ -216,9 +216,9 @@ if not exist "%CLIENT_CFG_DIR%\client.json" (
     > "%CLIENT_CFG_DIR%\client.json" (
         echo {
         echo   "autoConnect": true,
-        echo   "favoriteServers": ["127.0.0.1:27800"],
-        echo   "lastPort": 27800,
-        echo   "lastServer": "127.0.0.1",
+        echo   "favoriteServers": ["31.208.67.17:27802"],
+        echo   "lastPort": 27802,
+        echo   "lastServer": "31.208.67.17",
         echo   "masterPort": 27801,
         echo   "masterServer": "127.0.0.1",
         echo   "overlayScale": 1.0,
@@ -247,7 +247,7 @@ echo   Quick local test:
 echo    1. Run KenshiMP.Server.exe
 echo    2. Launch Kenshi from Steam
 echo    3. Load Game: 123
-echo    4. Join 127.0.0.1:27800 from the multiplayer menu
+echo    4. Wait for autoconnect after the save loads
 echo.
 echo   Alpha warning:
 echo    - Passive fake-client relay is safe for testing.

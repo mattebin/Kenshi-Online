@@ -34,5 +34,5 @@ KenshiMP-alpha-2026-05-08-installer.zip
 
 This is an alpha installer for people helping test Kenshi-Online. Use it only with Kenshi 1.0.68 x64. The UI, server join, passive fake-client relay, and local host position broadcast have been tested. Real remote player spawning is enabled for testing but may crash, so back up saves first.
 
-Install by extracting the zip and running `install.bat`. This package includes the shared test save `123`; both players should use **Load Game** with that save, not **New Game**. First test should be a controlled two-player spawn test using the checklist in `JOINING.md`.
+Install by extracting the zip and running `install.bat`. This package includes the shared test save `123`; both players should use **Load Game** with that save, not **New Game**. Autoconnect is enabled by default for the current public test server. First test should be a controlled two-player spawn test using the checklist in `JOINING.md`.
 

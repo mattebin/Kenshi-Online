@@ -13,7 +13,7 @@ This is a test build, not a finished co-op release. Connection, server join, UI,
 5. The installer also copies the shared test save to `%LOCALAPPDATA%\kenshi\save\123`.
 6. Start `KenshiMP.Server.exe`.
 7. Launch Kenshi from Steam.
-8. Use **Load Game** with save `123`, open Multiplayer, and join `127.0.0.1:27800`.
+8. Use **Load Game** with save `123` and wait for autoconnect after the save loads.
 
 The installer backs up changed files to:
 
@@ -52,7 +52,7 @@ Host:
 1. Run `KenshiMP.Server.exe`.
 2. Launch Kenshi.
 3. Use **Load Game** with save `123`. Do not use **New Game** for the multiplayer test.
-4. Join `127.0.0.1:27800`.
+4. Wait for autoconnect after the save loads.
 5. Wait for player 2 before moving.
 
 Other player:
@@ -60,7 +60,7 @@ Other player:
 1. Install the same package.
 2. Launch Kenshi.
 3. Use **Load Game** with save `123`. Do not use **New Game** for the multiplayer test.
-4. Join the host IP on UDP port `27800`.
+4. Wait for autoconnect to `31.208.67.17:27802` after the save loads.
 5. Wait 20-30 seconds after joining.
 6. Move only a few steps for the first test.
 
@@ -89,5 +89,6 @@ In Kenshi, FakeBob should join the server but no FakeBob body should spawn.
 - Client-side time apply is not presented as working.
 - Server is local/LAN by default; internet play requires UDP `27800` forwarding.
 - Both players must use the exact same package/build.
+- Autoconnect is enabled by default for `31.208.67.17:27802` in this test package.
 - If Kenshi fails to launch after testing, run `uninstall.bat` or verify game files in Steam.
 
