@@ -1760,18 +1760,32 @@ void Core::OnLoadingGapDetected() {
     }
 }
 
-// SEH-protected CharacterIterator count (no C++ objects with destructors in __try)
-static int SEH_CharacterIteratorCount() {
+// SEH-protected CharacterIterator count (no C++ objects with destructors in __try).
+// The fallback path can bypass the loading guard after globals have been stable
+// long enough that a missing create-hook signal is the thing keeping us stuck.
+static int SEH_CharacterIteratorCount(bool bypassLoadingGuard = false) {
+    bool restoreLoadingGuard = false;
+    if (bypassLoadingGuard && game::IsGameLoading()) {
+        game::SetGameLoadingState(false);
+        restoreLoadingGuard = true;
+    }
+
+    int count = -1;
     __try {
         game::CharacterIterator iter;
-        return iter.Count();
+        count = iter.Count();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static int s_crashCount = 0;
         if (++s_crashCount <= 5) {
             OutputDebugStringA("KMP: SEH_CharacterIteratorCount crashed (SEH caught)\n");
         }
-        return -1;
+        count = -1;
     }
+
+    if (restoreLoadingGuard && count <= 0) {
+        game::SetGameLoadingState(true);
+    }
+    return count;
 }
 
 void Core::PollForGameLoad() {
@@ -1861,7 +1875,7 @@ void Core::PollForGameLoad() {
         // loaded via a path that doesn't create characters). Try CharacterIterator
         // as a last resort — by now loading should be complete so the lektor is stable.
         if (s_noCharCount >= 30 && (playerBaseValid || gameWorldValid)) {
-            int charCount = SEH_CharacterIteratorCount();
+            int charCount = SEH_CharacterIteratorCount(true);
             if (charCount > 0) {
                 spdlog::warn("Core::PollForGameLoad — fallback: CharacterIterator found {} chars "
                              "after {} polls with no create events", charCount, s_noCharCount);
