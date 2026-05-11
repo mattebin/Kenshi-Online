@@ -11,6 +11,8 @@ KenshiMP-alpha-2026-05-08-installer.zip
 - Adds an end-user installer package around the current KenshiMP build.
 - Installs Core, server, dashboard, fake test client, watchdog/probe/log tools, layouts, and `kenshi-online.mod`.
 - Backs up `Plugins_x64.cfg`, main menu layout, `__mods.list`, and existing KenshiMP binaries.
+- Supports both manual in-game joining and optional autoconnect.
+- Creates a neutral client config only when one does not already exist; existing config is backed up and left alone.
 - Detects common Steam/GOG Kenshi paths, including `C:\SteamLibrary\Steam\steamapps\common\Kenshi`.
 - Includes passive fake-client test instructions.
 - Documents that real remote spawning is still alpha/risky.
@@ -34,5 +36,5 @@ KenshiMP-alpha-2026-05-08-installer.zip
 
 This is an alpha installer for people helping test Kenshi-Online. Use it only with Kenshi 1.0.68 x64. The UI, server join, passive fake-client relay, and local host position broadcast have been tested. Real remote player spawning is enabled for testing but may crash, so back up saves first.
 
-Install by extracting the zip and running `install.bat`. This package includes the shared test save `123`; both players should use **Load Game** with that save, not **New Game**. Autoconnect is enabled by default for the current public test server. First test should be a controlled two-player spawn test using the checklist in `JOINING.md`.
+Install by extracting the zip and running `install.bat`. This package includes the shared test save `123`; both players should use **Load Game** with that save, not **New Game**. Manual in-game joining is the default path: load the save, open Multiplayer/F1, choose **JOIN GAME**, enter the host IP and port, and connect. Autoconnect remains supported when enabled in the in-game settings or `%APPDATA%\KenshiMP\client.json`. First test should be a controlled two-player spawn test using the checklist in `JOINING.md`.
 

@@ -4,8 +4,13 @@ Use this for the first real multiplayer spawn test.
 
 This package includes the shared test save `123`. The installer copies it to
 `%LOCALAPPDATA%\kenshi\save\123` and backs up any existing save with that name.
-Autoconnect is enabled by default for the current public test server. The installer
-backs up and rewrites `%APPDATA%\KenshiMP\client.json` for this test.
+The installer creates a neutral `%APPDATA%\KenshiMP\client.json` only if one does
+not already exist. Existing config is backed up and left alone.
+
+Use either join mode:
+
+- Manual in-game join: load into the world, open Multiplayer/F1, choose **JOIN GAME**, enter IP and port, then press **CONNECT**.
+- Autoconnect: enable auto-connect in the in-game settings or set `autoConnect` to `true` in `client.json` with the wanted `lastServer` and `lastPort`.
 
 ## Host
 
@@ -14,7 +19,7 @@ backs up and rewrites `%APPDATA%\KenshiMP\client.json` for this test.
 3. Run `KenshiMP.Server.exe`.
 4. Launch Kenshi from Steam.
 5. Use **Load Game** and load save `123`. Do not use **New Game** for this test.
-6. Wait for autoconnect after the save loads.
+6. Open Multiplayer/F1, choose **JOIN GAME**, and connect to `127.0.0.1:27800`.
 7. Wait until player 2 joins and spawns.
 8. Move a few steps only.
 9. Exit cleanly.
@@ -24,7 +29,7 @@ backs up and rewrites `%APPDATA%\KenshiMP\client.json` for this test.
 1. Install the exact same release package with `install.bat`.
 2. Launch Kenshi from Steam.
 3. Use **Load Game** and load save `123`. Do not use **New Game**.
-4. Wait for autoconnect to `31.208.67.17:27802` after the save loads.
+4. Open Multiplayer/F1, choose **JOIN GAME**, and connect to the host IP and port.
 5. Wait 20-30 seconds after joining.
 6. Confirm whether the host and your character are visible.
 7. Move a few steps only.

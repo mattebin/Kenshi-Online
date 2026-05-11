@@ -214,22 +214,23 @@ set "CLIENT_CFG_DIR=%APPDATA%\KenshiMP"
 if not exist "%CLIENT_CFG_DIR%" mkdir "%CLIENT_CFG_DIR%"
 if exist "%CLIENT_CFG_DIR%\client.json" (
     copy /Y "%CLIENT_CFG_DIR%\client.json" "%CLIENT_CFG_DIR%\client.json.before-kenshimp-%STAMP%" >nul
-    echo         backed up existing client.json
+    echo         client.json already exists, backed up and left as-is
+) else (
+    > "%CLIENT_CFG_DIR%\client.json" (
+        echo {
+        echo   "autoConnect": false,
+        echo   "favoriteServers": ["127.0.0.1:27800"],
+        echo   "lastPort": 27800,
+        echo   "lastServer": "127.0.0.1",
+        echo   "masterPort": 27801,
+        echo   "masterServer": "127.0.0.1",
+        echo   "overlayScale": 1.0,
+        echo   "playerName": "Player",
+        echo   "useSyncOrchestrator": false
+        echo }
+    )
+    echo         %CLIENT_CFG_DIR%\client.json
 )
-> "%CLIENT_CFG_DIR%\client.json" (
-    echo {
-    echo   "autoConnect": true,
-    echo   "favoriteServers": ["31.208.67.17:27802"],
-    echo   "lastPort": 27802,
-    echo   "lastServer": "31.208.67.17",
-    echo   "masterPort": 27801,
-    echo   "masterServer": "127.0.0.1",
-    echo   "overlayScale": 1.0,
-    echo   "playerName": "Player",
-    echo   "useSyncOrchestrator": false
-    echo }
-)
-echo         %CLIENT_CFG_DIR%\client.json
 
 echo  [9/9] Final checks...
 if exist "%KENSHI_DIR%\KenshiMP.Core.dll" ( echo         Core DLL installed )
@@ -247,7 +248,7 @@ echo   Quick local test:
 echo    1. Run KenshiMP.Server.exe
 echo    2. Launch Kenshi from Steam
 echo    3. Load Game: 123
-echo    4. Wait for autoconnect after the save loads
+echo    4. Open Multiplayer/F1, JOIN GAME, connect to 127.0.0.1:27800
 echo.
 echo   Alpha warning:
 echo    - Passive fake-client relay is safe for testing.

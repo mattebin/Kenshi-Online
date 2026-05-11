@@ -11,10 +11,10 @@ This is a test build, not a finished co-op release. Connection, server join, UI,
 3. Run `install.bat`.
 4. Let it auto-detect Kenshi, or paste the Kenshi folder path when asked.
 5. The installer also copies the shared test save to `%LOCALAPPDATA%\kenshi\save\123`.
-6. The installer backs up and rewrites `%APPDATA%\KenshiMP\client.json` for this autoconnect test.
+6. The installer creates a neutral `%APPDATA%\KenshiMP\client.json` only if one does not already exist. Existing config is backed up and left alone.
 7. Start `KenshiMP.Server.exe`.
 8. Launch Kenshi from Steam.
-9. Use **Load Game** with save `123` and wait for autoconnect after the save loads.
+9. Use **Load Game** with save `123`, then join manually from the in-game Multiplayer/F1 menu.
 
 The installer backs up changed files to:
 
@@ -23,6 +23,25 @@ The installer backs up changed files to:
 ```
 
 Run `uninstall.bat` to remove the mod and restore backed-up files.
+
+## Joining Modes
+
+This build supports both join flows.
+
+Manual in-game join:
+
+1. Load into the world first.
+2. Open the Multiplayer/F1 menu.
+3. Choose **JOIN GAME**.
+4. Enter the server IP and port, then press **CONNECT**.
+
+Autoconnect:
+
+1. Enable auto-connect in the in-game Multiplayer settings, or set `autoConnect` to `true` in `%APPDATA%\KenshiMP\client.json`.
+2. Set `lastServer` and `lastPort` to the server you want.
+3. Load into the world and let the client connect automatically.
+
+The dashboard is optional. Use it if you want helper status/log windows; it is not required for manual in-game join.
 
 ## Files Included
 
@@ -53,7 +72,7 @@ Host:
 1. Run `KenshiMP.Server.exe`.
 2. Launch Kenshi.
 3. Use **Load Game** with save `123`. Do not use **New Game** for the multiplayer test.
-4. Wait for autoconnect after the save loads.
+4. Open Multiplayer/F1, choose **JOIN GAME**, and connect to `127.0.0.1:27800`.
 5. Wait for player 2 before moving.
 
 Other player:
@@ -61,7 +80,7 @@ Other player:
 1. Install the same package.
 2. Launch Kenshi.
 3. Use **Load Game** with save `123`. Do not use **New Game** for the multiplayer test.
-4. Wait for autoconnect to `31.208.67.17:27802` after the save loads.
+4. Open Multiplayer/F1, choose **JOIN GAME**, and connect to the host IP and port.
 5. Wait 20-30 seconds after joining.
 6. Move only a few steps for the first test.
 
@@ -90,6 +109,6 @@ In Kenshi, FakeBob should join the server but no FakeBob body should spawn.
 - Client-side time apply is not presented as working.
 - Server is local/LAN by default; internet play requires UDP `27800` forwarding.
 - Both players must use the exact same package/build.
-- Autoconnect is enabled by default for `31.208.67.17:27802` in this test package.
+- Autoconnect is supported but not forced by the installer.
 - If Kenshi fails to launch after testing, run `uninstall.bat` or verify game files in Steam.
 
